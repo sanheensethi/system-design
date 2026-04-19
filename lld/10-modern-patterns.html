@@ -1,0 +1,2132 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Modern Patterns (2026) — Book I · LLD</title>
+<link rel="stylesheet" href="../assets/css/style.css">
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">System Design Books</div>
+    <div class="brand-sub">by Sanheen · Progressive Learning</div>
+    <div class="nav-section">
+      <h3>Home</h3>
+      <a href="../index.html">Overview</a>
+    </div>
+    <div class="nav-section">
+      <h3>Book I — Low Level Design</h3>
+      <a href="index.html">LLD Index</a>
+      <a href="01-foundations.html">1. Foundations (OOP, SOLID)</a>
+      <a href="02-patterns.html">2. Design Patterns Primer</a>
+      <a href="03-basic-problems.html">3. Basic Problems</a>
+      <a href="04-intermediate.html">4. Intermediate Problems</a>
+      <a href="05-advanced.html">5. Advanced Problems</a>
+      <a href="06-concurrency.html">6. Concurrency in LLD</a>
+      <a href="07-war-room.html">7. War Room Scenarios</a>
+      <a href="08-real-code.html">8. Real Company Code</a>
+      <a href="09-real-world.html">9. Applying LLD in Real Work</a>
+      <a href="10-modern-patterns.html">10. Modern Patterns (2026)</a>
+      <a href="11-modern-problems.html">11. Modern 2026 Problems</a>
+    </div>
+    <div class="nav-section">
+      <h3>Book II — High Level Design</h3>
+      <a href="../hld/index.html">HLD Index</a>
+    </div>
+    <div class="nav-section">
+      <h3>Book III — AI System Design</h3>
+      <a href="../ai/index.html">AI Index</a>
+    </div>
+  </aside>
+  <main class="main">
+    <div class="breadcrumb"><a href="../index.html">Home</a> / <a href="index.html">Book I · LLD</a> / Chapter 10</div>
+    <h1>Chapter 10: Modern Patterns (2026)</h1>
+
+    <p>Chapter 2 covered the 12 classical Gang of Four patterns you are expected to recognize. This chapter covers the other 12 — the ones that either were not in the 1994 GoF book, or that only became <em>critical</em> once codebases went distributed, async, and domain-driven. If Chapter 2 taught you the grammar, this chapter teaches you the idioms real engineers reach for in 2026.</p>
+
+    <div class="callout">
+      <div class="callout-title">What you will learn</div>
+      <p>For each pattern: the <strong>pain</strong> without it (a smelly 10–20 line snippet), the <strong>fix</strong> (a working Python 3 implementation), when to reach for it, when it is over-engineering, and the libraries/frameworks in the wild that use it. At the end: an anti-pattern section (what not to do) and a composition map showing how these patterns combine to form production architectures.</p>
+    </div>
+
+    <div class="callout warn">
+      <div class="callout-title">A note on Python</div>
+      <p>All code samples use Python 3.11+. These are patterns, not benchmarks — readability beats cleverness. In real systems, favor dataclasses, type hints, and composition over inheritance. The "pain" snippets deliberately ignore those rules so the smell is obvious.</p>
+    </div>
+
+    <hr/>
+    <h2>Part A — Structural / Composition Patterns</h2>
+
+    <h3>1. Flyweight — share immutable state across millions of objects</h3>
+
+    <p>The Flyweight pattern separates an object's <strong>intrinsic state</strong> (shared, immutable) from its <strong>extrinsic state</strong> (unique, passed in at use-time). You keep one copy of the shared bits and pass the varying bits as arguments. Born in the era of text editors rendering a million characters, it is still the pattern underneath every game engine, PDF renderer, and JVM integer cache.</p>
+
+    <div class="callout">
+      <div class="callout-title">How the pieces talk</div>
+      <pre>
+  1. Client calls TreeFactory.get("oak")         # entry point
+  2. Factory checks _cache dict — miss on first call
+  3. Factory loads PNG + mesh from disk ONCE, builds TreeType, stores in cache
+  4. Factory returns the TreeType instance (frozen dataclass)
+  5. Client constructs Tree(x, y, type=<shared TreeType ref>)
+  6. Next call TreeFactory.get("oak") → cache hit, returns SAME object
+  7. 1M Tree instances all point at 3 shared TreeType objects</pre>
+    </div>
+
+    <div class="callout danger">
+      <div class="callout-title">The pain — 1M tree objects, 4 GB of RAM</div>
+      <pre><code>class Tree:
+    def __init__(self, x, y, species, texture, mesh, bark_color):
+        self.x = x
+        self.y = y
+        self.species = species      # "oak", "pine", "maple" — only 3 values
+        self.texture = texture      # 2 MB PNG loaded per tree
+        self.mesh = mesh            # 500 KB vertex array per tree
+        self.bark_color = bark_color
+
+forest = [Tree(random_x(), random_y(), "oak", load_png("oak.png"),
+               load_mesh("oak.obj"), "#4a2e1a") for _ in range(1_000_000)]
+# Every tree holds its own 2.5 MB of texture+mesh.
+# 1M trees × 2.5 MB = 2.5 TB of memory. The process OOMs before rendering.</code></pre>
+    </div>
+
+    <div class="callout success">
+      <div class="callout-title">The fix — Flyweight</div>
+      <pre><code>from dataclasses import dataclass
+
+@dataclass(frozen=True)
+class TreeType:                     # intrinsic (shared) state
+    species: str
+    texture: bytes
+    mesh: bytes
+    bark_color: str
+
+class TreeFactory:
+    _cache: dict[str, TreeType] = {}
+
+    @classmethod
+    def get(cls, species: str) -&gt; TreeType:
+        if species not in cls._cache:
+            cls._cache[species] = TreeType(
+                species=species,
+                texture=load_png(f"{species}.png"),
+                mesh=load_mesh(f"{species}.obj"),
+                bark_color={"oak": "#4a2e1a", "pine": "#3d2a1f"}[species],
+            )
+        return cls._cache[species]
+
+@dataclass
+class Tree:                         # extrinsic (unique) state only
+    x: float
+    y: float
+    type: TreeType                  # reference — not copy
+
+forest = [Tree(random_x(), random_y(), TreeFactory.get("oak"))
+          for _ in range(1_000_000)]
+# Memory: 1M × (24 bytes for Tree) + 3 × 2.5 MB for TreeType = ~31 MB. Ship it.</code></pre>
+
+      <pre><code># why @dataclass(frozen=True): hashable + immutable — safe to share across threads
+# why classmethod + _cache: one cache per class, not per instance; shared state
+# why `if species not in cls._cache`: compute-once guard — disk I/O happens ONCE per kind
+# why `type: TreeType` as reference: Python stores a pointer (~8B), not a copy of 2.5MB
+# Break this: mutate type.bark_color after creation → every Tree sharing it flips color</code></pre>
+
+      <pre><code># Usage example
+oak1 = TreeFactory.get("oak")     # disk I/O, ~50 ms; returns TreeType(species='oak', ...)
+oak2 = TreeFactory.get("oak")     # cache hit, ~0.2 us
+assert oak1 is oak2                # True — same Python object
+t1 = Tree(x=12.5, y=7.3, type=oak1)
+t2 = Tree(x=99.0, y=1.2, type=oak2)
+print(id(t1.type) == id(t2.type)) # True — shared 2.5MB blob, not duplicated</code></pre>
+
+      <div class="diagram">
+<pre>
+Step 1: TreeFactory.get("oak")
+        _cache = {}                    # empty
+        species="oak" NOT in cache     # miss
+        load_png("oak.png")            # 50 ms I/O, 2 MB bytes
+        load_mesh("oak.obj")           # 30 ms I/O, 500 KB
+        _cache["oak"] = TreeType(species='oak', texture=<2MB>, mesh=<500KB>, bark='#4a2e1a')
+        return _cache["oak"]           # id=0x7f1a...
+
+Step 2: Tree(x=12.5, y=7.3, type=<TreeType at 0x7f1a...>)
+        Tree instance at 0x7f1b...
+        tree.x=12.5, tree.y=7.3, tree.type=<ref to 0x7f1a...>
+
+Step 3: TreeFactory.get("oak")         # 2nd call
+        _cache = {"oak": <0x7f1a...>}
+        species="oak" IN cache         # hit
+        return _cache["oak"]           # same 0x7f1a... — no I/O
+
+Step 4: Repeat 1,000,000 times
+        Memory = 1M × sizeof(Tree≈40B) + 1 × sizeof(TreeType≈2.5MB) = ~40MB + 2.5MB
+        vs naive: 1M × 2.5MB = 2.5TB (OOM)</pre>
+      </div>
+
+      <div class="callout danger">
+        <div class="callout-title">How this breaks in production</div>
+        <ul>
+          <li><strong>Mutating the flyweight:</strong> someone writes <code>oak.bark_color = "red"</code>; every tree in the forest turns red. <em>Why</em>: shared reference — the whole point of flyweight is there is ONE object. Mitigation: <code>frozen=True</code> makes this raise <code>FrozenInstanceError</code>.</li>
+          <li><strong>Cache key leak:</strong> user passes <code>species="Oak "</code> (trailing space) — factory creates a second cache entry, loads the same 2.5MB again. <em>Why</em>: no normalization on key. Fix: <code>species = species.strip().lower()</code>.</li>
+          <li><strong>Unbounded cache:</strong> 10,000 distinct species of procedurally-generated aliens — cache grows forever, eventually OOMs. <em>Why</em>: flyweight assumes small fixed set of "kinds." Fix: LRU cap on <code>_cache</code>.</li>
+          <li><strong>Concurrent first-access:</strong> two threads call <code>get("oak")</code> simultaneously on an empty cache; both load the PNG. <em>Why</em>: no lock around the "miss and fill" path. Fix: <code>threading.Lock</code> or <code>functools.cache</code>.</li>
+        </ul>
+      </div>
+    </div>
+
+    <p><strong>When to use:</strong> you have millions of objects that share a handful of distinct "kinds." Game entities, particle systems, glyph rendering in a text editor, chess/go board pieces, emoji in a chat UI.</p>
+
+    <p><strong>When NOT to use:</strong> you have 100 objects. The factory indirection costs more than it saves. Also avoid when the "shared" state actually mutates — a Flyweight that changes breaks every holder.</p>
+
+    <p><strong>Real-world:</strong> Java's <code>Integer.valueOf()</code> caches values in the range <code>-128..127</code> so <code>Integer.valueOf(100) == Integer.valueOf(100)</code> is true. Python interns small integers (-5..256) and short strings for the same reason. Unity3D's GameObject + MeshRenderer separation. PDF rendering libraries share glyph bitmaps.</p>
+
+    <h3>2. Composite — one interface for leaves and branches</h3>
+
+    <p>The Composite pattern lets clients treat individual objects and compositions of objects uniformly. A <code>File</code> has a size; a <code>Directory</code> also has a size (the sum of its children's sizes). If both implement the same interface, recursive code becomes trivial.</p>
+
+    <div class="callout">
+      <div class="callout-title">How the pieces talk</div>
+      <pre>
+  1. Client calls root.size()                    # entry point on Directory
+  2. Directory.size() = sum(c.size() for c in children)
+  3. For a File child: returns self._bytes immediately (leaf base case)
+  4. For a Directory child: recurses into step 2 (depth-first)
+  5. Same shape for .delete(): leaf just rm's; branch rm's children first then itself
+  6. Caller never writes `if isinstance(...)` — uniform interface absorbs both</pre>
+    </div>
+
+    <div class="callout danger">
+      <div class="callout-title">The pain — type-checking in every recursive call</div>
+      <pre><code>def total_size(node):
+    if isinstance(node, File):
+        return node.size
+    elif isinstance(node, Directory):
+        total = 0
+        for child in node.children:
+            if isinstance(child, File):
+                total += child.size
+            elif isinstance(child, Directory):
+                total += total_size(child)   # recurse
+            else:
+                raise TypeError("unknown node kind")
+        return total
+    else:
+        raise TypeError("unknown node kind")</code></pre>
+    </div>
+
+    <div class="callout success">
+      <div class="callout-title">The fix — Composite</div>
+      <pre><code>from abc import ABC, abstractmethod
+
+class FSNode(ABC):
+    @abstractmethod
+    def size(self) -&gt; int: ...
+    @abstractmethod
+    def delete(self) -&gt; None: ...
+
+class File(FSNode):
+    def __init__(self, name: str, bytes_: int):
+        self.name, self._bytes = name, bytes_
+    def size(self) -&gt; int:
+        return self._bytes
+    def delete(self) -&gt; None:
+        print(f"rm {self.name}")
+
+class Directory(FSNode):
+    def __init__(self, name: str):
+        self.name = name
+        self.children: list[FSNode] = []
+    def add(self, child: FSNode):
+        self.children.append(child)
+    def size(self) -&gt; int:
+        return sum(c.size() for c in self.children)   # uniform call
+    def delete(self) -&gt; None:
+        for c in self.children:
+            c.delete()                                # uniform call
+        print(f"rmdir {self.name}")
+
+root = Directory("/")
+root.add(File("a.txt", 100))
+home = Directory("home"); root.add(home)
+home.add(File("b.txt", 200))
+print(root.size())   # 300 — no isinstance anywhere</code></pre>
+
+      <pre><code># why ABC + @abstractmethod: forces every subclass to implement size/delete —
+#                            you cannot accidentally add a node type that breaks recursion
+# why Directory.children typed as list[FSNode]: accepts BOTH File and Directory —
+#                                               this is the composite trick
+# why sum(c.size() for c in children): leaf returns int; branch returns recursive sum
+# why delete() recurses BEFORE printing rmdir: can't remove non-empty dir — mirrors `rm -r`
+# Break this: if File.size() returns str, `sum(...)` raises TypeError deep in recursion</code></pre>
+
+      <pre><code># Usage example
+root = Directory("/")
+a = File("a.txt", 100)
+root.add(a)
+home = Directory("home")
+root.add(home)
+home.add(File("b.txt", 200))
+home.add(File("c.log", 50))
+print(root.size())    # 350
+root.delete()          # rm b.txt / rm c.log / rmdir home / rm a.txt / rmdir /</code></pre>
+
+      <div class="diagram">
+<pre>
+Tree:   /
+        ├── a.txt (100)
+        └── home/
+              ├── b.txt (200)
+              └── c.log (50)
+
+Call: root.size()
+  root.size()                            # Directory
+    ├── a.size()     → 100               # File leaf
+    └── home.size()                      # Directory — recurse
+          ├── b.size() → 200             # File leaf
+          └── c.size() → 50              # File leaf
+          = sum([200, 50]) = 250
+    = sum([100, 250]) = 350
+
+Call stack at deepest point:
+  frame 0: root.size      sum accumulating [100, <pending>]
+  frame 1: home.size      sum accumulating [200, <pending>]
+  frame 2: c.size         returns 50 ← deepest
+  unwinds → 250 → 350</pre>
+      </div>
+
+      <div class="callout danger">
+        <div class="callout-title">How this breaks in production</div>
+        <ul>
+          <li><strong>Cycle in the tree:</strong> someone <code>home.add(root)</code>; <code>root.size()</code> infinite-recurses and stack-overflows. <em>Why</em>: composite assumes DAG (actually tree). Fix: track visited set, or forbid adding an ancestor.</li>
+          <li><strong>Deep tree, shallow stack:</strong> a 10,000-level-deep directory structure → <code>RecursionError: maximum recursion depth exceeded</code>. <em>Why</em>: Python default recursion limit ~1000. Fix: explicit stack (iterative DFS) or <code>sys.setrecursionlimit</code>.</li>
+          <li><strong>Lying interface:</strong> <code>File.add(child)</code> exists but always raises — callers who treat everything as Directory get surprised at runtime. <em>Why</em>: add() leaked into the parent interface. Fix: keep <code>add</code> only on Directory, not on FSNode.</li>
+          <li><strong>Mutation during iteration:</strong> delete() modifies children while iterating, skipping entries. <em>Why</em>: list mutation mid-loop. Fix: iterate over <code>list(self.children)</code> (copy).</li>
+        </ul>
+      </div>
+    </div>
+
+    <p><strong>When to use:</strong> tree-shaped data where operations are naturally recursive — file systems, DOM/AST trees, UI component trees (React/Vue/SwiftUI), org charts, nested menus, scene graphs in 3D engines.</p>
+
+    <p><strong>When NOT to use:</strong> the "tree" is actually flat, or leaf and branch behavior diverges so much that the shared interface is a lie (e.g., <code>File.add_child()</code> that always throws). At that point you are lying with types.</p>
+
+    <p><strong>Real-world:</strong> the Python <code>ast</code> module (every <code>Node</code> has <code>_fields</code> and <code>walk()</code>), React component trees, HTML DOM, <code>pathlib.Path</code> (not quite composite but close), <code>unittest.TestSuite</code> (contains <code>TestCase</code>s and other suites — both are <code>runnable</code>).</p>
+
+    <h3>3. Bridge — when inheritance explodes into a matrix</h3>
+
+    <p>Bridge separates an <em>abstraction</em> (what you are doing) from its <em>implementation</em> (how the platform does it) so the two can vary independently. Signs you need it: you have N abstractions × M implementations and you are staring at N×M classes.</p>
+
+    <div class="callout">
+      <div class="callout-title">How the pieces talk</div>
+      <pre>
+  1. Client builds impl:    renderer = SVGRenderer()
+  2. Client builds abstraction around it:  shape = Circle(renderer, x=10, y=10, r=5)
+  3. Client calls shape.draw()                    # entry point
+  4. Circle.draw() calls self.renderer.draw_circle(self.x, self.y, self.r)
+  5. SVGRenderer.draw_circle(10, 10, 5) emits '<circle cx="10" cy="10" r="5"/>'
+  6. To switch backends: swap the renderer, keep the shape — zero subclass explosion
+  7. Abstraction "bridges" to implementation via the self.renderer reference</pre>
+    </div>
+
+    <div class="callout danger">
+      <div class="callout-title">The pain — the inheritance matrix explodes</div>
+      <pre><code># Shape × Renderer = 2 × 2 = 4 classes. Add OpenGL and Metal: 2 × 4 = 8.
+# Add Triangle, Star, Path: 5 × 4 = 20. This is quadratic pain.
+class CircleSVG(Shape):    def draw(self): ...  # circle as SVG
+class CircleCanvas(Shape): def draw(self): ...  # circle as Canvas
+class SquareSVG(Shape):    def draw(self): ...  # square as SVG
+class SquareCanvas(Shape): def draw(self): ...  # square as Canvas</code></pre>
+    </div>
+
+    <div class="callout success">
+      <div class="callout-title">The fix — Bridge (abstraction HOLDS implementation)</div>
+      <pre><code>from abc import ABC, abstractmethod
+
+# "Implementor" hierarchy — how to draw primitives
+class Renderer(ABC):
+    @abstractmethod
+    def draw_circle(self, x, y, r): ...
+    @abstractmethod
+    def draw_rect(self, x, y, w, h): ...
+
+class SVGRenderer(Renderer):
+    def draw_circle(self, x, y, r):
+        print(f'&lt;circle cx="{x}" cy="{y}" r="{r}"/&gt;')
+    def draw_rect(self, x, y, w, h):
+        print(f'&lt;rect x="{x}" y="{y}" width="{w}" height="{h}"/&gt;')
+
+class CanvasRenderer(Renderer):
+    def draw_circle(self, x, y, r):
+        print(f"ctx.arc({x},{y},{r},0,2*PI); ctx.stroke();")
+    def draw_rect(self, x, y, w, h):
+        print(f"ctx.rect({x},{y},{w},{h}); ctx.stroke();")
+
+# "Abstraction" hierarchy — shapes
+class Shape(ABC):
+    def __init__(self, renderer: Renderer):
+        self.renderer = renderer                      # the bridge
+    @abstractmethod
+    def draw(self): ...
+
+class Circle(Shape):
+    def __init__(self, renderer, x, y, r):
+        super().__init__(renderer); self.x, self.y, self.r = x, y, r
+    def draw(self):
+        self.renderer.draw_circle(self.x, self.y, self.r)
+
+class Square(Shape):
+    def __init__(self, renderer, x, y, s):
+        super().__init__(renderer); self.x, self.y, self.s = x, y, s
+    def draw(self):
+        self.renderer.draw_rect(self.x, self.y, self.s, self.s)
+
+# Now N + M classes, not N × M. Add OpenGLRenderer → only +1 class.
+Circle(SVGRenderer(), 10, 10, 5).draw()
+Square(CanvasRenderer(), 0, 0, 20).draw()</code></pre>
+
+      <pre><code># why Renderer is ABC: forces each backend to implement every primitive —
+#                      else Square using CanvasRenderer.draw_rect() crashes mid-render
+# why Shape stores `self.renderer`: THE bridge — composition, not inheritance
+# why super().__init__(renderer): sets up the bridge before subclass adds its own state
+# why draw() delegates to renderer: shape knows WHAT to draw, renderer knows HOW
+# Break this: forget to pass renderer → self.renderer is None → AttributeError on draw()</code></pre>
+
+      <pre><code># Usage example
+svg = SVGRenderer()
+canvas = CanvasRenderer()
+shapes = [
+    Circle(svg, 10, 10, 5),        # same circle, SVG output
+    Circle(canvas, 10, 10, 5),     # same circle, Canvas output
+    Square(svg, 0, 0, 20),
+]
+for s in shapes: s.draw()
+# &lt;circle cx="10" cy="10" r="5"/&gt;
+# ctx.arc(10,10,5,0,2*PI); ctx.stroke();
+# &lt;rect x="0" y="0" width="20" height="20"/&gt;</code></pre>
+
+      <div class="diagram">
+<pre>
+Object graph after construction:
+  Circle(x=10,y=10,r=5) ──renderer──&gt; SVGRenderer()
+  Square(x=0,y=0,s=20)  ──renderer──&gt; CanvasRenderer()
+
+Call: Circle.draw()
+  self = Circle instance
+  self.renderer = &lt;SVGRenderer&gt;
+  self.x, self.y, self.r = 10, 10, 5
+    → self.renderer.draw_circle(10, 10, 5)
+         → prints &lt;circle cx="10" cy="10" r="5"/&gt;
+
+Swap at runtime (no recompile, no new class):
+  circle.renderer = CanvasRenderer()
+  circle.draw()  → ctx.arc(10,10,5,...)</pre>
+      </div>
+
+      <div class="callout danger">
+        <div class="callout-title">How this breaks in production</div>
+        <ul>
+          <li><strong>Implementor missing a method:</strong> add <code>draw_triangle</code> to Shape but forget to add it to <code>CanvasRenderer</code> → <code>AttributeError</code> the first time a Triangle renders to canvas. <em>Why</em>: Python duck-typing vs. ABC; use ABC's abstractmethod to catch at construction.</li>
+          <li><strong>Shared mutable state in renderer:</strong> <code>SVGRenderer</code> caches a "current color" that leaks between shapes sharing the renderer. <em>Why</em>: bridge encourages sharing; avoid stateful implementors.</li>
+          <li><strong>Wrong-level abstraction:</strong> <code>Renderer</code> grows 47 primitives (every shape gets its own method), defeating the pattern. <em>Why</em>: implementor should be small + orthogonal. Fix: <code>draw_path(points)</code> primitive with shapes as point generators.</li>
+          <li><strong>One dimension in practice:</strong> you ship 5 renderers but only Circle ever uses CanvasRenderer. <em>Why</em>: YAGNI — you paid the indirection tax without the benefit.</li>
+        </ul>
+      </div>
+    </div>
+
+    <p><strong>When to use:</strong> you see two dimensions of variation. Persistence (MySQL/Postgres/DynamoDB) × Entity (User/Order/Product). Theme (light/dark) × Widget. Cloud (AWS/GCP/Azure) × Service (Storage/Queue/DB).</p>
+
+    <p><strong>When NOT to use:</strong> you actually have one dimension. If every "Shape" only ever uses "SVGRenderer," you do not need a bridge — you need a class.</p>
+
+    <p><strong>Real-world:</strong> JDBC (Driver = implementor, Connection/Statement = abstraction), any ORM with multiple dialects, Python's <code>logging</code> module (<code>Logger</code> abstraction × <code>Handler</code> implementor), CSS (styles × renderer engine).</p>
+
+    <hr/>
+    <h2>Part B — Behavioral Patterns</h2>
+
+    <h3>4. Chain of Responsibility — pass the hot potato</h3>
+
+    <p>Every request travels down a linked list of handlers. Each handler either takes the request, modifies it and passes on, or ignores it. The sender does not know or care which handler ultimately responds. This is how every web framework's middleware works.</p>
+
+    <div class="callout">
+      <div class="callout-title">How the pieces talk</div>
+      <pre>
+  1. Client calls pipeline(request)                           # entry point
+  2. build_chain creates a closure; pipeline(req) → chain(req, 0)
+  3. chain(req, 0) → middlewares[0].handle(req, next=λ→chain(req,1))
+  4. AuthMiddleware.handle validates token; if good, calls next_(req)
+  5. next_(req) → chain(req, 1) → RateLimit.handle(req, next=λ→chain(req,2))
+  6. RateLimit checks quota; if under, calls next_(req) → chain(req,2)
+  7. Logging.handle logs and calls next_(req) → chain(req, 3)
+  8. i == len → invokes final_handler(req) which is business_logic
+  9. business_logic returns Response — unwinds back up through each handler
+ 10. Any handler may short-circuit by returning a Response without calling next_</pre>
+    </div>
+
+    <div class="callout danger">
+      <div class="callout-title">The pain — a giant switchboard in one function</div>
+      <pre><code>def handle_request(req):
+    # Auth
+    if not req.headers.get("Authorization"):
+        return Response(401)
+    user = decode_jwt(req.headers["Authorization"])
+    # Rate limit
+    if rate_limiter.exceeded(user.id):
+        return Response(429)
+    # Logging
+    log.info(f"{user.id} {req.method} {req.path}")
+    # CSRF
+    if req.method == "POST" and not valid_csrf(req):
+        return Response(403)
+    # Compression
+    compressed = should_compress(req)
+    # ...business logic, 400 lines later
+    resp = business_logic(req, user)
+    if compressed: resp.body = gzip(resp.body)
+    return resp
+# Adding a new cross-cutting concern means editing this monster.</code></pre>
+    </div>
+
+    <div class="callout success">
+      <div class="callout-title">The fix — Chain of Responsibility</div>
+      <pre><code>from abc import ABC, abstractmethod
+from typing import Callable
+
+class Middleware(ABC):
+    @abstractmethod
+    def handle(self, req, next_: Callable): ...
+
+class AuthMiddleware(Middleware):
+    def handle(self, req, next_):
+        token = req.headers.get("Authorization")
+        if not token: return Response(401)
+        req.user = decode_jwt(token)
+        return next_(req)                           # pass along
+
+class RateLimitMiddleware(Middleware):
+    def handle(self, req, next_):
+        if rate_limiter.exceeded(req.user.id): return Response(429)
+        return next_(req)
+
+class LoggingMiddleware(Middleware):
+    def handle(self, req, next_):
+        log.info(f"{req.user.id} {req.method} {req.path}")
+        return next_(req)
+
+def build_chain(middlewares, final_handler):
+    def chain(req, i=0):
+        if i == len(middlewares): return final_handler(req)
+        return middlewares[i].handle(req, lambda r: chain(r, i + 1))
+    return chain
+
+pipeline = build_chain(
+    [AuthMiddleware(), RateLimitMiddleware(), LoggingMiddleware()],
+    business_logic,
+)
+pipeline(request)</code></pre>
+
+      <pre><code># why `next_: Callable`: middleware decides WHEN to call down — enables short-circuit
+# why AuthMiddleware returns Response(401) WITHOUT calling next_: request never reaches business
+# why req.user = decode_jwt(...): mutates req so downstream middleware sees the user
+# why lambda r: chain(r, i+1): builds the "next handler" lazily — closure captures i
+# why i == len(middlewares): termination — falls through to the real handler
+# Break this: AuthMiddleware sets req.user AFTER calling next_ → RateLimit sees None</code></pre>
+
+      <pre><code># Usage example
+req = Request(method="POST", path="/pay",
+              headers={"Authorization": "Bearer valid.jwt.token"})
+resp = pipeline(req)
+# 1. Auth: decodes JWT → req.user = User(id=42); calls next_
+# 2. RateLimit: user 42 at 3/100 rps; calls next_
+# 3. Logging: logs "42 POST /pay"; calls next_
+# 4. business_logic(req) → Response(200, body={"charged": True})
+# resp = Response(200)
+
+# Short-circuit example
+bad_req = Request(method="POST", path="/pay", headers={})    # no Authorization
+resp = pipeline(bad_req)
+# 1. Auth: token is None → returns Response(401) IMMEDIATELY; rate limit never runs</code></pre>
+
+      <div class="diagram">
+<pre>
+Call stack (happy path):
+ pipeline(req)
+   └─ chain(req, 0)
+        └─ AuthMiddleware.handle(req, next_0)
+             req.user = User(42)
+             └─ next_0(req) ≡ chain(req, 1)
+                  └─ RateLimitMiddleware.handle(req, next_1)
+                       rate_limiter.exceeded(42) = False
+                       └─ next_1(req) ≡ chain(req, 2)
+                            └─ LoggingMiddleware.handle(req, next_2)
+                                 log.info("42 POST /pay")
+                                 └─ next_2(req) ≡ chain(req, 3)
+                                      i == len(3) → business_logic(req)
+                                      returns Response(200)
+                                 returns Response(200)  # unwind
+                            returns Response(200)
+                       returns Response(200)
+                  returns Response(200)
+             returns Response(200)
+
+Short-circuit path (no token):
+ pipeline(req)
+   └─ chain(req, 0)
+        └─ AuthMiddleware.handle
+             token = None → return Response(401)   # next_ NEVER called
+   unwinds immediately with 401</pre>
+      </div>
+
+      <div class="callout danger">
+        <div class="callout-title">How this breaks in production</div>
+        <ul>
+          <li><strong>Forgot to call next_:</strong> LoggingMiddleware logs but returns <code>None</code> because it never invoked <code>next_(req)</code>. <em>Why</em>: every middleware except final terminators MUST return <code>next_(req)</code>. Fix: lint rule or base class that enforces.</li>
+          <li><strong>Called next_ twice:</strong> business logic runs twice, double-charges the user. <em>Why</em>: copy-pasted error handling. Fix: middleware returns the first result, never re-enters.</li>
+          <li><strong>Order dependency:</strong> LoggingMiddleware placed BEFORE AuthMiddleware — logs show <code>req.user.id</code> but user is not yet set → <code>AttributeError</code>. <em>Why</em>: chain order is meaningful. Fix: declare dependencies explicitly or assert preconditions.</li>
+          <li><strong>Exception inside a middleware:</strong> RateLimit throws; the chain unwinds but the connection is already half-consumed. <em>Why</em>: no try/except wrapping <code>next_</code>. Fix: outer ErrorHandlerMiddleware that wraps and returns 500.</li>
+        </ul>
+      </div>
+    </div>
+
+    <p><strong>When to use:</strong> HTTP middleware, event-processing pipelines, customer-support escalation tiers (L1 → L2 → L3), approval workflows (manager → director → VP), exception handlers, logging filters.</p>
+
+    <p><strong>When NOT to use:</strong> you always need exactly one specific handler. Then it is not a chain, it is a lookup. Chains also hide control flow — debugging "which handler ate my request?" can be painful, so log at every step.</p>
+
+    <p><strong>Real-world:</strong> Express.js <code>app.use()</code>, Django middleware, Flask <code>before_request</code>, ASP.NET Core pipeline, Servlet filters, Python <code>logging.Filter</code> chains, Netty ChannelPipeline.</p>
+
+    <h3>5. Mediator — the switchboard in the middle</h3>
+
+    <p>Instead of N objects each knowing N-1 others (N² edges of coupling), every object talks to one <em>mediator</em> that routes messages. The classic example is a chat room: users send messages to the room, the room broadcasts to other users. Users never reference each other directly.</p>
+
+    <div class="callout">
+      <div class="callout-title">How the pieces talk</div>
+      <pre>
+  1. User types a date: date_field.set_value("2026-13-40")    # entry point
+  2. DateField updates self.value, calls mediator.notify(self, "change")
+  3. Mediator inspects sender and event: sender == date_field, event == "change"
+  4. Mediator validates the value; branches on result
+  5. If invalid: calls validation_label.show_error + submit_button.disable
+  6. If valid:   calls validation_label.clear + submit_button.enable + calendar.set_selected
+  7. DateField has NO reference to the label/button/calendar — only to mediator
+  8. Changing workflow logic = editing ONE file (mediator), not N widgets</pre>
+    </div>
+
+    <div class="callout danger">
+      <div class="callout-title">The pain — every widget knows every other widget</div>
+      <pre><code>class DateField:
+    def __init__(self, text_field, validation_label, submit_button, calendar_popup):
+        self.text_field = text_field
+        self.validation_label = validation_label
+        self.submit_button = submit_button
+        self.calendar_popup = calendar_popup
+    def on_change(self, value):
+        if not valid_date(value):
+            self.validation_label.show_error("bad date")
+            self.submit_button.disable()
+            self.calendar_popup.highlight_today()
+        else:
+            self.validation_label.clear()
+            self.submit_button.enable()
+            self.calendar_popup.set_selected(value)
+# Every widget holds refs to every other widget. N² coupling.</code></pre>
+    </div>
+
+    <div class="callout success">
+      <div class="callout-title">The fix — Mediator</div>
+      <pre><code>class DialogMediator:
+    def __init__(self):
+        self.date_field = None
+        self.validation_label = None
+        self.submit_button = None
+        self.calendar_popup = None
+    def notify(self, sender, event):
+        if sender is self.date_field and event == "change":
+            if valid_date(self.date_field.value):
+                self.validation_label.clear()
+                self.submit_button.enable()
+                self.calendar_popup.set_selected(self.date_field.value)
+            else:
+                self.validation_label.show_error("bad date")
+                self.submit_button.disable()
+
+class DateField:
+    def __init__(self, mediator):
+        self.mediator = mediator
+        self.value = ""
+    def set_value(self, v):
+        self.value = v
+        self.mediator.notify(self, "change")        # tell mediator, nothing else
+
+# Widgets are independent. Changing coordination logic = editing 1 file.</code></pre>
+
+      <pre><code># why `notify(sender, event)`: mediator distinguishes who sent what — one method handles all
+# why DateField only stores `self.mediator`: zero knowledge of its siblings
+# why `sender is self.date_field`: identity comparison — mediator routes by object, not string
+# why coordination lives in notify(): ONE place to change wizard logic, instead of N widgets
+# Break this: if two DateFields share a mediator, `sender is self.date_field` misroutes</code></pre>
+
+      <pre><code># Usage example
+m = DialogMediator()
+m.date_field = DateField(m)
+m.validation_label = ValidationLabel()
+m.submit_button = SubmitButton()
+m.calendar_popup = CalendarPopup()
+
+m.date_field.set_value("2026-04-19")   # valid
+# → mediator.notify(date_field, "change")
+# → validation_label.clear()
+# → submit_button.enable()
+# → calendar_popup.set_selected("2026-04-19")
+
+m.date_field.set_value("bogus")         # invalid
+# → validation_label.show_error("bad date")
+# → submit_button.disable()</code></pre>
+
+      <div class="diagram">
+<pre>
+Before mediator — N² edges (4 widgets = 12 connections):
+  DateField ↔ ValidationLabel
+  DateField ↔ SubmitButton
+  DateField ↔ CalendarPopup
+  ValidationLabel ↔ SubmitButton
+  ... every pair knows every other pair
+
+After mediator — 2N edges (hub and spoke):
+  DateField ──→ Mediator ←── ValidationLabel
+                  │
+                  ├──→ SubmitButton
+                  └──→ CalendarPopup
+
+Flow for set_value("2026-04-19"):
+  t=0  date_field.value = "2026-04-19"
+  t=1  date_field.mediator.notify(date_field, "change")
+  t=2  mediator: sender == date_field & event == "change"
+  t=3  valid_date("2026-04-19") → True
+  t=4  validation_label.clear()       # label shows ""
+  t=5  submit_button.enable()         # button.disabled = False
+  t=6  calendar_popup.set_selected("2026-04-19")</pre>
+      </div>
+
+      <div class="callout danger">
+        <div class="callout-title">How this breaks in production</div>
+        <ul>
+          <li><strong>God mediator:</strong> the dialog grows; notify() becomes 500 lines of <code>if/elif</code>. <em>Why</em>: one mediator handling too many event types. Fix: split per workflow or switch to event-bus pub/sub.</li>
+          <li><strong>Circular notifies:</strong> mediator sets <code>submit_button.enabled = True</code>, which fires <code>on_change</code>, which calls <code>notify</code> again → infinite loop. <em>Why</em>: no cycle guard. Fix: suppress events during programmatic updates.</li>
+          <li><strong>Forgot to wire a widget:</strong> <code>m.calendar_popup</code> is still <code>None</code>; notify() raises <code>AttributeError</code>. <em>Why</em>: mediator constructor doesn't require all collaborators. Fix: pass them in <code>__init__</code> and validate non-null.</li>
+          <li><strong>Order of wiring matters:</strong> widget created before mediator's fields are set — widget's constructor calls <code>notify</code> too early. <em>Why</em>: mediator + widget have a bootstrap dance. Fix: two-phase init.</li>
+        </ul>
+      </div>
+    </div>
+
+    <p><strong>When to use:</strong> many objects coordinating a single workflow (form dialogs, wizards, multiplayer game lobbies, chat rooms), air-traffic-control-style systems where central coordination enforces invariants.</p>
+
+    <p><strong>When NOT to use:</strong> the mediator becomes a god object handling dozens of unrelated concerns. At that scale, switch to an event bus (Mediator + Observer hybrid — see composition map).</p>
+
+    <p><strong>Real-world:</strong> AWS Step Functions (mediator over Lambdas), airline tickets UIs, Redux store (one mediator, many reducers/subscribers), Elm's TEA architecture, Kubernetes scheduler.</p>
+
+    <h3>6. Memento — undo/redo without breaking encapsulation</h3>
+
+    <p>Memento lets an object snapshot and restore its internal state without exposing that state publicly. The originator produces an opaque token; a caretaker stores tokens in a stack; the originator alone knows how to read a token.</p>
+
+    <div class="callout">
+      <div class="callout-title">How the pieces talk</div>
+      <pre>
+  1. Client calls hist.save(ed)                    # entry point, before risky op
+  2. History.save(editor) calls editor.snapshot()
+  3. Editor.snapshot() deep-copies self.__dict__ into EditorMemento(state=…)
+  4. History pushes memento onto its stack
+  5. Client mutates editor: ed.type("h"), ed.type("i") — editor state diverges
+  6. Client calls hist.undo(ed) to rollback
+  7. History pops last memento, calls editor.restore(memento)
+  8. Editor.restore() overwrites self.__dict__ with deep-copied snapshot state
+  9. Caretaker (History) never peeks inside memento — only Editor reads it</pre>
+    </div>
+
+    <div class="callout danger">
+      <div class="callout-title">The pain — undo needs to peek at every private field</div>
+      <pre><code>class Editor:
+    def __init__(self):
+        self._buffer = []
+        self._cursor = 0
+        self._selection = None
+        self._undo_stack = []
+    def type(self, ch):
+        # duplicate every field into stack — tight coupling, easy to forget one
+        self._undo_stack.append((list(self._buffer), self._cursor, self._selection))
+        self._buffer.insert(self._cursor, ch)
+        self._cursor += 1
+    def undo(self):
+        self._buffer, self._cursor, self._selection = self._undo_stack.pop()
+# If you add a new field, undo silently corrupts state. Bug bait.</code></pre>
+    </div>
+
+    <div class="callout success">
+      <div class="callout-title">The fix — Memento</div>
+      <pre><code>from dataclasses import dataclass, field
+from copy import deepcopy
+
+@dataclass(frozen=True)
+class EditorMemento:                    # opaque to caretaker
+    state: dict
+
+class Editor:
+    def __init__(self):
+        self._buffer = []
+        self._cursor = 0
+        self._selection = None
+    def type(self, ch):
+        self._buffer.insert(self._cursor, ch); self._cursor += 1
+    def snapshot(self) -&gt; EditorMemento:
+        return EditorMemento(state=deepcopy(self.__dict__))
+    def restore(self, m: EditorMemento):
+        self.__dict__.update(deepcopy(m.state))
+
+class History:                          # caretaker
+    def __init__(self): self._stack = []
+    def save(self, editor): self._stack.append(editor.snapshot())
+    def undo(self, editor):
+        if self._stack: editor.restore(self._stack.pop())
+
+ed, hist = Editor(), History()
+hist.save(ed); ed.type("h"); ed.type("i"); hist.undo(ed)   # back to empty</code></pre>
+
+      <pre><code># why @dataclass(frozen=True) Memento: caretaker can't tamper with the snapshot
+# why deepcopy(self.__dict__): captures ALL fields — add a new field, undo still works
+# why Editor.snapshot() lives on Editor (not History): only originator knows its layout
+# why History stores mementos opaquely: black-box for caretaker — encapsulation preserved
+# Break this: if __dict__ contains a DB connection, deepcopy may fail or duplicate sockets</code></pre>
+
+      <pre><code># Usage example
+ed, hist = Editor(), History()
+hist.save(ed)          # snapshot #0: _buffer=[], _cursor=0
+ed.type("h")           # _buffer=["h"], _cursor=1
+ed.type("i")           # _buffer=["h","i"], _cursor=2
+hist.save(ed)          # snapshot #1: _buffer=["h","i"], _cursor=2
+ed.type("!")           # _buffer=["h","i","!"], _cursor=3
+hist.undo(ed)          # restores snapshot #1 → _buffer=["h","i"], _cursor=2
+hist.undo(ed)          # restores snapshot #0 → _buffer=[], _cursor=0</code></pre>
+
+      <div class="diagram">
+<pre>
+State timeline:
+  t=0  ed = Editor(_buffer=[], _cursor=0)
+  t=1  hist.save(ed)
+         m0 = EditorMemento(state={_buffer:[], _cursor:0, _selection:None})
+         hist._stack = [m0]
+  t=2  ed.type("h")   → _buffer=["h"], _cursor=1
+  t=3  ed.type("i")   → _buffer=["h","i"], _cursor=2
+  t=4  hist.undo(ed)
+         m = hist._stack.pop() = m0
+         ed.__dict__.update(deepcopy(m.state))
+         → ed._buffer = [], ed._cursor = 0    # fully restored
+
+Memory cost:
+  N snapshots of buffer size B = O(N·B) — for a 1MB doc and 100 undos = 100MB
+  Consider Command pattern (deltas) instead for large state</pre>
+      </div>
+
+      <div class="callout danger">
+        <div class="callout-title">How this breaks in production</div>
+        <ul>
+          <li><strong>Shallow copy by mistake:</strong> using <code>dict(self.__dict__)</code> instead of <code>deepcopy</code> — the memento still points at the live list, undo does nothing. <em>Why</em>: top-level copy but nested refs shared. Fix: always <code>deepcopy</code> for mutable containers.</li>
+          <li><strong>Non-picklable field:</strong> editor holds a file handle; <code>deepcopy</code> raises <code>TypeError</code>. <em>Why</em>: not all state is copyable. Fix: exclude transient fields via custom <code>__getstate__</code>.</li>
+          <li><strong>Memory blowup:</strong> user holds Ctrl-Z on a 1GB image — history stack grows to 50GB. <em>Why</em>: full snapshots scale linearly. Fix: cap stack depth OR switch to Command pattern storing deltas.</li>
+          <li><strong>Restore partially fails:</strong> <code>__dict__.update</code> on a new field the memento doesn't have leaves stale value. <em>Why</em>: update merges, doesn't replace. Fix: clear dict first, then update.</li>
+        </ul>
+      </div>
+    </div>
+
+    <p><strong>When to use:</strong> editor undo/redo, game save-states, database transactions ("BEGIN; ... ROLLBACK"), config rollback on failure, A/B test state toggles.</p>
+
+    <p><strong>When NOT to use:</strong> state is huge and snapshots are expensive. Consider storing <em>deltas</em> (Command pattern) instead — cheaper for big models, but harder to restore non-linearly.</p>
+
+    <p><strong>Real-world:</strong> <code>git stash</code>, Redux time-travel debugger, IntelliJ "local history," database MVCC, Photoshop's history palette.</p>
+
+    <h3>7. Visitor — add operations without touching the classes</h3>
+
+    <p>Visitor lets you add new operations to a class hierarchy without modifying the classes themselves. The hierarchy exposes an <code>accept(visitor)</code> method; each concrete node dispatches to the visitor's matching <code>visit_X</code> method (double dispatch). New operation = new visitor class. Zero changes to nodes.</p>
+
+    <div class="callout">
+      <div class="callout-title">How the pieces talk</div>
+      <pre>
+  1. Client builds AST: tree = Add(Num(1), Mul(Num(2), Num(3)))
+  2. Client calls tree.accept(Evaluator())                   # entry point
+  3. Add.accept(v) dispatches by its own type → v.visit_add(self)
+  4. Evaluator.visit_add recurses: n.l.accept(self) + n.r.accept(self)
+  5. Num.accept(v) → v.visit_num(self) → returns n.n (1)
+  6. Mul.accept(v) → v.visit_mul(self) → recurses into 2 and 3 → 6
+  7. Final: 1 + 6 = 7 — bubbles back up
+  8. Double-dispatch: TYPE OF NODE picks accept(), TYPE OF VISITOR picks visit_X
+  9. New operation (e.g. TypeChecker) = new class, zero edits to Num/Add/Mul</pre>
+    </div>
+
+    <div class="callout danger">
+      <div class="callout-title">The pain — every new feature touches every node class</div>
+      <pre><code>class NumberNode:
+    def __init__(self, n): self.n = n
+    def evaluate(self): return self.n
+    def pretty_print(self): return str(self.n)
+    def to_llvm_ir(self): return f"i64 {self.n}"
+    def count_operations(self): return 0
+    def serialize_json(self): return {"type": "num", "n": self.n}
+    # ... 12 more operations, all scattered across every AST node type
+class AddNode:
+    def __init__(self, l, r): self.l, self.r = l, r
+    def evaluate(self): return self.l.evaluate() + self.r.evaluate()
+    def pretty_print(self): return f"({self.l.pretty_print()} + {self.r.pretty_print()})"
+    # ... duplicate all 16 methods for every node kind</code></pre>
+    </div>
+
+    <div class="callout success">
+      <div class="callout-title">The fix — Visitor</div>
+      <pre><code>from abc import ABC, abstractmethod
+
+class Node(ABC):
+    @abstractmethod
+    def accept(self, visitor): ...
+
+class Num(Node):
+    def __init__(self, n): self.n = n
+    def accept(self, v): return v.visit_num(self)
+
+class Add(Node):
+    def __init__(self, l, r): self.l, self.r = l, r
+    def accept(self, v): return v.visit_add(self)
+
+class Mul(Node):
+    def __init__(self, l, r): self.l, self.r = l, r
+    def accept(self, v): return v.visit_mul(self)
+
+# Each operation is ONE class — co-located, easy to read
+class Evaluator:
+    def visit_num(self, n): return n.n
+    def visit_add(self, n): return n.l.accept(self) + n.r.accept(self)
+    def visit_mul(self, n): return n.l.accept(self) * n.r.accept(self)
+
+class PrettyPrinter:
+    def visit_num(self, n): return str(n.n)
+    def visit_add(self, n): return f"({n.l.accept(self)} + {n.r.accept(self)})"
+    def visit_mul(self, n): return f"({n.l.accept(self)} * {n.r.accept(self)})"
+
+tree = Add(Num(1), Mul(Num(2), Num(3)))
+print(tree.accept(Evaluator()))      # 7
+print(tree.accept(PrettyPrinter()))  # (1 + (2 * 3))</code></pre>
+
+      <pre><code># why accept() takes a visitor and calls visit_X: double dispatch —
+#   Python has single dispatch (self), so we bounce to pick method by visitor type too
+# why each Node has its OWN accept(): that's how we pick visit_num vs visit_add —
+#   dispatch is hardcoded per class, so static analysis catches "wrong visitor"
+# why visit_add recurses with self: the visitor carries state across the whole tree
+# Break this: add a new Node subclass (Sub) without adding visit_sub to visitors →
+#             AttributeError at runtime on the first Sub node encountered</code></pre>
+
+      <pre><code># Usage example
+tree = Add(Num(1), Mul(Num(2), Num(3)))     # represents: 1 + 2*3
+
+ev = Evaluator()
+print(tree.accept(ev))           # 7
+
+pp = PrettyPrinter()
+print(tree.accept(pp))           # "(1 + (2 * 3))"
+
+# Add a new operation without touching Node classes:
+class NodeCounter:
+    def __init__(self): self.count = 0
+    def visit_num(self, n): self.count += 1; return None
+    def visit_add(self, n): self.count += 1; n.l.accept(self); n.r.accept(self)
+    def visit_mul(self, n): self.count += 1; n.l.accept(self); n.r.accept(self)
+
+nc = NodeCounter(); tree.accept(nc); print(nc.count)    # 5</code></pre>
+
+      <div class="diagram">
+<pre>
+AST:          Add
+             /   \
+           Num(1) Mul
+                 /   \
+               Num(2) Num(3)
+
+Trace: tree.accept(Evaluator())
+ step 0: Add.accept(ev)              → ev.visit_add(Add)
+ step 1: ev.visit_add(Add):
+           left  = Num(1).accept(ev) → ev.visit_num(Num(1)) → 1
+           right = Mul.accept(ev)    → ev.visit_mul(Mul)
+ step 2: ev.visit_mul(Mul):
+           left  = Num(2).accept(ev) → 2
+           right = Num(3).accept(ev) → 3
+           return 2 * 3 = 6
+ step 3: return 1 + 6 = 7
+
+Dispatch table:
+  Node type →  visitor method called
+  Num       →  visit_num
+  Add       →  visit_add
+  Mul       →  visit_mul</pre>
+      </div>
+
+      <div class="callout danger">
+        <div class="callout-title">How this breaks in production</div>
+        <ul>
+          <li><strong>New node, old visitor:</strong> you add <code>Sub</code> node; old <code>Evaluator</code> lacks <code>visit_sub</code> → <code>AttributeError</code> at runtime. <em>Why</em>: Visitor's Achilles heel — adding nodes is expensive. Fix: base Visitor class with a default <code>visit_unknown</code> that raises a helpful error.</li>
+          <li><strong>Forgotten recursion:</strong> someone writes <code>visit_add: return n.l.n + n.r.n</code> assuming children are Nums — crashes when children are Add themselves. <em>Why</em>: missed <code>.accept(self)</code>. Fix: tests on nested trees.</li>
+          <li><strong>Visitor holds state between trees:</strong> reuse <code>NodeCounter</code> across two trees without resetting <code>self.count</code> — results accumulate. <em>Why</em>: visitor instances are stateful. Fix: fresh visitor per traversal, or reset method.</li>
+          <li><strong>Encapsulation leak:</strong> Evaluator reaches into <code>n.l.n</code> (private) — Num can't rename that field without breaking visitors. <em>Why</em>: visitors need privileged access. Fix: nodes expose read-only properties.</li>
+        </ul>
+      </div>
+    </div>
+
+    <p><strong>When to use:</strong> stable class hierarchies (node types rarely change) but many varying operations (compilers, linters, formatters, JSON/XML serializers, AST-based tools).</p>
+
+    <p><strong>When NOT to use:</strong> the class hierarchy changes often. Every new node type forces every visitor to grow a new method. That is Visitor's Achilles heel. Also, Visitor breaks encapsulation — it needs access to node internals.</p>
+
+    <p><strong>Real-world:</strong> Python's <code>ast.NodeVisitor</code> (used by linters like <code>flake8</code>, <code>ruff</code>, formatters like <code>black</code>), Babel AST transforms, Roslyn (C# compiler) analyzers, Clang AST matchers, any ORM that walks a query-expression tree.</p>
+
+    <h3>8. Iterator — modern usage (generators, lazy sequences, async)</h3>
+
+    <p>GoF's Iterator is about exposing a collection's elements one at a time. In modern Python the pattern is almost invisible — <code>for x in xs</code> calls <code>__iter__</code>; generators and <code>yield</code> produce iterators for you; <code>async for</code> handles async streams. The pattern matters most when you design <em>your own</em> lazy sequence.</p>
+
+    <div class="callout">
+      <div class="callout-title">How the pieces talk</div>
+      <pre>
+  1. Client writes: for u in all_users(): notify(u)        # entry point
+  2. all_users() returns a generator object — NO DB hit yet
+  3. First iteration calls __next__() on the generator
+  4. Generator runs until `yield` — fetches batch of 1000, yields 1st User
+  5. notify() handles that User; control returns to generator at the yield
+  6. Generator yields next User from the already-fetched batch
+  7. When batch exhausts, fetchmany(1000) pulls next page
+  8. Empty batch → `return` → StopIteration → `for` loop ends
+  9. Only 1 user lives in memory at any moment, not 1 billion</pre>
+    </div>
+
+    <div class="callout danger">
+      <div class="callout-title">The pain — materializing a billion rows to loop over them</div>
+      <pre><code>def all_users():
+    rows = db.execute("SELECT * FROM users").fetchall()   # 1B rows → OOM
+    return [User(**r) for r in rows]
+
+for u in all_users():           # never reached — process died at fetchall
+    notify(u)</code></pre>
+    </div>
+
+    <div class="callout success">
+      <div class="callout-title">The fix — generator as iterator</div>
+      <pre><code>def all_users():
+    cursor = db.execute("SELECT * FROM users")
+    while True:
+        batch = cursor.fetchmany(1000)
+        if not batch: return
+        for row in batch:
+            yield User(**row)     # one User at a time, constant memory
+
+for u in all_users():
+    notify(u)
+
+# Async version — for streaming APIs, WebSockets, Kafka consumers
+async def all_events():
+    async for msg in kafka_consumer:
+        yield parse_event(msg)
+
+async def main():
+    async for ev in all_events():
+        await handle(ev)</code></pre>
+
+      <pre><code># why `yield` instead of return: function becomes a generator — resumable + lazy
+# why fetchmany(1000): balance between network round-trips and memory footprint
+# why `if not batch: return`: terminates iteration cleanly → StopIteration for caller
+# why async for: awaits each message independently — doesn't block event loop
+# Break this: call all_users() twice — SECOND call reuses exhausted cursor, gets nothing</code></pre>
+
+      <pre><code># Usage example
+# DB has 1B users; memory stays flat at ~kilobytes
+gen = all_users()                    # returns generator object, no query yet
+first_user = next(gen)               # fires SELECT, fetches 1000 rows, yields row 0
+second_user = next(gen)              # yields row 1 from cached batch (no new query)
+
+# Normal for-loop
+for u in all_users():                # implicit StopIteration when batches exhaust
+    notify(u)                        # handles 1B users with O(1000) memory
+
+# Async version over Kafka
+# msg rate = 10k/sec; event loop processes one at a time, never buffers all 10k</code></pre>
+
+      <div class="diagram">
+<pre>
+Memory profile (all_users, 1B rows, batch=1000):
+ t=0   gen created            heap: ~100 bytes (generator frame)
+ t=1   first next() → SELECT
+        fetchmany(1000)       heap: +80 KB (1000 rows buffered)
+        yield User row[0]
+ t=2   second next()
+        yield User row[1]     heap: unchanged (batch already in memory)
+  ...
+ t=1000 batch exhausts
+ t=1001 fetchmany(1000) again  heap: 80 KB (old batch freed, new one loaded)
+  ...
+ t=1B   empty batch → return   heap: 0 for rows
+
+Compare naive list approach:
+ t=0   fetchall()             heap: 80 GB — process OOMs before first user handled</pre>
+      </div>
+
+      <div class="callout danger">
+        <div class="callout-title">How this breaks in production</div>
+        <ul>
+          <li><strong>Consume twice:</strong> <code>users = all_users(); len(users); for u in users:</code> — <code>len</code> is not defined on generators, and even if you iterate once, the second iteration yields nothing. <em>Why</em>: generators are one-shot. Fix: call the function twice (new generator) or materialize into a list if small.</li>
+          <li><strong>Cursor timeout:</strong> downstream <code>notify</code> is slow (3s each); after 30 min the DB cursor times out mid-stream. <em>Why</em>: long-held server cursors. Fix: keyset pagination instead of server-side cursor.</li>
+          <li><strong>Exception mid-iteration:</strong> an exception escapes the <code>for</code> loop; the DB connection leaks (generator never called <code>cursor.close</code>). <em>Why</em>: generator cleanup runs only on <code>close()</code>/GC. Fix: <code>try/finally</code> inside the generator.</li>
+          <li><strong>Async back-pressure:</strong> Kafka produces faster than <code>handle</code> consumes; no bounded queue → consumer lag explodes. <em>Why</em>: async for doesn't bound. Fix: use <code>asyncio.Queue(maxsize=N)</code> between producer and consumer.</li>
+        </ul>
+      </div>
+    </div>
+
+    <p><strong>When to use:</strong> streaming large/infinite data, paginated APIs, file parsers, any pipeline where downstream can start work before upstream finishes.</p>
+
+    <p><strong>When NOT to use:</strong> data fits comfortably in memory and you need random access. A generator only supports one-shot forward iteration — <code>len()</code>, indexing, and rewinding all fail.</p>
+
+    <p><strong>Real-world:</strong> <code>itertools</code>, Python file objects, Django QuerySets (<code>.iterator()</code>), <code>aiohttp</code> response streaming, Apache Beam PCollections, Rust's <code>Iterator</code> trait.</p>
+
+    <hr/>
+    <h2>Part C — Modern / DDD Patterns</h2>
+
+    <h3>9. Specification — business rules as composable predicates</h3>
+
+    <p>A Specification is an object whose job is to answer "does this thing satisfy a rule?" Because specs are objects, you can combine them with <code>and_</code>, <code>or_</code>, <code>not_</code>, name them, unit test them, and reuse them across query layer + domain layer + UI validation.</p>
+
+    <div class="callout">
+      <div class="callout-title">How the pieces talk</div>
+      <pre>
+  1. Author composes rule:  DUNNING = IsActive() &amp; IsPremium() &amp; HasUnpaidInvoice()
+  2. `&amp;` dunder triggers Spec.__and__ → returns AndSpec(a, b)
+  3. Result is a tree of Spec objects: And(And(IsActive, IsPremium), HasUnpaidInvoice)
+  4. Client calls DUNNING.is_satisfied_by(user)                # entry point
+  5. AndSpec.is_satisfied_by delegates to a.is_satisfied_by AND b.is_satisfied_by
+  6. IsActive.is_satisfied_by(user) → user.is_active → True/False
+  7. Evaluation short-circuits on False (Python `and`)
+  8. Returns single bool — same rule reused by UI banner, cron job, SQL export</pre>
+    </div>
+
+    <div class="callout danger">
+      <div class="callout-title">The pain — the same boolean blob repeated everywhere</div>
+      <pre><code># In the API endpoint:
+if user.is_active and user.subscription == "premium" and user.unpaid_invoices &gt; 0:
+    show_dunning_banner()
+
+# In the cron job:
+for u in User.objects.all():
+    if u.is_active and u.subscription == "premium" and u.unpaid_invoices &gt; 0:
+        send_email(u)
+
+# In the admin dashboard, the SQL export, the billing retry worker...
+# Same rule in 7 places. Change it once → bug in the other 6.</code></pre>
+    </div>
+
+    <div class="callout success">
+      <div class="callout-title">The fix — Specification</div>
+      <pre><code>from abc import ABC, abstractmethod
+
+class Spec(ABC):
+    @abstractmethod
+    def is_satisfied_by(self, candidate) -&gt; bool: ...
+    def __and__(self, other): return AndSpec(self, other)
+    def __or__(self, other):  return OrSpec(self, other)
+    def __invert__(self):     return NotSpec(self)
+
+class AndSpec(Spec):
+    def __init__(self, a, b): self.a, self.b = a, b
+    def is_satisfied_by(self, c):
+        return self.a.is_satisfied_by(c) and self.b.is_satisfied_by(c)
+
+class OrSpec(Spec):
+    def __init__(self, a, b): self.a, self.b = a, b
+    def is_satisfied_by(self, c):
+        return self.a.is_satisfied_by(c) or self.b.is_satisfied_by(c)
+
+class NotSpec(Spec):
+    def __init__(self, a): self.a = a
+    def is_satisfied_by(self, c): return not self.a.is_satisfied_by(c)
+
+# Domain-specific specs
+class IsActive(Spec):
+    def is_satisfied_by(self, u): return u.is_active
+
+class IsPremium(Spec):
+    def is_satisfied_by(self, u): return u.subscription == "premium"
+
+class HasUnpaidInvoice(Spec):
+    def is_satisfied_by(self, u): return u.unpaid_invoices &gt; 0
+
+DUNNING_TARGET = IsActive() &amp; IsPremium() &amp; HasUnpaidInvoice()
+
+# One rule, used everywhere:
+if DUNNING_TARGET.is_satisfied_by(user): show_dunning_banner()
+for u in all_users:
+    if DUNNING_TARGET.is_satisfied_by(u): send_email(u)</code></pre>
+
+      <pre><code># why __and__/__or__/__invert__: overload operators so specs COMPOSE like booleans —
+#    reads like English, not function calls
+# why each atomic spec is its OWN class: named, unit-testable, documentable
+# why `is_satisfied_by(candidate)`: polymorphic — works on User, Order, any entity
+# why `self.a.is_satisfied_by(c) and self.b.is_satisfied_by(c)`: Python short-circuits —
+#    expensive checks go on the right side of &amp;
+# Break this: modify user mid-evaluation (concurrent thread) → AndSpec sees torn state</code></pre>
+
+      <pre><code># Usage example
+user = User(is_active=True, subscription="premium", unpaid_invoices=2)
+
+dunning = IsActive() &amp; IsPremium() &amp; HasUnpaidInvoice()
+print(dunning.is_satisfied_by(user))       # True
+
+# Compose in reverse too
+canceled = ~IsActive()                      # NotSpec
+print(canceled.is_satisfied_by(user))      # False
+
+# "Hot leads" = unpaid invoice OR churn risk
+hot_leads = HasUnpaidInvoice() | (IsPremium() &amp; ~IsActive())
+print(hot_leads.is_satisfied_by(user))     # True (has unpaid invoice)
+
+# Reuse across layers
+bulk_send = [u for u in all_users if dunning.is_satisfied_by(u)]
+render_banner = dunning.is_satisfied_by(current_user)</code></pre>
+
+      <div class="diagram">
+<pre>
+Spec tree for DUNNING = IsActive() &amp; IsPremium() &amp; HasUnpaidInvoice():
+
+              AndSpec
+             /       \
+          AndSpec    HasUnpaidInvoice
+          /     \
+      IsActive  IsPremium
+
+Evaluation of dunning.is_satisfied_by(user) where
+  user = {is_active: True, subscription: "premium", unpaid_invoices: 2}
+
+ step 1: outer AndSpec.a.is_satisfied_by(user)      # inner AndSpec
+ step 2:   inner AndSpec.a.is_satisfied_by(user)    # IsActive
+ step 3:     user.is_active → True
+ step 4:   inner AndSpec.b.is_satisfied_by(user)    # IsPremium
+ step 5:     user.subscription == "premium" → True
+ step 6:   inner returns True AND True → True
+ step 7: outer AndSpec.b.is_satisfied_by(user)      # HasUnpaidInvoice
+ step 8:   user.unpaid_invoices (2) > 0 → True
+ step 9: outer returns True AND True → True  ✓
+
+Short-circuit: if step 3 returned False, steps 4-9 would be skipped</pre>
+      </div>
+
+      <div class="callout danger">
+        <div class="callout-title">How this breaks in production</div>
+        <ul>
+          <li><strong>In-memory evaluation on 10M users:</strong> <code>for u in User.objects.all(): if spec.is_satisfied_by(u):</code> — you ship all 10M rows to Python to filter. <em>Why</em>: spec runs client-side; the DB can't see it. Fix: also generate a <code>to_sql()</code> / Q-object translator per spec for push-down.</li>
+          <li><strong>Precedence bug:</strong> <code>IsActive() | IsPremium() &amp; HasUnpaidInvoice()</code> — <code>&amp;</code> binds tighter than <code>|</code>, may not match intent. <em>Why</em>: Python operator precedence matches C, not English. Fix: parentheses always.</li>
+          <li><strong>Non-deterministic spec:</strong> <code>class IsOnTrial</code> calls <code>datetime.now()</code> — same user evaluates differently each call. <em>Why</em>: specs should be pure functions of input. Fix: inject "now" as part of candidate context.</li>
+          <li><strong>Mutable shared spec:</strong> someone assigns <code>IsPremium.threshold = 0</code> at runtime → global rule flip. <em>Why</em>: class-level state acts as global. Fix: parameterize at construction and freeze.</li>
+        </ul>
+      </div>
+    </div>
+
+    <p><strong>When to use:</strong> business rules used in multiple places, rules that combine, rules that need to be tested or explained to non-engineers. DDD projects lean on this heavily.</p>
+
+    <p><strong>When NOT to use:</strong> a one-liner used once. <code>if user.age &gt;= 18:</code> does not need a class.</p>
+
+    <p><strong>Real-world:</strong> Django <code>Q</code> objects, SQLAlchemy expression language (you compose predicates with <code>&amp;</code> and <code>|</code>), Drools rule engines, LINQ's <code>IQueryable</code>.</p>
+
+    <h3>10. Repository + Unit of Work — the DDD data layer</h3>
+
+    <p>Repository abstracts data access behind a collection-like interface ("give me user 42," "add this order"). Unit of Work tracks which aggregates are new/dirty/deleted, then commits them in one transaction. Together they keep your domain logic database-agnostic and testable.</p>
+
+    <div class="callout">
+      <div class="callout-title">How the pieces talk</div>
+      <pre>
+  1. Client calls transfer_funds(uow_factory, 1, 2, 500)     # entry point
+  2. `with uow_factory() as uow:` → SqlUnitOfWork.__enter__
+  3. __enter__ opens a Session, wires uow.accounts = SqlAccountRepo(session)
+  4. Business code: uow.accounts.get(1) → session.query(Account).get(1)
+  5. Business code mutates: src.withdraw(500) — domain invariants checked inline
+  6. Block exits normally → SqlUnitOfWork.__exit__(None, None, None)
+  7. __exit__ calls self.commit() → session.commit() → single DB transaction
+  8. On exception, __exit__ sees exc[0] truthy → self.rollback() instead
+  9. Tests swap SqlUnitOfWork for in-memory one — zero SQL, identical API</pre>
+    </div>
+
+    <div class="callout danger">
+      <div class="callout-title">The pain — SQL tangled through business logic</div>
+      <pre><code>def transfer_funds(from_id, to_id, amount):
+    conn = mysql.connect(...)                          # connection mgmt here??
+    cur = conn.cursor()
+    cur.execute("SELECT balance FROM accts WHERE id=%s FOR UPDATE", (from_id,))
+    from_bal = cur.fetchone()[0]
+    if from_bal &lt; amount: raise InsufficientFunds()
+    cur.execute("UPDATE accts SET balance=balance-%s WHERE id=%s", (amount, from_id))
+    cur.execute("UPDATE accts SET balance=balance+%s WHERE id=%s", (amount, to_id))
+    cur.execute("INSERT INTO ledger ...")
+    conn.commit()
+    conn.close()
+# Tests require a real DB. Swap to Postgres? Rewrite SQL. Caching? Sprinkle in.</code></pre>
+    </div>
+
+    <div class="callout success">
+      <div class="callout-title">The fix — Repository + Unit of Work</div>
+      <pre><code>from abc import ABC, abstractmethod
+
+class AccountRepo(ABC):
+    @abstractmethod
+    def get(self, id_: int): ...
+    @abstractmethod
+    def add(self, account): ...
+
+class SqlAccountRepo(AccountRepo):
+    def __init__(self, session): self.session = session
+    def get(self, id_): return self.session.query(Account).get(id_)
+    def add(self, a): self.session.add(a)
+
+class InMemoryAccountRepo(AccountRepo):            # for tests
+    def __init__(self): self._store = {}
+    def get(self, id_): return self._store[id_]
+    def add(self, a): self._store[a.id] = a
+
+class UnitOfWork(ABC):
+    accounts: AccountRepo
+    def __enter__(self): return self
+    def __exit__(self, *exc):
+        if exc[0]: self.rollback()
+        else:      self.commit()
+    @abstractmethod
+    def commit(self): ...
+    @abstractmethod
+    def rollback(self): ...
+
+class SqlUnitOfWork(UnitOfWork):
+    def __init__(self, session_factory):
+        self.session_factory = session_factory
+    def __enter__(self):
+        self.session = self.session_factory()
+        self.accounts = SqlAccountRepo(self.session)
+        return self
+    def commit(self): self.session.commit()
+    def rollback(self): self.session.rollback()
+
+# Business logic — no SQL, no conn.commit(), works against in-memory repo in tests
+def transfer_funds(uow_factory, from_id, to_id, amount):
+    with uow_factory() as uow:
+        src = uow.accounts.get(from_id)
+        dst = uow.accounts.get(to_id)
+        src.withdraw(amount)
+        dst.deposit(amount)
+        # implicit commit on context exit; rollback on exception</code></pre>
+
+      <pre><code># why AccountRepo is ABC: production = Sql; tests = InMemory — same API, zero changes to business
+# why UnitOfWork is a context manager: commit on success, rollback on any exception — atomic
+# why session_factory not session: new Session per UoW → isolation between concurrent requests
+# why src.withdraw(amount): invariants (balance &gt;= 0) live on the aggregate, not in SQL
+# Break this: leak the session OUTSIDE the `with` block → SQLAlchemy detached instance error</code></pre>
+
+      <pre><code># Usage example
+# Production wiring
+from sqlalchemy.orm import sessionmaker
+engine = create_engine("postgresql://...")
+Session = sessionmaker(bind=engine)
+
+def prod_uow(): return SqlUnitOfWork(Session)
+
+transfer_funds(prod_uow, from_id=1, to_id=2, amount=500)
+# 1. SqlUnitOfWork.__enter__ opens session
+# 2. uow.accounts.get(1) → Account(id=1, balance=1000)
+# 3. uow.accounts.get(2) → Account(id=2, balance=200)
+# 4. src.withdraw(500) → src.balance = 500
+# 5. dst.deposit(500)  → dst.balance = 700
+# 6. __exit__ with no exception → session.commit() → UPDATE ... UPDATE ...
+
+# Test wiring — no DB, runs in 0.01s
+class FakeUoW:
+    def __init__(self):
+        self.accounts = InMemoryAccountRepo()
+        self.accounts.add(Account(id=1, balance=1000))
+        self.accounts.add(Account(id=2, balance=200))
+    def __enter__(self): return self
+    def __exit__(self, *exc): pass
+
+transfer_funds(lambda: FakeUoW(), 1, 2, 500)</code></pre>
+
+      <div class="diagram">
+<pre>
+Happy path:
+ transfer_funds(uow_factory, 1, 2, 500)
+   │
+   ├─ uow_factory()              → SqlUnitOfWork instance
+   ├─ __enter__()
+   │    session = Session()       # BEGIN TRANSACTION
+   │    self.accounts = SqlAccountRepo(session)
+   │    return self
+   │
+   ├─ src = uow.accounts.get(1)    # SELECT ... WHERE id=1
+   │      → Account(id=1, balance=1000)
+   ├─ dst = uow.accounts.get(2)    # SELECT ... WHERE id=2
+   │      → Account(id=2, balance=200)
+   ├─ src.withdraw(500)            # src.balance = 500 (domain rule checked)
+   ├─ dst.deposit(500)             # dst.balance = 700
+   │
+   └─ __exit__(None, None, None)
+        exc[0] is None → self.commit()
+        session.commit()           # UPDATE ... UPDATE ... COMMIT
+
+Exception path (insufficient funds):
+  src.withdraw(5000) raises InsufficientFunds
+  __exit__(InsufficientFunds, ..., ...)
+  exc[0] is not None → self.rollback()
+  session.rollback()               # no changes persisted</pre>
+      </div>
+
+      <div class="callout danger">
+        <div class="callout-title">How this breaks in production</div>
+        <ul>
+          <li><strong>Leak the session:</strong> return <code>account</code> from inside the <code>with</code> block, access later → <code>DetachedInstanceError</code> on a lazy relationship. <em>Why</em>: ORM objects die with their session. Fix: convert to DTO before exit.</li>
+          <li><strong>N+1 inside UoW:</strong> <code>for a in repo.all(): a.owner.name</code> fires one SELECT per account. <em>Why</em>: repository hides query plans. Fix: explicit <code>.with_loader()</code> or a dedicated query method.</li>
+          <li><strong>UoW inside UoW:</strong> nested context managers open two transactions on the same Session → deadlock or silently-ignored inner commit. <em>Why</em>: SQLAlchemy savepoints are manual. Fix: single UoW per request; reject nesting.</li>
+          <li><strong>Forgetting commit:</strong> replaced <code>with uow:</code> with manual <code>uow.__enter__()</code> and never called <code>commit()</code> — changes silently lost. <em>Why</em>: context manager magic did the work. Fix: always use <code>with</code> or linter rule.</li>
+        </ul>
+      </div>
+    </div>
+
+    <p><strong>When to use:</strong> any system with complex domain logic that must outlive a specific database choice. Testability, swappability, and clean separation of persistence from behavior.</p>
+
+    <p><strong>When NOT to use:</strong> CRUD app where "domain logic" is <code>SELECT *</code>. The ORM is already your repo — do not wrap it in a pointless second layer.</p>
+
+    <p><strong>Real-world:</strong> SQLAlchemy (<code>Session</code> = Unit of Work, <code>Query</code> = Repository), Entity Framework, Hibernate, most DDD codebases (see Percival &amp; Gregory's <em>Architecture Patterns with Python</em>), Rails <code>ActiveRecord::Base.transaction</code>.</p>
+
+    <h3>11. Pipeline / Pipes &amp; Filters — compose processing steps</h3>
+
+    <p>Each filter is a function with one input and one output; you chain filters into a pipeline. Input flows through, each stage transforms it, the output drops out the end. The Unix philosophy in an object wrapper.</p>
+
+    <div class="callout">
+      <div class="callout-title">How the pieces talk</div>
+      <pre>
+  1. Build: pipeline = Pipeline().then(auto_rotate).then(resize).then(...)
+  2. Each .then() returns a NEW Pipeline with one more step appended (immutable-ish)
+  3. Client calls pipeline.run(uploaded_image)           # entry point
+  4. run() invokes reduce(): acc = uploaded_image
+  5. step 1: auto_rotate(acc) → rotated image — becomes new acc
+  6. step 2: resize(acc, 800, 600) → smaller image — new acc
+  7. step 3: compress(acc, 80) → byte-reduced image
+  8. step 4: add_watermark(acc, "© 2026") → watermarked
+  9. step 5: save_to_s3(acc) → uploads and returns URL
+ 10. Final acc (URL string) returned from run()</pre>
+    </div>
+
+    <div class="callout danger">
+      <div class="callout-title">The pain — deeply nested transformation calls</div>
+      <pre><code>def process(image):
+    return save_to_s3(
+        add_watermark(
+            compress(
+                resize(
+                    auto_rotate(image),
+                    800, 600
+                ),
+                quality=80
+            ),
+            "© 2026"
+        )
+    )
+# Reorder? Add a step? Conditional step? Good luck.</code></pre>
+    </div>
+
+    <div class="callout success">
+      <div class="callout-title">The fix — Pipeline</div>
+      <pre><code>from typing import Callable
+from functools import reduce
+
+class Pipeline:
+    def __init__(self, *steps: Callable):
+        self.steps = list(steps)
+    def then(self, step: Callable) -&gt; "Pipeline":
+        return Pipeline(*self.steps, step)
+    def run(self, data):
+        return reduce(lambda d, step: step(d), self.steps, data)
+
+# Filters — plain functions, unit-testable in isolation
+def auto_rotate(img): ...
+def resize(img, w=800, h=600): return img.resize((w, h))
+def compress(img, q=80): return img.with_quality(q)
+def add_watermark(img, text="© 2026"): return img.overlay(text)
+def save_to_s3(img): s3.put(img); return img.url
+
+pipeline = (Pipeline()
+    .then(auto_rotate)
+    .then(lambda i: resize(i, 800, 600))
+    .then(lambda i: compress(i, 80))
+    .then(lambda i: add_watermark(i, "© 2026"))
+    .then(save_to_s3))
+
+url = pipeline.run(uploaded_image)</code></pre>
+
+      <pre><code># why Pipeline stores a list of Callables: each step is just a function — max composability
+# why then() returns a NEW Pipeline: immutability → safe to share, branch, and test
+# why reduce(lambda d, step: step(d), ...): classic functional fold — data threads through
+# why lambdas around resize/compress: lock in config (quality=80) at build time
+# Break this: one step raises → reduce propagates exception → later steps never run →
+#             no cleanup of partial uploads, temp files, etc.</code></pre>
+
+      <pre><code># Usage example
+img = load("phone_selfie.jpg")       # 4000x3000, 8 MB
+
+# Build once
+pipeline = (Pipeline()
+    .then(auto_rotate)               # fixes EXIF rotation
+    .then(lambda i: resize(i, 800, 600))
+    .then(lambda i: compress(i, 80))
+    .then(lambda i: add_watermark(i, "© 2026"))
+    .then(save_to_s3))
+
+# Run many times
+url1 = pipeline.run(img)             # "https://cdn.example.com/abc123.jpg"
+url2 = pipeline.run(load("another.jpg"))
+
+# Branch per tenant
+premium_pipeline = pipeline.then(send_to_ai_enhancer)
+free_pipeline    = pipeline         # no AI for free tier</code></pre>
+
+      <div class="diagram">
+<pre>
+Input:  phone_selfie.jpg   4000x3000, 8 MB
+
+ step 0 reduce start:     acc = &lt;Image 4000x3000, 8MB&gt;
+ step 1 auto_rotate:      acc = &lt;Image 3000x4000, 8MB&gt; (rotated 90°)
+ step 2 resize(800,600):  acc = &lt;Image 800x600, 120KB&gt;
+ step 3 compress(80):     acc = &lt;Image 800x600, 55KB&gt; (JPEG q=80)
+ step 4 add_watermark:    acc = &lt;Image 800x600, 58KB&gt; with "© 2026"
+ step 5 save_to_s3:       acc = "https://cdn.example.com/abc123.jpg"
+
+ return "https://cdn.example.com/abc123.jpg"
+
+ Each step is O(1) to swap or reorder. Add a virus scan:
+   pipeline.then(scan_for_malware)   # just another then()</pre>
+      </div>
+
+      <div class="callout danger">
+        <div class="callout-title">How this breaks in production</div>
+        <ul>
+          <li><strong>Step expects Image but gets URL:</strong> accidentally reorder — <code>save_to_s3</code> comes before <code>add_watermark</code>; watermark tries to overlay a string. <em>Why</em>: no type check across steps. Fix: type hints + mypy / runtime assertions.</li>
+          <li><strong>Non-idempotent step + retry:</strong> pipeline retries from the top after a failure — <code>save_to_s3</code> uploads twice. <em>Why</em>: linear pipeline has no checkpoints. Fix: idempotency key on save, or split pipeline at the save boundary.</li>
+          <li><strong>Shared mutable input:</strong> <code>img.resize()</code> mutates in place; a second pipeline.run(img) gets an already-resized image. <em>Why</em>: steps should return new objects, not mutate. Fix: copy-on-write in each filter.</li>
+          <li><strong>No observability:</strong> pipeline silently ate an exception in <code>compress</code>; next day nothing reaches S3. <em>Why</em>: reduce gives no per-step hook. Fix: wrap each step with timing + logging decorator.</li>
+        </ul>
+      </div>
+    </div>
+
+    <p><strong>When to use:</strong> ETL, image/video/audio processing, compiler passes (lex → parse → type-check → optimize → codegen), request processing where steps are linear and swappable.</p>
+
+    <p><strong>When NOT to use:</strong> the flow is not linear — it branches, merges, or fans out. Then you want a DAG framework (Airflow, Prefect, Dagster) not a pipeline.</p>
+
+    <p><strong>Real-world:</strong> scikit-learn <code>Pipeline</code>, Unix pipes, Apache Beam, Logstash, Vector, Django's template filter chain, LLM prompt chaining (LangChain "chains").</p>
+
+    <h3>12. Null Object — a do-nothing stand-in</h3>
+
+    <p>Instead of returning <code>None</code> and forcing every caller to check, return a valid object whose methods do nothing (or return sensible defaults). The caller never branches; the null object absorbs calls silently.</p>
+
+    <div class="callout">
+      <div class="callout-title">How the pieces talk</div>
+      <pre>
+  1. Client calls get_logger("unknown_module")           # entry point
+  2. loggers dict has no entry for "unknown_module"
+  3. dict.get returns the default: NULL_LOGGER (a real Logger instance)
+  4. Client writes: log.info("hello") — always, no `if log` check
+  5. NullLogger.info(msg) → pass        # absorbs call, zero output
+  6. Same call on a real Logger: prints "INFO  hello"
+  7. Caller's code is identical for both — polymorphism over None-check</pre>
+    </div>
+
+    <div class="callout danger">
+      <div class="callout-title">The pain — None-checks metastasize</div>
+      <pre><code>def get_logger(name):
+    return loggers.get(name)     # may return None
+
+log = get_logger("billing")
+if log: log.info("charge started")
+# ... 50 lines ...
+if log: log.info("charge authorized")
+# ... 80 lines ...
+if log: log.error("charge failed")
+# Miss one `if log` → AttributeError in prod at 3 AM.</code></pre>
+    </div>
+
+    <div class="callout success">
+      <div class="callout-title">The fix — Null Object</div>
+      <pre><code>class Logger:
+    def info(self, msg): print(f"INFO  {msg}")
+    def error(self, msg): print(f"ERROR {msg}")
+
+class NullLogger(Logger):
+    def info(self, msg): pass
+    def error(self, msg): pass
+
+NULL_LOGGER = NullLogger()
+
+def get_logger(name):
+    return loggers.get(name, NULL_LOGGER)    # never None
+
+log = get_logger("billing")
+log.info("charge started")           # no if. no None. safe.
+log.info("charge authorized")
+log.error("charge failed")</code></pre>
+
+      <pre><code># why NullLogger INHERITS from Logger: type checker sees same interface everywhere
+# why methods `pass`: the WHOLE POINT — absorb the call, do nothing, return None silently
+# why NULL_LOGGER is module-level singleton: reused across millions of calls, zero alloc
+# why dict.get(name, NULL_LOGGER): atomic — never returns None
+# Break this: have NullLogger.error(msg) actually RAISE → you've just hidden real bugs in prod</code></pre>
+
+      <pre><code># Usage example
+loggers = {"billing": Logger(), "auth": Logger()}
+
+log = get_logger("billing")          # real Logger
+log.info("charge OK")                # prints "INFO  charge OK"
+
+log = get_logger("analytics")        # not in dict
+log.info("event fired")              # NULL_LOGGER.info → pass → no output, no error
+log.error("whatever")                # also silent
+
+# Contrast with None-check world:
+# log = loggers.get("analytics")       # None
+# log.info("event fired")              # AttributeError: 'NoneType' has no attribute 'info'</code></pre>
+
+      <div class="diagram">
+<pre>
+Class hierarchy:
+   Logger (real)
+     ├── info(msg)   → print "INFO  {msg}"
+     └── error(msg)  → print "ERROR {msg}"
+   NullLogger(Logger)
+     ├── info(msg)   → pass
+     └── error(msg)  → pass
+
+Dispatch trace for get_logger("analytics").info("x"):
+ t=0  loggers = {"billing": &lt;Logger&gt;, "auth": &lt;Logger&gt;}
+ t=1  loggers.get("analytics", NULL_LOGGER) → NULL_LOGGER
+ t=2  log = NULL_LOGGER
+ t=3  log.info("x")
+ t=4  NullLogger.info(self, "x") → pass   # no side effect
+ t=5  returns None (implicit)
+
+Dispatch trace for get_logger("billing").info("x"):
+ t=0  loggers.get("billing", ...) → &lt;Logger instance&gt;
+ t=1  log.info("x")
+ t=2  Logger.info(self, "x") → print("INFO  x")</pre>
+      </div>
+
+      <div class="callout danger">
+        <div class="callout-title">How this breaks in production</div>
+        <ul>
+          <li><strong>Silent data loss:</strong> someone uses NullObject for a <code>Database</code> — every <code>db.save(x)</code> is a no-op, no errors, records vanish. <em>Why</em>: Null Object for critical resources hides bugs. Fix: only for OPTIONAL collaborators (logger, metrics, tracer).</li>
+          <li><strong>Null returns None everywhere:</strong> <code>NullUser.get_email()</code> returns <code>None</code>; caller does <code>email.lower()</code> → <code>AttributeError</code>. <em>Why</em>: null object must return SENSIBLE defaults, not None. Fix: return empty string.</li>
+          <li><strong>Hidden unconfigured state:</strong> loggers dict never populated in a new env — every log silently drops; 3 weeks later you debug a bug with zero log history. <em>Why</em>: null object masks misconfiguration. Fix: emit a startup warning when NullLogger is returned.</li>
+          <li><strong>Equality surprises:</strong> <code>get_logger("x") == get_logger("y")</code> is True (both NULL_LOGGER) — callers that use logger identity for dedup now dedup everything. <em>Why</em>: singleton identity. Fix: document; compare by name, not instance.</li>
+        </ul>
+      </div>
+    </div>
+
+    <p><strong>When to use:</strong> default collaborators (logger, metrics, tracer, feature flag client), default strategies ("no discount" is still a discount policy), default users ("anonymous" is still a user).</p>
+
+    <p><strong>When NOT to use:</strong> the absence of the object is a real error the caller must handle. Silently swallowing a failed DB connection is not "elegant" — it is a bug factory. Null Object suits <em>optional collaborators</em>, not mandatory resources.</p>
+
+    <p><strong>Real-world:</strong> Python's <code>logging.NullHandler</code>, <code>collections.defaultdict</code>, Go's zero values, <code>Optional.empty()</code> in Java, Django's <code>AnonymousUser</code>.</p>
+
+    <hr/>
+    <h2>Part D — Resilience &amp; Async Patterns</h2>
+
+    <h3>13. Circuit Breaker (as an OO pattern)</h3>
+
+    <p>Chapter 8 showed the production implementation. Here we treat it as a pure pattern: the State pattern specialized for failure. A circuit has three states — <strong>Closed</strong> (normal, requests pass through), <strong>Open</strong> (broken, requests fail fast), <strong>Half-Open</strong> (probing, one request allowed through to check recovery). Transitions are driven by success/failure counts and time.</p>
+
+    <div class="callout">
+      <div class="callout-title">How the pieces talk</div>
+      <pre>
+  1. Client calls breaker.call(requests.post, url, json=...)    # entry point
+  2. call() inspects self.state:
+      - OPEN + cooldown not elapsed → raise CircuitOpenError (fail fast)
+      - OPEN + cooldown elapsed → flip to HALF_OPEN, let one request through
+      - CLOSED → let through normally
+  3. Invokes fn(*args, **kwargs)
+  4. Success → _record_success() → state = CLOSED, failures = 0
+  5. Exception → _record_failure() + re-raise
+      - HALF_OPEN on failure → immediately OPEN again (probe failed)
+      - CLOSED on failure → increment; if ≥ threshold → OPEN + stamp opened_at
+  6. Future calls see updated state — breaker memory lives across requests</pre>
+    </div>
+
+    <div class="callout success">
+      <div class="callout-title">50-line implementation</div>
+      <pre><code>import time
+from enum import Enum
+
+class State(Enum):
+    CLOSED = "closed"
+    OPEN = "open"
+    HALF_OPEN = "half_open"
+
+class CircuitBreaker:
+    def __init__(self, fail_threshold=5, reset_after_s=30):
+        self.fail_threshold = fail_threshold
+        self.reset_after_s = reset_after_s
+        self.state = State.CLOSED
+        self.failures = 0
+        self.opened_at = 0.0
+
+    def call(self, fn, *args, **kwargs):
+        if self.state == State.OPEN:
+            if time.time() - self.opened_at &gt;= self.reset_after_s:
+                self.state = State.HALF_OPEN
+            else:
+                raise CircuitOpenError()
+        try:
+            result = fn(*args, **kwargs)
+        except Exception:
+            self._record_failure()
+            raise
+        self._record_success()
+        return result
+
+    def _record_failure(self):
+        self.failures += 1
+        if self.state == State.HALF_OPEN or self.failures &gt;= self.fail_threshold:
+            self.state = State.OPEN
+            self.opened_at = time.time()
+
+    def _record_success(self):
+        self.failures = 0
+        self.state = State.CLOSED
+
+class CircuitOpenError(Exception): pass
+
+# Usage
+payments_cb = CircuitBreaker(fail_threshold=5, reset_after_s=30)
+try:
+    resp = payments_cb.call(requests.post, "https://payments.example/charge",
+                             json={"amount": 99})
+except CircuitOpenError:
+    return "try again later"</code></pre>
+
+      <pre><code># why three states: CLOSED lets traffic flow; OPEN fails fast; HALF_OPEN tests recovery
+# why check state BEFORE calling fn: when OPEN, we want to skip the network call entirely
+# why self.opened_at timestamp: cooldown gate — don't probe upstream too soon
+# why HALF_OPEN failure IMMEDIATELY reopens: one probe is enough signal
+# why _record_success resets failures: transient blip shouldn't trip the breaker
+# Break this: share one breaker across 500 endpoints → one bad endpoint opens ALL of them</code></pre>
+
+      <pre><code># Usage example
+cb = CircuitBreaker(fail_threshold=3, reset_after_s=10)
+
+# Normal path — upstream healthy
+r = cb.call(lambda: "ok")            # "ok"; state CLOSED; failures=0
+
+# Three consecutive failures
+for _ in range(3):
+    try: cb.call(lambda: (_ for _ in ()).throw(TimeoutError()))
+    except TimeoutError: pass
+# state = OPEN; opened_at = now
+
+# Next call fails fast — never reaches upstream
+try: cb.call(lambda: "ok")
+except CircuitOpenError: print("fail fast")   # prints immediately
+
+# Wait 10s, next call → HALF_OPEN probe
+time.sleep(11)
+r = cb.call(lambda: "ok")            # probe succeeds → state=CLOSED; failures=0</code></pre>
+
+      <div class="diagram">
+<pre>
+State machine:
+               fail_threshold reached
+   CLOSED ────────────────────────────► OPEN
+     ▲                                    │
+     │ success (probe ok)                 │ reset_after_s elapsed
+     │                                    ▼
+     └──────────── HALF_OPEN ◄────────────┘
+                     │
+                     │ fail (probe fail)
+                     ▼
+                    OPEN (re-opens immediately)
+
+Event trace with threshold=3, reset=10s:
+ t=0   CLOSED,    failures=0
+ t=1   call fails failures=1 CLOSED
+ t=2   call fails failures=2 CLOSED
+ t=3   call fails failures=3 → OPEN, opened_at=3
+ t=4   call → CircuitOpenError (0 ms, no network)
+ t=5   call → CircuitOpenError
+ t=13  cooldown elapsed → HALF_OPEN
+ t=13  call succeeds → _record_success → CLOSED, failures=0
+ t=14  back to normal operation</pre>
+      </div>
+
+      <div class="callout danger">
+        <div class="callout-title">How this breaks in production</div>
+        <ul>
+          <li><strong>Not thread-safe:</strong> 100 threads increment <code>self.failures</code> concurrently; actual count is racy. <em>Why</em>: no lock around state mutation. Fix: <code>threading.Lock</code> around check-and-update, or atomic counter.</li>
+          <li><strong>Wrong error classification:</strong> breaker counts 404s as failures and trips on a valid "not found" response. <em>Why</em>: catches all exceptions blindly. Fix: classify exceptions — only count 5xx, timeouts, connection errors.</li>
+          <li><strong>Breaker never closes:</strong> HALF_OPEN probe immediately fails (service still down), breaker oscillates CLOSED→OPEN without dwelling long. <em>Why</em>: success threshold = 1 is fragile. Fix: require N consecutive half-open successes before CLOSED.</li>
+          <li><strong>One breaker for many endpoints:</strong> <code>/users</code> failing opens the breaker for <code>/orders</code> too. <em>Why</em>: too coarse. Fix: one breaker per dependency (endpoint/host), keyed map.</li>
+        </ul>
+      </div>
+    </div>
+
+    <p><strong>When to use:</strong> any call to a remote dependency that can hang or fail in bursts — payment APIs, third-party search, recommendation services, LLM APIs.</p>
+
+    <p><strong>When NOT to use:</strong> calls inside a single process (just catch the exception). Also, do not attach a breaker to <em>every</em> call — only the ones whose failure mode is "hangs and drags us down."</p>
+
+    <p><strong>Real-world:</strong> Netflix Hystrix (original), resilience4j (Java), Polly (.NET), pybreaker, Istio/Envoy service-mesh breakers, AWS SDK retry+breaker in every language binding.</p>
+
+    <h3>14. Retry with Backoff (as a pattern)</h3>
+
+    <p>A decorator wraps any idempotent operation with automatic retry. Exponential backoff grows the wait between retries; jitter randomizes it so 10,000 clients do not retry in lock-step and hammer the server.</p>
+
+    <div class="callout">
+      <div class="callout-title">How the pieces talk</div>
+      <pre>
+  1. @retry(tries=5, base_delay=0.2, ...) decorates fetch_user
+  2. Client calls fetch_user(42)                  # entry point, invokes wrapper
+  3. wrapper loops attempt = 0..tries-1
+  4. Try: return fn(42) → requests.get(...) → JSON
+  5. On ConnectionError: attempt is 0, not last → compute delay
+  6. delay = min(0.2 * 2**0, 8.0) = 0.2  → jitter × 0.5..1.5 → e.g. 0.26s
+  7. time.sleep(delay) → retry loop, attempt=1
+  8. If attempt == tries-1 and still failing → raise last_exc (give up)
+  9. Backoff curve: 0.2 → 0.4 → 0.8 → 1.6 → 3.2 (capped at max_delay)</pre>
+    </div>
+
+    <div class="callout success">
+      <div class="callout-title">Decorator-based implementation</div>
+      <pre><code>import random, time
+from functools import wraps
+
+def retry(tries=4, base_delay=0.5, max_delay=8.0, exceptions=(Exception,)):
+    def deco(fn):
+        @wraps(fn)
+        def wrapper(*args, **kwargs):
+            last_exc = None
+            for attempt in range(tries):
+                try:
+                    return fn(*args, **kwargs)
+                except exceptions as e:
+                    last_exc = e
+                    if attempt == tries - 1: raise
+                    delay = min(base_delay * 2 ** attempt, max_delay)
+                    delay *= (0.5 + random.random())      # jitter: 0.5×–1.5×
+                    time.sleep(delay)
+            raise last_exc
+        return wrapper
+    return deco
+
+@retry(tries=5, base_delay=0.2, exceptions=(ConnectionError, TimeoutError))
+def fetch_user(user_id):
+    return requests.get(f"https://api.example.com/users/{user_id}", timeout=2).json()</code></pre>
+
+      <pre><code># why tries=4 (not infinite): bound worst-case latency — never retry forever
+# why base_delay * 2**attempt: exponential growth — gives upstream time to recover
+# why min(..., max_delay): cap at sane upper bound — avoid 1-hour sleeps
+# why jitter 0.5..1.5×: decorrelates retry waves from 10k clients → no thundering herd
+# why `exceptions` param: only retry on TRANSIENT errors — don't retry 400 Bad Request
+# why @wraps(fn): preserves __name__, docstring — decorator-friendly stack traces
+# Break this: forget idempotency → retry a POST /charge twice → double-bill the user</code></pre>
+
+      <pre><code># Usage example
+# Scenario: flaky API, 1st two attempts timeout, 3rd succeeds
+# Timeline with base=0.2, jitter=random 0.5..1.5:
+#   t=0.00   attempt 0: TimeoutError
+#            delay = 0.2*1 = 0.2, jittered → 0.14s
+#   t=0.14   attempt 1: TimeoutError
+#            delay = 0.2*2 = 0.4, jittered → 0.55s
+#   t=0.69   attempt 2: SUCCESS → returns {"id": 42, "name": "..."}
+
+user = fetch_user(42)                  # total latency ~0.9s, transparent to caller
+
+# All attempts fail:
+#   attempt 0..4 all TimeoutError
+#   at attempt == 4 (== tries-1): raise last_exc
+# Caller sees TimeoutError (original, after 5 tries spanning ~6 seconds)</code></pre>
+
+      <div class="diagram">
+<pre>
+Backoff curve (base=0.5, max=8.0, no jitter):
+ attempt 0 → 0.5s sleep
+ attempt 1 → 1.0s sleep
+ attempt 2 → 2.0s sleep
+ attempt 3 → 4.0s sleep
+ attempt 4 → 8.0s sleep (capped)
+
+With jitter (0.5..1.5× multiplier):
+ attempt 0 → random in [0.25, 0.75]
+ attempt 1 → random in [0.50, 1.50]
+ attempt 2 → random in [1.00, 3.00]
+ ...
+
+Retry-storm prevention:
+  10k clients fail simultaneously
+  WITHOUT jitter: all retry at t=0.5 → second wave hits server in lock-step
+  WITH jitter:     retries spread across 0.25..0.75s → server sees smooth load
+
+Call trace (attempts 0 and 1 fail, 2 succeeds):
+ t=0.00 wrapper called, attempt=0
+ t=0.00 fn(42) → raises ConnectionError
+ t=0.00 last_exc = e; delay = 0.2; sleep(0.14)
+ t=0.14 attempt=1, fn(42) → raises ConnectionError
+ t=0.14 sleep(0.55)
+ t=0.69 attempt=2, fn(42) → returns {...}
+ t=0.69 return value bubbles up to caller</pre>
+      </div>
+
+      <div class="callout danger">
+        <div class="callout-title">How this breaks in production</div>
+        <ul>
+          <li><strong>Non-idempotent retried:</strong> <code>POST /charge</code> retries and double-charges because the first call succeeded server-side but the response was lost. <em>Why</em>: retry assumes idempotency. Fix: idempotency keys on the server, or retry only on connect errors (never on 5xx).</li>
+          <li><strong>Retry inside retry:</strong> inner HTTP client retries 5×; outer app retries 5× → 25× total, DDoS-ing upstream. <em>Why</em>: stacked retries compound. Fix: disable retries in the inner layer when outer retries.</li>
+          <li><strong>No jitter:</strong> 100k mobile devices lose WiFi at once, all retry at exactly t=1.0s → synchronized thundering herd. <em>Why</em>: deterministic backoff. Fix: always add jitter.</li>
+          <li><strong>Retrying on 4xx:</strong> retrying a 400 Bad Request 5× — server still says 400. <em>Why</em>: retry policy didn't classify errors. Fix: whitelist retriable statuses (429, 502, 503, 504) + exceptions (Timeout, ConnectionError).</li>
+        </ul>
+      </div>
+    </div>
+
+    <p><strong>When to use:</strong> idempotent network calls (GET, PUT with idempotency keys), flaky I/O, eventually-consistent reads.</p>
+
+    <p><strong>When NOT to use:</strong> non-idempotent operations (don't double-charge a credit card). Don't retry on 4xx responses — the server is telling you the request is wrong. Don't retry inside a retry — "retry storms" melt downstream systems.</p>
+
+    <p><strong>Real-world:</strong> <code>tenacity</code> (Python), <code>backoff</code>, AWS SDK (adaptive retry mode), Kubernetes controllers (rate-limited work queue with exponential backoff), every gRPC client.</p>
+
+    <h3>15. Async Patterns — a whirlwind tour</h3>
+
+    <p>Async is its own book. Here are the three patterns you will meet on day one of any Python async codebase.</p>
+
+    <div class="callout">
+      <div class="callout-title">How the pieces talk (producer/consumer with asyncio.Queue)</div>
+      <pre>
+  1. main() creates bounded queue: q = asyncio.Queue(maxsize=10)
+  2. gather() schedules producer and consumer concurrently on event loop
+  3. producer loops 0..99: await q.put(i) — BLOCKS if queue is full (backpressure)
+  4. consumer: await q.get() — BLOCKS if queue is empty
+  5. Event loop interleaves them: producer runs while consumer awaits, vice versa
+  6. Producer at i=9 fills queue; next put() suspends until consumer pops
+  7. Consumer sees None sentinel → breaks loop
+  8. gather() resolves when BOTH tasks complete; one raises → others cancelled</pre>
+    </div>
+
+    <p><strong>Future / Promise</strong> — a handle to a value that will exist later. <code>asyncio.Future</code>, <code>concurrent.futures.Future</code>. Callers <code>await</code> it; producers <code>set_result()</code>.</p>
+
+    <pre><code>import asyncio
+
+async def slow_compute():
+    await asyncio.sleep(1)     # why await sleep: yields control back to event loop
+    return 42
+
+async def main():
+    fut = asyncio.ensure_future(slow_compute())   # why ensure_future: schedules on loop NOW,
+                                                  #   returns Task immediately — concurrency begins
+    do_other_work()                               # runs DURING the 1s sleep — wallclock-cheap
+    value = await fut                              # why await: suspends main() until fut resolves
+    print(value)                                   # prints 42
+# Break this: forget await fut → program exits, task silently cancelled, result lost</code></pre>
+
+    <pre><code># Usage example — run two slow ops concurrently
+import asyncio, time
+
+async def slow_compute():
+    await asyncio.sleep(1); return 42
+
+async def main():
+    t0 = time.time()
+    f1 = asyncio.ensure_future(slow_compute())
+    f2 = asyncio.ensure_future(slow_compute())
+    v1, v2 = await f1, await f2
+    print(v1, v2, f"took {time.time()-t0:.2f}s")   # 42 42 took 1.00s (not 2s!)
+
+asyncio.run(main())</code></pre>
+
+    <p><strong>Producer–Consumer with <code>asyncio.Queue</code></strong> — decouple rate of production from rate of consumption. Bounded queue gives you backpressure for free.</p>
+
+    <pre><code>import asyncio
+
+async def producer(q):
+    for i in range(100):
+        await q.put(i)        # why await put: blocks if queue is full → natural backpressure
+    await q.put(None)         # why sentinel: signals end of stream to consumer
+
+async def consumer(q):
+    while True:
+        item = await q.get()  # why await get: blocks until producer puts an item
+        if item is None: break  # why break: graceful shutdown when sentinel arrives
+        await process(item)
+
+async def main():
+    q = asyncio.Queue(maxsize=10)   # why maxsize=10: cap memory — producer slows when full
+    await asyncio.gather(producer(q), consumer(q))  # why gather: runs both concurrently
+# Break this: unbounded queue + slow consumer → memory grows unboundedly → OOM</code></pre>
+
+    <div class="diagram">
+<pre>
+Timeline (queue maxsize=3, producer fast, consumer slow):
+
+ t=0.0  producer puts 0          queue=[0]           ─┐
+ t=0.0  producer puts 1          queue=[0,1]          │  producer bursts
+ t=0.0  producer puts 2          queue=[0,1,2]        │  until queue full
+ t=0.0  producer tries put 3     queue=[0,1,2] FULL  ─┘
+        SUSPENDS until consumer pops
+
+ t=0.1  consumer gets 0          queue=[1,2]         ─┐
+ t=0.1  producer resumes put 3   queue=[1,2,3] FULL   │  producer blocked again
+        SUSPENDS                                      │
+ t=0.2  consumer gets 1          queue=[2,3]          │
+ t=0.2  producer put 4           queue=[2,3,4] FULL   │
+ ...                                                 ─┘
+  eventually: producer puts None (sentinel)
+             consumer sees None → breaks
+             gather() resolves
+
+Backpressure in action: fast producer + slow consumer run at CONSUMER's pace,
+memory bounded at maxsize=3 items (~KB), not unbounded (potentially GB).</pre>
+    </div>
+
+    <div class="callout danger">
+      <div class="callout-title">How this breaks in production</div>
+      <ul>
+        <li><strong>No sentinel:</strong> producer finishes but never puts <code>None</code>; consumer awaits <code>get()</code> forever. <em>Why</em>: asyncio.Queue doesn't auto-close. Fix: always emit sentinel in a finally block.</li>
+        <li><strong>Multiple consumers, one sentinel:</strong> 5 consumers, one sentinel — only one sees None, the other 4 hang. <em>Why</em>: sentinel consumed once. Fix: put N sentinels (one per consumer).</li>
+        <li><strong>Sync code inside async:</strong> <code>process(item)</code> does blocking I/O (<code>requests.get</code>) — event loop stalls, consumer starves producer. <em>Why</em>: sync call blocks the single thread. Fix: use aiohttp/httpx, or run in executor.</li>
+        <li><strong>Unhandled exception in task:</strong> consumer raises; producer keeps running, never notices, gather eventually reports the original exception from somewhere in the middle. <em>Why</em>: gather returns partial results. Fix: TaskGroup (3.11+) — structured cancellation.</li>
+      </ul>
+    </div>
+
+    <p><strong>Cancellation Tokens</strong> — in Python, <code>task.cancel()</code> injects a <code>CancelledError</code> at the next <code>await</code>. Cleanup in <code>try/finally</code>. In 3.11+, <code>TaskGroup</code> does structured cancellation automatically.</p>
+
+    <pre><code>async def main():
+    async with asyncio.TaskGroup() as tg:
+        t1 = tg.create_task(download("a"))
+        t2 = tg.create_task(download("b"))
+    # both complete on exit, OR if one raises, the other is cancelled + awaited.
+    # No zombie tasks. This is the 2026 default.</code></pre>
+
+    <p><strong>When NOT to use async:</strong> CPU-bound work. Async gives you concurrency for I/O-bound workloads; for CPU work, use processes (<code>multiprocessing</code>, <code>ProcessPoolExecutor</code>). Mixing the two without understanding the GIL is a classic footgun.</p>
+
+    <hr/>
+    <h2>The Anti-Patterns Section</h2>
+
+    <p>Patterns that sound smart and usually aren't. If you spot these in a review, push back.</p>
+
+    <h3>God Object</h3>
+    <p>One class that knows about everything. The <code>UserService</code> that handles auth, profile, billing, notifications, referrals, analytics, and legal compliance. Symptom: the file is 3,000 lines and no one wants to edit it. Fix: split by <em>bounded context</em> (DDD) — separate <code>AuthService</code>, <code>BillingService</code>, <code>NotificationService</code>. Each under 300 lines.</p>
+
+    <h3>Spaghetti Inheritance</h3>
+    <p><code>PremiumAnnualCorporateMexicoUser extends PremiumAnnualCorporateUser extends PremiumAnnualUser extends PremiumUser extends User</code>. Six levels deep, and now Mexico wants a feature that Premium doesn't. Fix: composition. A <code>User</code> has a <code>Plan</code>, a <code>Region</code>, and a <code>BillingCycle</code>. Swap pieces, don't subclass.</p>
+
+    <h3>Premature Abstraction</h3>
+    <p>An <code>IUserRepository</code> interface with exactly one implementation (<code>SqlUserRepository</code>), added "for flexibility." Two years later it still has one implementation, but every change needs two file edits. Rule of three: don't abstract until you have three concrete cases, or a proven need (e.g., a test double).</p>
+
+    <h3>Anemic Domain Model</h3>
+    <p>Classes with getters, setters, and nothing else — all behavior lives in "service" classes that manipulate the dumb data. You lose encapsulation, invariants leak, and the "objects" are really just structs with ceremony. Fix: put behavior on the thing that owns the data. <code>account.withdraw(100)</code> enforces <code>balance &gt;= 0</code> — <code>AccountService.withdraw(account, 100)</code> does not.</p>
+
+    <h3>Service Locator (vs Dependency Injection)</h3>
+    <p>A global registry <code>ServiceLocator.get("UserRepo")</code> that any code can pull from. Pros: easy to wire. Cons: dependencies are hidden — reading the class signature tells you nothing; you must grep the body to find what it uses. Tests become order-dependent nightmares. Prefer constructor injection: if your class needs a <code>UserRepo</code>, take one in <code>__init__</code>.</p>
+
+    <h3>Stringly-Typed Code</h3>
+    <pre><code># bad
+def charge(amount, currency="USD", status="pending"):
+    if status == "penging":    # typo — silent bug
+        ...
+
+# good
+from enum import Enum
+class Status(Enum): PENDING="pending"; SUCCEEDED="succeeded"; FAILED="failed"
+def charge(amount: Decimal, currency: Currency, status: Status):
+    ...</code></pre>
+    <p>Types and enums turn runtime bugs into import-time bugs. Your IDE autocompletes; your linter catches typos; your tests get shorter.</p>
+
+    <hr/>
+    <h2>The Pattern Composition Map</h2>
+
+    <p>Real systems are never one pattern. Here is how they combine.</p>
+
+    <table>
+      <thead>
+        <tr><th>Combination</th><th>Produces</th><th>Example in the wild</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Repository + Unit of Work + Specification</td><td>DDD data-access layer</td><td><em>Architecture Patterns with Python</em> (Percival &amp; Gregory); most "hexagonal" codebases</td></tr>
+        <tr><td>Strategy + Factory</td><td>Plugin system</td><td>Sklearn estimators, Terraform providers, VS Code extensions</td></tr>
+        <tr><td>Observer + Command</td><td>Event sourcing foundation</td><td>EventStore, Axon, Kafka consumers producing side-effects</td></tr>
+        <tr><td>State + Memento</td><td>Undo/redo on a stateful machine</td><td>Figma, Photoshop history, Redux DevTools</td></tr>
+        <tr><td>Mediator + Observer</td><td>Event bus / pub-sub in-process</td><td>Redux, Vuex, NServiceBus, in-memory signals in Django</td></tr>
+        <tr><td>Chain of Responsibility + Decorator</td><td>Request middleware stack</td><td>Express.js, Django, ASP.NET Core, Envoy filters</td></tr>
+        <tr><td>Composite + Visitor</td><td>Language tooling (AST tools)</td><td>Python <code>ast</code>, Babel, Roslyn, Clang, <code>ruff</code></td></tr>
+        <tr><td>Pipeline + Strategy</td><td>Swappable processing stages</td><td>scikit-learn, Apache Beam, LangChain</td></tr>
+        <tr><td>Circuit Breaker + Retry + Bulkhead</td><td>Resilience stack</td><td>resilience4j, Polly, Istio + Envoy mesh</td></tr>
+        <tr><td>Flyweight + Prototype</td><td>Efficient entity spawning in games</td><td>Unity GameObjects, Unreal Actors</td></tr>
+        <tr><td>Factory + Builder + Specification</td><td>Complex object construction with validation</td><td>Query builders (SQLAlchemy, Criteria API)</td></tr>
+      </tbody>
+    </table>
+
+    <hr/>
+    <h2>Pattern-Selection Flowchart (ASCII)</h2>
+
+    <div class="diagram">
+<pre>
+                         WHAT IS YOUR SYMPTOM?
+                                  |
+        +-------------------------+-------------------------+
+        |                         |                         |
+   "Too many objects"      "Too many if/elif"        "Classes coupled"
+        |                         |                         |
+        v                         v                         v
+ 1M instances of few     Branching on type field     N × M hierarchy?
+ kinds? -&gt; FLYWEIGHT     -&gt; STRATEGY / STATE         -&gt; BRIDGE
+                         Branching on request type   N objects talking
+                         -&gt; CHAIN OF RESPONSIBILITY  to each other?
+                                                     -&gt; MEDIATOR
+
+        "Tree / nesting"          "Adding features"       "Cross-cutting"
+              |                         |                       |
+              v                         v                       v
+      Need uniform ops on       New op on stable      Wrap behavior around
+      leaf+node? -&gt; COMPOSITE   hierarchy? -&gt; VISITOR  call? -&gt; DECORATOR
+                                                       Run phases in order?
+                                                       -&gt; PIPELINE
+
+            "Undo / history"         "Business rules"      "External I/O flaky"
+                   |                         |                      |
+                   v                         v                      v
+            Snapshot state         Composable predicates    Fail fast + recover
+            -&gt; MEMENTO             -&gt; SPECIFICATION         -&gt; CIRCUIT BREAKER
+            Deltas only?                                    Transient errors?
+            -&gt; COMMAND                                      -&gt; RETRY + BACKOFF
+
+            "Null checks everywhere"     "Data access tangled"    "Async streams"
+                        |                           |                      |
+                        v                           v                      v
+               Safe default object          Collection-like API    Forward-only
+               -&gt; NULL OBJECT               -&gt; REPOSITORY          -&gt; ITERATOR /
+                                            Atomic commits?          GENERATOR
+                                            -&gt; UNIT OF WORK       Producer ≠
+                                                                  consumer rate?
+                                                                  -&gt; QUEUE
+</pre>
+    </div>
+
+    <div class="callout">
+      <div class="callout-title">The meta-rule</div>
+      <p>Patterns are <em>recognition tools</em>, not <em>construction tools</em>. Don't sit down to "use the Visitor pattern." Sit down to solve the problem. When you catch yourself writing <code>isinstance</code> branches in three methods of three classes, <em>then</em> recognize: this is Visitor-shaped. Refactor.</p>
+    </div>
+
+    <div class="callout warn">
+      <div class="callout-title">Pattern fatigue is real</div>
+      <p>A codebase with all 24 GoF + modern patterns applied everywhere is unreadable. Every pattern adds indirection, and indirection is a cost. Apply patterns where the pain is real and the benefit is concrete — refactor toward patterns, not into them. The best senior engineers in 2026 use <em>fewer</em> patterns than juniors, not more.</p>
+    </div>
+
+    <h2>What's next</h2>
+
+    <p>Chapter 11 takes these tools and aims them at problems that did not exist when the GoF book was published — designing an LLM rate limiter, a vector-store client, a feature-flag evaluator, an idempotent webhook receiver, and a streaming AI agent. Bring this chapter's composition map with you.</p>
+
+    <div class="chapter-nav">
+      <a href="09-real-world.html"><div class="label">← Previous</div><div class="title">Chapter 9: Applying LLD</div></a>
+      <a class="next" href="11-modern-problems.html"><div class="label">Next →</div><div class="title">Chapter 11: Modern Problems</div></a>
+    </div>
+  </main>
+</div>
+<script src="../assets/js/nav.js"></script>
+</body>
+</html>

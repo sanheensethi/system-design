@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LRU Cache — Interactive Visualization</title>
+<link rel="stylesheet" href="../assets/css/style.css">
+<link rel="stylesheet" href="../assets/css/viz.css">
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">System Design Books</div>
+    <div class="brand-sub">by Sanheen · Progressive Learning</div>
+    <div class="nav-section">
+      <h3>Home</h3>
+      <a href="../index.html">Overview</a>
+    </div>
+    <div class="nav-section">
+      <h3>🎬 Interactive Visualizations</h3>
+      <a href="index.html">Viz Index</a>
+      <a href="lru-cache.html">LRU Cache (LLD)</a>
+      <a href="request-flow.html">Request Flow (HLD)</a>
+      <a href="load-balancer.html">Load Balancer (HLD)</a>
+      <a href="cache-aside.html">Cache Aside Pattern (HLD)</a>
+    </div>
+    <div class="nav-section">
+      <h3>Book I — Low Level Design</h3>
+      <a href="../lld/index.html">LLD Index</a>
+    </div>
+    <div class="nav-section">
+      <h3>Book II — High Level Design</h3>
+      <a href="../hld/index.html">HLD Index</a>
+    </div>
+    <div class="nav-section">
+      <h3>Book III — AI System Design</h3>
+      <a href="../ai/index.html">AI Index</a>
+    </div>
+  </aside>
+
+  <main class="main">
+    <div class="breadcrumb"><a href="../index.html">Home</a> / <a href="index.html">Visualizations</a> / LRU Cache</div>
+    <h1>LRU Cache — Live Code Walkthrough</h1>
+    <p>A capacity-3 LRU Cache handles these operations: <code>put(1,'A') → put(2,'B') → put(3,'C') → get(1) → put(4,'D')</code>. Watch the HashMap and Doubly-Linked List evolve. Notice how <code>get(1)</code> moves key 1 to the head, and how the put of key 4 evicts key 2 (the LRU).</p>
+
+    <div class="callout">
+      <div class="callout-title">Legend</div>
+      Green border = <strong>head</strong> (most recently used). Red border = <strong>tail</strong> (least recently used, next to evict).
+      Highlighted (blue) slot = currently being accessed. Faded slot = being evicted.
+    </div>
+
+    <div class="viz-controls" id="ctrls"></div>
+
+    <div class="viz-layout">
+      <div class="viz-code-panel" id="code"></div>
+      <div class="viz-state-panel">
+        <div>
+          <div class="viz-state-title">Current action</div>
+          <div class="viz-desc" id="desc">Press Play to start. Capacity = 3.</div>
+        </div>
+        <div>
+          <div class="viz-state-title">Variables</div>
+          <div class="viz-vars" id="state"></div>
+        </div>
+        <div>
+          <div class="viz-state-title">Doubly Linked List (head → tail)</div>
+          <div class="viz-cache" id="cachebox"></div>
+        </div>
+        <div>
+          <div class="viz-state-title">HashMap</div>
+          <div class="viz-cache" id="mapbox"></div>
+        </div>
+      </div>
+    </div>
+
+  </main>
+</div>
+<script src="../assets/js/nav.js"></script>
+<script src="../assets/js/animator.js"></script>
+<script>
+// LRU Cache code the animator steps through
+const code = [
+  "class LRUCache:",
+  "    def __init__(self, capacity):",
+  "        self.cap = capacity",
+  "        self.map = {}",
+  "        self.head = Node(0,0)  # sentinel",
+  "        self.tail = Node(0,0)  # sentinel",
+  "        self.head.next = self.tail",
+  "        self.tail.prev = self.head",
+  "",
+  "    def get(self, key):",
+  "        if key not in self.map: return -1",
+  "        node = self.map[key]",
+  "        self._remove(node)",
+  "        self._add_to_front(node)",
+  "        return node.val",
+  "",
+  "    def put(self, key, val):",
+  "        if key in self.map:",
+  "            self._remove(self.map[key])",
+  "        elif len(self.map) >= self.cap:",
+  "            lru = self.tail.prev",
+  "            self._remove(lru)",
+  "            del self.map[lru.key]",
+  "        node = Node(key, val)",
+  "        self.map[key] = node",
+  "        self._add_to_front(node)",
+];
+
+// Each step = {line (0-indexed), desc, vars, dll (array of [key,val] head→tail), map {k: "node"}, highlightKey, evictKey}
+const steps = [
+  { line: 1, desc: "__init__(capacity=3) — set capacity", vars: {cap: 3}, dll: [], map: {} },
+  { line: 3, desc: "Create empty HashMap", vars: {cap:3}, dll:[], map:{} },
+  { line: 6, desc: "Link sentinels: head ↔ tail (empty DLL)", vars: {cap:3}, dll:[], map:{} },
+
+  // put(1, 'A')
+  { line: 16, desc: "CALL: put(1, 'A')", vars: {cap:3, key:1, val:"'A'"}, dll:[], map:{} },
+  { line: 17, desc: "Check: is key 1 in map? NO", vars: {cap:3, key:1, val:"'A'"}, dll:[], map:{} },
+  { line: 19, desc: "Check: is map full? len=0, cap=3 → NO", vars: {cap:3, key:1, val:"'A'"}, dll:[], map:{} },
+  { line: 23, desc: "Create new Node(1, 'A')", vars: {cap:3, key:1, val:"'A'"}, dll:[], map:{} },
+  { line: 24, desc: "Insert into HashMap: map[1] = node", vars: {cap:3, key:1, val:"'A'"}, dll:[], map:{1:"node_1"}, added:1 },
+  { line: 25, desc: "Add to front of DLL (head side)", vars: {cap:3, key:1, val:"'A'"}, dll:[["1","A"]], map:{1:"node_1"}, highlight:"1" },
+
+  // put(2, 'B')
+  { line: 16, desc: "CALL: put(2, 'B')", vars: {cap:3, key:2, val:"'B'"}, dll:[["1","A"]], map:{1:"node_1"} },
+  { line: 17, desc: "Check: is key 2 in map? NO", vars: {cap:3, key:2, val:"'B'"}, dll:[["1","A"]], map:{1:"node_1"} },
+  { line: 19, desc: "Check: is map full? len=1, cap=3 → NO", vars: {cap:3, key:2, val:"'B'"}, dll:[["1","A"]], map:{1:"node_1"} },
+  { line: 23, desc: "Create Node(2, 'B')", vars: {cap:3, key:2, val:"'B'"}, dll:[["1","A"]], map:{1:"node_1"} },
+  { line: 24, desc: "map[2] = node", vars: {cap:3, key:2, val:"'B'"}, dll:[["1","A"]], map:{1:"node_1", 2:"node_2"} },
+  { line: 25, desc: "Add key 2 to head (1 is now closer to tail)", vars: {cap:3}, dll:[["2","B"],["1","A"]], map:{1:"node_1", 2:"node_2"}, highlight:"2" },
+
+  // put(3, 'C')
+  { line: 16, desc: "CALL: put(3, 'C')", vars: {cap:3, key:3, val:"'C'"}, dll:[["2","B"],["1","A"]], map:{1:"node_1", 2:"node_2"} },
+  { line: 19, desc: "Check: is map full? len=2, cap=3 → NO", vars: {cap:3, key:3, val:"'C'"}, dll:[["2","B"],["1","A"]], map:{1:"node_1", 2:"node_2"} },
+  { line: 23, desc: "Create Node(3, 'C')", vars: {cap:3, key:3, val:"'C'"}, dll:[["2","B"],["1","A"]], map:{1:"node_1", 2:"node_2"} },
+  { line: 25, desc: "Add key 3 to head. Order: 3 (newest) → 2 → 1 (oldest)", vars: {cap:3}, dll:[["3","C"],["2","B"],["1","A"]], map:{1:"node_1", 2:"node_2", 3:"node_3"}, highlight:"3" },
+
+  // get(1) — moves 1 to head
+  { line: 9, desc: "CALL: get(1)", vars: {cap:3, key:1}, dll:[["3","C"],["2","B"],["1","A"]], map:{1:"node_1", 2:"node_2", 3:"node_3"} },
+  { line: 10, desc: "Check: key 1 in map? YES", vars: {cap:3, key:1}, dll:[["3","C"],["2","B"],["1","A"]], map:{1:"node_1", 2:"node_2", 3:"node_3"}, highlight:"1" },
+  { line: 11, desc: "node = map[1]", vars: {cap:3, key:1, node:"node_1"}, dll:[["3","C"],["2","B"],["1","A"]], map:{1:"node_1", 2:"node_2", 3:"node_3"}, highlight:"1" },
+  { line: 12, desc: "Remove node from its current position (tail side)", vars: {cap:3, key:1, node:"node_1"}, dll:[["3","C"],["2","B"]], map:{1:"node_1", 2:"node_2", 3:"node_3"} },
+  { line: 13, desc: "Re-add to front — key 1 is now MRU", vars: {cap:3, key:1, node:"node_1"}, dll:[["1","A"],["3","C"],["2","B"]], map:{1:"node_1", 2:"node_2", 3:"node_3"}, highlight:"1" },
+  { line: 14, desc: "Return 'A'", vars: {cap:3, returned:"'A'"}, dll:[["1","A"],["3","C"],["2","B"]], map:{1:"node_1", 2:"node_2", 3:"node_3"} },
+
+  // put(4, 'D') — triggers eviction
+  { line: 16, desc: "CALL: put(4, 'D') — capacity full!", vars: {cap:3, key:4, val:"'D'"}, dll:[["1","A"],["3","C"],["2","B"]], map:{1:"node_1", 2:"node_2", 3:"node_3"} },
+  { line: 17, desc: "Check: key 4 in map? NO", vars: {cap:3, key:4, val:"'D'"}, dll:[["1","A"],["3","C"],["2","B"]], map:{1:"node_1", 2:"node_2", 3:"node_3"} },
+  { line: 19, desc: "Check: map full? len=3, cap=3 → YES! Must evict.", vars: {cap:3, key:4, val:"'D'"}, dll:[["1","A"],["3","C"],["2","B"]], map:{1:"node_1", 2:"node_2", 3:"node_3"} },
+  { line: 20, desc: "lru = tail.prev → key 2 (tail-side = LRU)", vars: {cap:3, key:4, val:"'D'", lru:"node_2"}, dll:[["1","A"],["3","C"],["2","B"]], map:{1:"node_1", 2:"node_2", 3:"node_3"}, evicting:"2" },
+  { line: 21, desc: "Remove key 2 from DLL", vars: {cap:3, key:4, val:"'D'", lru:"node_2"}, dll:[["1","A"],["3","C"]], map:{1:"node_1", 2:"node_2", 3:"node_3"} },
+  { line: 22, desc: "Delete from map: del map[2]", vars: {cap:3, key:4, val:"'D'"}, dll:[["1","A"],["3","C"]], map:{1:"node_1", 3:"node_3"} },
+  { line: 23, desc: "Create Node(4, 'D')", vars: {cap:3, key:4, val:"'D'"}, dll:[["1","A"],["3","C"]], map:{1:"node_1", 3:"node_3"} },
+  { line: 24, desc: "Insert into map", vars: {cap:3, key:4, val:"'D'"}, dll:[["1","A"],["3","C"]], map:{1:"node_1", 3:"node_3", 4:"node_4"} },
+  { line: 25, desc: "Add key 4 to head. Final state: 4 → 1 → 3. Key 2 evicted.", vars: {cap:3}, dll:[["4","D"],["1","A"],["3","C"]], map:{1:"node_1", 3:"node_3", 4:"node_4"}, highlight:"4" },
+];
+
+function renderCache(dll, highlight, evicting) {
+  const el = document.getElementById('cachebox');
+  if (!dll.length) { el.innerHTML = '<div style="color:var(--text-dim);padding:1rem;">empty</div>'; return; }
+  el.innerHTML = dll.map(([k,v], i) => {
+    let cls = 'viz-slot';
+    if (i === 0) cls += ' head';
+    if (i === dll.length - 1) cls += ' tail';
+    if (k === highlight) cls += ' accessing';
+    if (k === evicting) cls += ' evicting';
+    return `<div class="${cls}">${k}: ${v}</div>`;
+  }).join('<div style="color:var(--text-dim);align-self:center;">→</div>');
+}
+
+function renderMap(map, added) {
+  const el = document.getElementById('mapbox');
+  const keys = Object.keys(map);
+  if (!keys.length) { el.innerHTML = '<div style="color:var(--text-dim);padding:1rem;">empty</div>'; return; }
+  el.innerHTML = keys.map(k => {
+    let cls = 'viz-slot';
+    if (String(k) === String(added)) cls += ' new';
+    return `<div class="${cls}">${k} → ${map[k]}</div>`;
+  }).join('');
+}
+
+const animator = new CodeAnimator({
+  codeEl: '#code',
+  stateEl: '#state',
+  descEl: '#desc',
+  controlsEl: '#ctrls',
+  code: code,
+  steps: steps,
+  onStep: (step) => {
+    renderCache(step.dll || [], step.highlight, step.evicting);
+    renderMap(step.map || {}, step.added);
+  },
+  onReset: () => {
+    renderCache([], null, null);
+    renderMap({}, null);
+    const d = document.getElementById('desc');
+    if (d) d.textContent = 'Press Play to start. Capacity = 3.';
+  }
+});
+animator.mount();
+</script>
+</body>
+</html>

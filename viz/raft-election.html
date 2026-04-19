@@ -1,0 +1,812 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Raft Consensus — Leader Election</title>
+<link rel="stylesheet" href="../assets/css/style.css">
+<link rel="stylesheet" href="../assets/css/viz.css">
+<style>
+  .raft-stage {
+    position: relative;
+    width: 100%;
+    height: 560px;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    overflow: hidden;
+  }
+  .raft-stage svg.raft-edges {
+    position: absolute; inset: 0; width: 100%; height: 100%;
+    pointer-events: none;
+  }
+  .raft-edge {
+    stroke: var(--border);
+    stroke-width: 1.5;
+    opacity: 0.35;
+    stroke-dasharray: 4 4;
+  }
+  .raft-edge.partitioned {
+    stroke: #ef4444;
+    opacity: 0.5;
+    stroke-dasharray: 8 6;
+  }
+
+  .raft-node {
+    position: absolute;
+    width: 140px;
+    height: 140px;
+    border-radius: 50%;
+    transform: translate(-50%, -50%);
+    background: var(--bg-elev);
+    border: 2px solid var(--border);
+    color: var(--text);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.78rem;
+    text-align: center;
+    transition: background 0.3s, border-color 0.3s, box-shadow 0.3s, opacity 0.3s;
+    z-index: 3;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.25);
+    padding: 0.3rem;
+  }
+  .raft-node .crown {
+    position: absolute; top: -18px; font-size: 1.4rem;
+  }
+  .raft-node .nid {
+    font-weight: 700; font-size: 1.1rem; margin-bottom: 2px;
+  }
+  .raft-node .nstate {
+    font-weight: 600; font-size: 0.7rem; letter-spacing: 0.5px;
+  }
+  .raft-node .nterm {
+    font-size: 0.68rem; color: var(--text-dim); margin-top: 2px;
+  }
+  .raft-node .nvote {
+    font-size: 0.65rem; color: var(--text-dim); margin-top: 1px;
+  }
+
+  /* Timeout bar inside node */
+  .timeout-bar {
+    width: 78%;
+    height: 4px;
+    background: rgba(255,255,255,0.08);
+    border-radius: 2px;
+    margin-top: 6px;
+    overflow: hidden;
+  }
+  .timeout-bar .fill {
+    height: 100%;
+    background: var(--accent);
+    width: 100%;
+    transition: width 0.1s linear, background 0.2s;
+  }
+
+  /* State-based visual styles */
+  .raft-node.follower {
+    background: #2a2f3a;
+    border-color: #4a5568;
+    color: #cbd5e0;
+  }
+  .raft-node.candidate {
+    background: #3a3410;
+    border-color: #facc15;
+    color: #fde68a;
+    animation: pulseCandidate 0.9s ease-in-out infinite;
+  }
+  @keyframes pulseCandidate {
+    0%,100% { box-shadow: 0 0 0 0 rgba(250,204,21,0.6); }
+    50%     { box-shadow: 0 0 0 10px rgba(250,204,21,0); }
+  }
+  .raft-node.leader {
+    background: #3a2d08;
+    border-color: #fbbf24;
+    color: #fff5d6;
+    box-shadow: 0 0 24px rgba(251,191,36,0.45), 0 0 6px rgba(251,191,36,0.8) inset;
+  }
+  .raft-node.dead {
+    background: #101010;
+    border-color: #2a2a2a;
+    color: #555;
+    opacity: 0.45;
+    text-decoration: line-through;
+  }
+  .raft-node.dead .timeout-bar .fill { background: #555; }
+
+  /* partition overlay */
+  .raft-node.partition-A { outline: 2px dashed rgba(96,165,250,0.55); outline-offset: 4px; }
+  .raft-node.partition-B { outline: 2px dashed rgba(244,114,182,0.55); outline-offset: 4px; }
+
+  /* Message packets */
+  .raft-msg {
+    position: absolute;
+    min-width: 22px;
+    height: 22px;
+    padding: 0 8px;
+    border-radius: 11px;
+    background: var(--accent);
+    color: #fff;
+    font-size: 0.7rem;
+    font-weight: 700;
+    display: flex; align-items: center; justify-content: center;
+    transform: translate(-50%, -50%);
+    z-index: 5;
+    pointer-events: none;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.4);
+    transition: left 0.6s ease, top 0.6s ease, opacity 0.3s;
+  }
+  .raft-msg.heartbeat { background: #64748b; opacity: 0.7; }
+  .raft-msg.requestvote { background: #a78bfa; }
+  .raft-msg.votegranted { background: #10b981; }
+  .raft-msg.votedenied { background: #ef4444; }
+
+  /* Raft role swatches */
+  .role-key { display: inline-flex; align-items: center; gap: 0.4rem; margin-right: 1rem; font-size: 0.85rem; }
+  .role-swatch { width: 14px; height: 14px; border-radius: 50%; display: inline-block; }
+  .rs-follower  { background: #2a2f3a; border: 2px solid #4a5568; }
+  .rs-candidate { background: #3a3410; border: 2px solid #facc15; }
+  .rs-leader    { background: #3a2d08; border: 2px solid #fbbf24; }
+  .rs-dead      { background: #101010; border: 2px solid #2a2a2a; }
+</style>
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">System Design Books</div>
+    <div class="brand-sub">by Sanheen · Progressive Learning</div>
+    <div class="nav-section">
+      <h3>Home</h3>
+      <a href="../index.html">Overview</a>
+    </div>
+    <div class="nav-section">
+      <h3>🎬 Interactive Visualizations</h3>
+      <a href="index.html">Viz Index</a>
+      <a href="lru-cache.html">LRU Cache (LLD)</a>
+      <a href="request-flow.html">Request Flow (HLD)</a>
+      <a href="load-balancer.html">Load Balancer (HLD)</a>
+      <a href="cache-aside.html">Cache Aside Pattern (HLD)</a>
+      <a href="db-replication.html">DB Replication (HLD)</a>
+      <a href="raft-election.html">Raft Election (HLD)</a>
+    </div>
+    <div class="nav-section">
+      <h3>Book II — High Level Design</h3>
+      <a href="../hld/index.html">HLD Index</a>
+    </div>
+  </aside>
+
+  <main class="main">
+    <div class="breadcrumb"><a href="../index.html">Home</a> / <a href="index.html">Visualizations</a> / Raft Election</div>
+    <h1>HLD: Raft Consensus — Leader Election</h1>
+    <p>A 5-node Raft cluster. At any moment exactly one node is the <strong>leader</strong> and the rest are <strong>followers</strong>. Leaders send heartbeats. When a follower stops hearing heartbeats, it times out, becomes a <strong>candidate</strong>, bumps the term, and asks everyone to vote for it. Majority wins.</p>
+
+    <div style="margin: 0.5rem 0 0.8rem 0; font-size: 0.9rem; color: var(--text-dim);">
+      <span class="role-key"><span class="role-swatch rs-follower"></span> FOLLOWER</span>
+      <span class="role-key"><span class="role-swatch rs-candidate"></span> CANDIDATE 🚩</span>
+      <span class="role-key"><span class="role-swatch rs-leader"></span> LEADER 👑</span>
+      <span class="role-key"><span class="role-swatch rs-dead"></span> DEAD 💀</span>
+    </div>
+
+    <div class="viz-controls">
+      <button class="viz-btn primary" id="btnAuto">▶ Auto Simulate</button>
+      <button class="viz-btn" id="btnHb">💓 Send Heartbeat</button>
+      <button class="viz-btn" id="btnElect">⏰ Trigger Election</button>
+      <button class="viz-btn" id="btnKillLeader">💥 Kill Leader</button>
+      <button class="viz-btn" id="btnKill3">💥 Kill Node 3</button>
+      <button class="viz-btn" id="btnRevive">💚 Revive Node</button>
+      <button class="viz-btn" id="btnPartition">🌐 Network Partition</button>
+      <button class="viz-btn" id="btnHeal">🔗 Heal Partition</button>
+      <button class="viz-btn" id="btnReset">Reset</button>
+    </div>
+
+    <div class="raft-stage" id="stage">
+      <svg class="raft-edges" id="edges"></svg>
+      <!-- nodes injected via JS -->
+    </div>
+
+    <div class="viz-stats">
+      <div class="viz-stat"><div class="viz-stat-val" id="st-term">1</div><div class="viz-stat-label">Current Term</div></div>
+      <div class="viz-stat"><div class="viz-stat-val" id="st-leader">1</div><div class="viz-stat-label">Current Leader</div></div>
+      <div class="viz-stat"><div class="viz-stat-val" id="st-followers">4</div><div class="viz-stat-label">Followers</div></div>
+      <div class="viz-stat"><div class="viz-stat-val" id="st-candidates">0</div><div class="viz-stat-label">Candidates</div></div>
+      <div class="viz-stat"><div class="viz-stat-val" id="st-dead">0</div><div class="viz-stat-label">Dead Nodes</div></div>
+      <div class="viz-stat"><div class="viz-stat-val" id="st-votes">0</div><div class="viz-stat-label">Votes This Term</div></div>
+    </div>
+
+    <div class="viz-desc" id="desc" style="margin-top:1rem;min-height:70px;">Term 1. Node 1 is leader. Click <strong>💓 Send Heartbeat</strong> to watch the leader refresh follower timeouts, or <strong>💥 Kill Leader</strong> to trigger an election.</div>
+
+    <h2 style="margin-top: 2.5rem;">Raft in One Paragraph</h2>
+    <p>Raft is a consensus algorithm designed to be <em>understandable</em>. It replaces Paxos's single-decree gymnastics with three concrete roles (follower, candidate, leader), a monotonically increasing term counter, and two RPCs (<code>AppendEntries</code> for log replication + heartbeats, <code>RequestVote</code> for elections). At any moment the cluster has at most one leader per term; the leader is the only node that accepts writes, and it replicates them to a majority before ack'ing the client. If the leader dies, followers notice (missed heartbeats), elect a new one, and life continues.</p>
+
+    <h3>The Three Roles</h3>
+    <ul>
+      <li><strong>FOLLOWER.</strong> The default, boring state. Accepts <code>AppendEntries</code> from a leader (including empty heartbeats) and <code>RequestVote</code> from candidates. Never initiates anything on its own. If it doesn't hear from a leader within its randomized election timeout, it promotes itself to candidate.</li>
+      <li><strong>CANDIDATE.</strong> A follower that decided the leader is dead. Increments the term, votes for itself, and blasts <code>RequestVote</code> RPCs at everyone else. Three things can happen next: (a) it wins a majority and becomes leader, (b) another node wins and it reverts to follower, or (c) nobody wins (split vote) and it times out again with a new, higher term.</li>
+      <li><strong>LEADER.</strong> The boss for this term. Sends periodic heartbeats (empty <code>AppendEntries</code>) every ~50ms to keep followers quiet. Handles all client writes, replicates log entries to followers, and commits entries once a majority has acknowledged them.</li>
+    </ul>
+
+    <h3>Election Timeout Randomization — Why It Matters</h3>
+    <p>Every follower has its own election timeout, drawn randomly from a range (Raft paper uses 150–300ms; production systems tune this for their network). This randomization is the single cleverest detail in Raft.</p>
+    <p>If every node used the same timeout, then after a leader died they'd <em>all</em> time out simultaneously, <em>all</em> become candidates, <em>all</em> vote for themselves, and nobody would get a majority — <strong>split vote</strong>. With randomization, the follower with the shortest timeout fires first, gets a small head start, collects votes from others who haven't timed out yet, and usually wins cleanly before anyone else tries.</p>
+    <p>When a split vote <em>does</em> happen, both candidates time out again with fresh random waits, and the odds that they collide a second time are small. The cluster self-heals within a round or two.</p>
+
+    <h3>Term Numbers: the Logical Clock</h3>
+    <p>The term is a monotonically increasing integer. Every election bumps it. Every RPC carries the sender's term. The rule:</p>
+    <ul>
+      <li>If a node sees a term higher than its own in any message, it immediately updates its term, steps down to follower, and forgets any votes it had cast for lower terms.</li>
+      <li>If a node receives an RPC with a term lower than its own, it rejects it (the sender is stale and will find out).</li>
+    </ul>
+    <p>This one rule kills a huge class of bugs: stale leaders can't hurt you because the moment they contact anyone in the cluster they learn they've been deposed. It's the reason Raft is safe under arbitrary network delays.</p>
+
+    <h3>The Vote Grant Rules</h3>
+    <p>When a candidate sends <code>RequestVote(term, candidateId, lastLogIndex, lastLogTerm)</code>, a node grants its vote iff <strong>all</strong> of:</p>
+    <ol>
+      <li>The candidate's term is &gt;= the node's current term.</li>
+      <li>The node hasn't already voted for someone else <em>in this term</em>.</li>
+      <li>The candidate's log is at least as up-to-date as the voter's. (Compare <code>lastLogTerm</code> first; if tied, compare <code>lastLogIndex</code>.)</li>
+    </ol>
+    <p>Rule #3 — the "log up-to-date" check — is what makes Raft <em>safe</em>. A node that's missing committed entries can never win an election, because followers with more recent logs will refuse to vote for it. This guarantees the <strong>Leader Completeness</strong> property: every committed entry is present on every future leader.</p>
+
+    <h3>Split Vote Scenario</h3>
+    <p>Two followers (say 2 and 4) happen to time out at almost the same moment. Both become candidates for term 5. Node 2 votes for itself and gets votes from nodes 1 and 3. Node 4 votes for itself and gets a vote from node 5. That's 3 vs 2 in a 5-node cluster — but 3 is already a majority! So this particular case <em>does</em> resolve, just barely. Now imagine 2 and 4 each only get 2 votes (because some nodes are slow). Neither reaches the 3-vote majority. Both sit around until their (new) randomized timeouts fire, they bump to term 6, and try again. Usually one of them gets lucky and wins.</p>
+    <p>In a 5-node cluster the majority is <strong>3</strong>. In a 3-node cluster it's <strong>2</strong>. Raft clusters are always deployed with an odd number of nodes because even counts give no fault-tolerance improvement but double your split-vote risk.</p>
+
+    <h3>Network Partition: the Minority Cannot Elect</h3>
+    <p>Say a 5-node cluster splits into {1, 2} on one side and {3, 4, 5} on the other. Nodes 1 and 2 can talk to each other but not to the rest. Same for 3, 4, 5.</p>
+    <ul>
+      <li>If the old leader was in the minority side ({1,2}), it keeps trying to replicate but can only get 2 acks (itself + one other) out of 5 needed. It can't commit anything. Clients connected to it see writes hang.</li>
+      <li>If the old leader was in the majority side ({3,4,5}), it keeps working fine — 3 is a majority of 5. Writes continue.</li>
+      <li>The minority {1,2} will time out and try to elect. But they can only collect 2 votes max (themselves), which is not a majority of 5. They'll churn forever in election mode, bumping terms, never winning. This is correct behavior — a minority partition MUST NOT elect a leader, otherwise you'd have two leaders in different terms and diverging logs.</li>
+      <li>When the partition heals, the minority sees the majority's higher term, steps down, and catches up via log replication.</li>
+    </ul>
+    <p>This is why Raft guarantees <strong>at most one leader per term</strong> even under arbitrary partitions — the majority requirement mathematically forbids two disjoint majorities.</p>
+
+    <h3>The Safety Property</h3>
+    <p>Raft's central correctness claim: <strong>for every term T, at most one node can become leader</strong>. Proof sketch: a leader needs a majority of votes. Any two majorities of the same set must intersect in at least one node. That intersecting node can only vote once per term. Therefore two distinct leaders in the same term is impossible.</p>
+    <p>Combined with the log-up-to-date vote rule, this gives <strong>Leader Completeness</strong>: if a log entry is committed in term T, it appears in the logs of all leaders for terms &gt; T. Which in turn gives <strong>State Machine Safety</strong>: all nodes apply the same sequence of commands. Which in turn is the whole point of consensus.</p>
+
+    <h3>Election Pseudocode</h3>
+<pre><code class="language-python">class Node:
+    def on_timeout(self):
+        # I haven't heard from a leader. Become a candidate.
+        self.term += 1
+        self.state = 'CANDIDATE'
+        self.voted_for = self.id
+        votes = 1                                # vote for self
+        for peer in self.peers:
+            resp = peer.request_vote(
+                term=self.term,
+                candidate_id=self.id,
+                last_log_index=self.last_log_index,
+                last_log_term=self.last_log_term,
+            )
+            if resp.term &gt; self.term:
+                # somebody is ahead of us; step down
+                self.term = resp.term
+                self.state = 'FOLLOWER'
+                self.voted_for = None
+                return
+            if resp.vote_granted:
+                votes += 1
+        if votes &gt; len(self.peers) // 2:          # strict majority of N+1
+            self.state = 'LEADER'
+            self.start_heartbeats()
+        else:
+            # split vote or lost — wait for the next randomized timeout
+            self.state = 'FOLLOWER'
+
+    def on_request_vote(self, term, candidate_id, last_log_index, last_log_term):
+        if term &lt; self.term:
+            return VoteResp(term=self.term, vote_granted=False)
+        if term &gt; self.term:
+            self.term = term
+            self.state = 'FOLLOWER'
+            self.voted_for = None
+        already_voted_elsewhere = (
+            self.voted_for is not None and self.voted_for != candidate_id
+        )
+        log_ok = (last_log_term, last_log_index) &gt;= (self.last_log_term, self.last_log_index)
+        if not already_voted_elsewhere and log_ok:
+            self.voted_for = candidate_id
+            self.reset_election_timer()           # don't compete if we're granting
+            return VoteResp(term=self.term, vote_granted=True)
+        return VoteResp(term=self.term, vote_granted=False)
+</code></pre>
+
+    <h3>Real-World Use</h3>
+    <ul>
+      <li><strong>etcd</strong> — the config store behind Kubernetes. Uses Raft for all cluster state; every kube-apiserver change is a Raft write under the hood.</li>
+      <li><strong>Consul</strong> (HashiCorp) — service discovery and KV store. Raft for the control plane; clients talk to whichever server happens to be leader.</li>
+      <li><strong>CockroachDB</strong> — each "range" (a chunk of the keyspace) is its own Raft group. A single cluster runs tens of thousands of Raft groups in parallel — one per range, not one per cluster.</li>
+      <li><strong>TiKV</strong> / TiDB — same model as CockroachDB. Raft per region (their equivalent of ranges).</li>
+      <li><strong>RethinkDB</strong>, <strong>MongoDB's replica-set protocol</strong> (not pure Raft but Raft-like), <strong>Redpanda</strong>, <strong>MinIO</strong>, <strong>Nomad</strong>, <strong>Patroni</strong> (via etcd), <strong>YugabyteDB</strong>.</li>
+    </ul>
+    <p>If you're building anything distributed in 2026 that needs a strongly consistent control plane, you either use Raft directly (via <code>etcd</code>/<code>hashicorp/raft</code>/<code>tikv/raft-rs</code>) or you outsource it to something that does. Writing your own is possible but the devil is in the edge cases — log compaction, membership changes, pre-vote optimizations — and the existing libraries have paid those bugs already.</p>
+
+  </main>
+</div>
+
+<script src="../assets/js/nav.js"></script>
+<script>
+// =========================================================================
+// Raft leader election visualization.
+// 5 nodes in a pentagon. Roles: FOLLOWER / CANDIDATE / LEADER / DEAD.
+// Terms monotonically increase. Majority = 3 of 5.
+// =========================================================================
+
+const NODE_COUNT = 5;
+const HEARTBEAT_INTERVAL = 1800;     // ms between leader heartbeats (auto mode)
+const ELECTION_TIMEOUT_MIN = 2200;   // scaled up for viz
+const ELECTION_TIMEOUT_MAX = 4200;
+const PACKET_DURATION = 650;
+const MAJORITY = Math.floor(NODE_COUNT / 2) + 1; // = 3
+
+const stage = document.getElementById('stage');
+const edgesSvg = document.getElementById('edges');
+const descEl = document.getElementById('desc');
+
+let nodes = [];         // array of node state objects
+let messages = [];      // in-flight messages
+let msgId = 0;
+let partitioned = false;
+let partitionA = new Set([1, 2]);
+let partitionB = new Set([3, 4, 5]);
+let currentTermTotalVotes = 0;
+let autoSimRunning = false;
+let heartbeatTimer = null;
+
+function say(html) { descEl.innerHTML = html; }
+
+// ---------- Pentagon layout ----------
+function pentagonPos(i, total, cx, cy, r) {
+  // start at top, go clockwise
+  const angle = -Math.PI / 2 + (2 * Math.PI * i) / total;
+  return { x: cx + r * Math.cos(angle), y: cy + r * Math.sin(angle) };
+}
+
+function layout() {
+  const w = stage.clientWidth;
+  const h = stage.clientHeight;
+  const cx = w / 2, cy = h / 2;
+  const r = Math.min(w, h) * 0.36;
+  nodes.forEach((n, i) => {
+    const p = pentagonPos(i, NODE_COUNT, cx, cy, r);
+    n.x = p.x; n.y = p.y;
+    n.el.style.left = p.x + 'px';
+    n.el.style.top  = p.y + 'px';
+  });
+  drawEdges();
+}
+
+// ---------- Build nodes ----------
+function buildNodes() {
+  stage.querySelectorAll('.raft-node').forEach(el => el.remove());
+  stage.querySelectorAll('.raft-msg').forEach(el => el.remove());
+  nodes = [];
+  for (let i = 1; i <= NODE_COUNT; i++) {
+    const el = document.createElement('div');
+    el.className = 'raft-node follower';
+    el.innerHTML = `
+      <div class="crown" style="display:none;"></div>
+      <div class="nid">Node ${i}</div>
+      <div class="nstate">FOLLOWER</div>
+      <div class="nterm">term 1</div>
+      <div class="nvote">voted: —</div>
+      <div class="timeout-bar"><div class="fill"></div></div>
+    `;
+    stage.appendChild(el);
+    const n = {
+      id: i,
+      el,
+      state: 'FOLLOWER',
+      term: 1,
+      votedFor: null,
+      votesReceived: 0,
+      electionTimeoutMs: randElectionTimeout(),
+      timeoutRemaining: randElectionTimeout(),
+      x: 0, y: 0,
+      alive: true,
+      lastLogIndex: 0,
+      lastLogTerm: 0,
+    };
+    nodes.push(n);
+  }
+  // Start Node 1 as leader in term 1
+  nodes[0].state = 'LEADER';
+  nodes[0].votedFor = 1;
+  renderAll();
+}
+
+// ---------- Draw edges (full mesh) ----------
+function drawEdges() {
+  edgesSvg.innerHTML = '';
+  for (let i = 0; i < nodes.length; i++) {
+    for (let j = i + 1; j < nodes.length; j++) {
+      const a = nodes[i], b = nodes[j];
+      const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+      line.setAttribute('x1', a.x); line.setAttribute('y1', a.y);
+      line.setAttribute('x2', b.x); line.setAttribute('y2', b.y);
+      line.setAttribute('class', 'raft-edge' + (isEdgePartitioned(a.id, b.id) ? ' partitioned' : ''));
+      edgesSvg.appendChild(line);
+    }
+  }
+}
+
+function isEdgePartitioned(i, j) {
+  if (!partitioned) return false;
+  const inA = partitionA.has(i), inB = partitionB.has(i);
+  const jInA = partitionA.has(j), jInB = partitionB.has(j);
+  return (inA && jInB) || (inB && jInA);
+}
+
+function canDeliver(fromId, toId) {
+  if (!partitioned) return true;
+  return !isEdgePartitioned(fromId, toId);
+}
+
+// ---------- Render ----------
+function cls(state) {
+  return ({
+    FOLLOWER: 'follower',
+    CANDIDATE: 'candidate',
+    LEADER:    'leader',
+    DEAD:      'dead',
+  })[state] || 'follower';
+}
+
+function renderNode(n) {
+  n.el.className = 'raft-node ' + cls(n.state);
+  if (partitioned) {
+    if (partitionA.has(n.id)) n.el.classList.add('partition-A');
+    if (partitionB.has(n.id)) n.el.classList.add('partition-B');
+  }
+  const crown = n.el.querySelector('.crown');
+  if (n.state === 'LEADER')         { crown.style.display = 'block'; crown.textContent = '👑'; }
+  else if (n.state === 'CANDIDATE') { crown.style.display = 'block'; crown.textContent = '🚩'; }
+  else if (n.state === 'DEAD')      { crown.style.display = 'block'; crown.textContent = '💀'; }
+  else                              { crown.style.display = 'none'; }
+  n.el.querySelector('.nstate').textContent = n.state;
+  n.el.querySelector('.nterm').textContent  = 'term ' + n.term;
+  n.el.querySelector('.nvote').textContent  = 'voted: ' + (n.votedFor === null ? '—' : 'N' + n.votedFor);
+  const pct = Math.max(0, Math.min(100, (n.timeoutRemaining / n.electionTimeoutMs) * 100));
+  const fill = n.el.querySelector('.timeout-bar .fill');
+  fill.style.width = pct + '%';
+  fill.style.background = n.state === 'LEADER' ? '#fbbf24'
+                         : n.state === 'CANDIDATE' ? '#facc15'
+                         : pct < 25 ? '#ef4444'
+                         : pct < 55 ? '#f59e0b'
+                                    : '#3b82f6';
+}
+
+function renderAll() {
+  nodes.forEach(renderNode);
+  const leader = nodes.find(n => n.state === 'LEADER');
+  const term = Math.max(...nodes.map(n => n.term));
+  const followers  = nodes.filter(n => n.state === 'FOLLOWER').length;
+  const candidates = nodes.filter(n => n.state === 'CANDIDATE').length;
+  const dead       = nodes.filter(n => n.state === 'DEAD').length;
+  document.getElementById('st-term').textContent      = term;
+  document.getElementById('st-leader').textContent    = leader ? ('N' + leader.id) : '—';
+  document.getElementById('st-followers').textContent = followers;
+  document.getElementById('st-candidates').textContent= candidates;
+  document.getElementById('st-dead').textContent      = dead;
+  document.getElementById('st-votes').textContent     = currentTermTotalVotes;
+}
+
+// ---------- Messages ----------
+function sendMessage(fromId, toId, kind, label) {
+  if (!canDeliver(fromId, toId)) return Promise.resolve(false); // dropped
+  const from = nodes.find(n => n.id === fromId);
+  const to   = nodes.find(n => n.id === toId);
+  if (!from || !to) return Promise.resolve(false);
+  if (from.state === 'DEAD' || to.state === 'DEAD') return Promise.resolve(false);
+  const el = document.createElement('div');
+  el.className = 'raft-msg ' + kind;
+  el.textContent = label || '';
+  el.style.left = from.x + 'px';
+  el.style.top  = from.y + 'px';
+  stage.appendChild(el);
+  // force reflow then animate
+  requestAnimationFrame(() => {
+    el.style.left = to.x + 'px';
+    el.style.top  = to.y + 'px';
+  });
+  return new Promise(resolve => {
+    setTimeout(() => {
+      el.style.opacity = '0';
+      setTimeout(() => el.remove(), 200);
+      resolve(true);
+    }, PACKET_DURATION);
+  });
+}
+
+// ---------- Random election timeout ----------
+function randElectionTimeout() {
+  return ELECTION_TIMEOUT_MIN + Math.random() * (ELECTION_TIMEOUT_MAX - ELECTION_TIMEOUT_MIN);
+}
+
+// ---------- Heartbeat ----------
+async function leaderHeartbeat() {
+  const leader = nodes.find(n => n.state === 'LEADER' && n.alive && n.state !== 'DEAD');
+  if (!leader) { say('No leader alive. Nothing to heartbeat.'); return; }
+  say(`💓 <strong>Node ${leader.id}</strong> (leader, term ${leader.term}) sends heartbeats to all followers.`);
+  const promises = [];
+  for (const peer of nodes) {
+    if (peer.id === leader.id || peer.state === 'DEAD') continue;
+    promises.push((async () => {
+      const delivered = await sendMessage(leader.id, peer.id, 'heartbeat', 'HB');
+      if (delivered && peer.state !== 'DEAD') {
+        // Reset follower timeout. Also, if the peer is an old candidate with a
+        // stale term, step it down.
+        if (leader.term >= peer.term) {
+          peer.term = leader.term;
+          if (peer.state === 'CANDIDATE') peer.state = 'FOLLOWER';
+          if (peer.state === 'FOLLOWER')  peer.timeoutRemaining = peer.electionTimeoutMs;
+        }
+        renderNode(peer);
+      }
+    })());
+  }
+  await Promise.all(promises);
+  renderAll();
+}
+
+// ---------- Election ----------
+async function triggerElection(candidateId) {
+  // Pick a follower to time out. If no id given, pick random alive follower.
+  let candidate;
+  if (candidateId) {
+    candidate = nodes.find(n => n.id === candidateId);
+  } else {
+    const followers = nodes.filter(n => n.state === 'FOLLOWER' && n.alive);
+    if (!followers.length) { say('No followers available to start an election.'); return; }
+    candidate = followers[Math.floor(Math.random() * followers.length)];
+  }
+  if (!candidate || candidate.state === 'DEAD') return;
+
+  // Become candidate, bump term, vote for self
+  candidate.term += 1;
+  candidate.state = 'CANDIDATE';
+  candidate.votedFor = candidate.id;
+  candidate.votesReceived = 1;
+  currentTermTotalVotes = 1;
+  // Also clear other nodes' votedFor if term moved up (standard Raft)
+  nodes.forEach(n => {
+    if (n.id !== candidate.id && n.term < candidate.term && n.state !== 'DEAD') {
+      n.term = candidate.term;
+      n.votedFor = null;
+      if (n.state === 'LEADER') n.state = 'FOLLOWER';
+      if (n.state === 'CANDIDATE') n.state = 'FOLLOWER';
+    }
+  });
+  renderAll();
+
+  say(`⏰ <strong>Node ${candidate.id}</strong>'s election timeout expired. Becoming <strong>CANDIDATE</strong> in term ${candidate.term}. Votes for itself (1/${MAJORITY} needed).`);
+
+  // Send RequestVote RPCs to all peers
+  const promises = [];
+  for (const peer of nodes) {
+    if (peer.id === candidate.id || peer.state === 'DEAD') continue;
+    promises.push((async () => {
+      const delivered = await sendMessage(candidate.id, peer.id, 'requestvote', 'vote?');
+      if (!delivered) return;
+      // peer evaluates vote
+      let grant = false;
+      if (candidate.term > peer.term) {
+        peer.term = candidate.term;
+        peer.votedFor = null;
+        if (peer.state !== 'DEAD') peer.state = 'FOLLOWER';
+      }
+      if (
+        candidate.term >= peer.term &&
+        (peer.votedFor === null || peer.votedFor === candidate.id) &&
+        // log-up-to-date check — all nodes have same log here, so trivially true
+        (candidate.lastLogTerm > peer.lastLogTerm ||
+         (candidate.lastLogTerm === peer.lastLogTerm && candidate.lastLogIndex >= peer.lastLogIndex))
+      ) {
+        grant = true;
+        peer.votedFor = candidate.id;
+        peer.timeoutRemaining = peer.electionTimeoutMs; // reset timeout on grant
+      }
+      renderNode(peer);
+      // send response back
+      await sendMessage(peer.id, candidate.id, grant ? 'votegranted' : 'votedenied', grant ? '✓' : '✗');
+      if (grant) {
+        candidate.votesReceived += 1;
+        currentTermTotalVotes += 1;
+        say(`Node ${peer.id} grants vote to Node ${candidate.id}. (${candidate.votesReceived}/${MAJORITY})`);
+      } else {
+        say(`Node ${peer.id} <strong style="color:#ef4444">denies</strong> vote to Node ${candidate.id} (already voted for N${peer.votedFor} this term).`);
+      }
+      renderAll();
+    })());
+  }
+  await Promise.all(promises);
+
+  // Tally
+  if (candidate.state !== 'CANDIDATE') {
+    // somebody else became leader in the meantime
+    renderAll();
+    return;
+  }
+  if (candidate.votesReceived >= MAJORITY) {
+    candidate.state = 'LEADER';
+    // demote anyone else who thinks they're leader
+    nodes.forEach(n => {
+      if (n.id !== candidate.id && n.state === 'LEADER') n.state = 'FOLLOWER';
+    });
+    say(`🎉 <strong>Node ${candidate.id}</strong> got ${candidate.votesReceived}/${NODE_COUNT} votes — <strong style="color:#fbbf24">wins election</strong>! Now LEADER for term ${candidate.term}. Starts sending heartbeats.`);
+    renderAll();
+    // send an initial heartbeat
+    await leaderHeartbeat();
+  } else {
+    // split vote or lost
+    candidate.state = 'FOLLOWER';
+    candidate.electionTimeoutMs = randElectionTimeout();
+    candidate.timeoutRemaining = candidate.electionTimeoutMs;
+    say(`Node ${candidate.id} got only ${candidate.votesReceived}/${NODE_COUNT} votes — <strong style="color:#ef4444">split vote / lost</strong>. Reverts to FOLLOWER and waits for a fresh timeout.`);
+    renderAll();
+  }
+}
+
+// ---------- Ticking ----------
+let tickTimer = null;
+const TICK_MS = 120;
+function startTicking() {
+  if (tickTimer) return;
+  tickTimer = setInterval(() => {
+    nodes.forEach(n => {
+      if (n.state === 'FOLLOWER' || n.state === 'CANDIDATE') {
+        n.timeoutRemaining -= TICK_MS;
+        if (n.timeoutRemaining <= 0) n.timeoutRemaining = 0;
+      }
+      renderNode(n);
+    });
+  }, TICK_MS);
+}
+
+// ---------- Kill / Revive ----------
+function killNode(id) {
+  const n = nodes.find(x => x.id === id);
+  if (!n || n.state === 'DEAD') return;
+  const wasLeader = n.state === 'LEADER';
+  n.state = 'DEAD';
+  n.alive = false;
+  renderAll();
+  if (wasLeader) {
+    say(`💥 <strong>Node ${id}</strong> (leader) killed. No more heartbeats. Followers will time out.`);
+  } else {
+    say(`💥 <strong>Node ${id}</strong> killed. ${nodes.filter(x => x.state === 'DEAD').length} nodes now dead.`);
+  }
+}
+
+function killLeader() {
+  const leader = nodes.find(n => n.state === 'LEADER');
+  if (!leader) { say('No leader to kill.'); return; }
+  killNode(leader.id);
+}
+
+function reviveAny() {
+  const dead = nodes.filter(n => n.state === 'DEAD');
+  if (!dead.length) { say('No dead nodes to revive.'); return; }
+  const n = dead[0];
+  n.state = 'FOLLOWER';
+  n.alive = true;
+  n.term = Math.max(...nodes.filter(x => x.state !== 'DEAD').map(x => x.term), n.term);
+  n.votedFor = null;
+  n.electionTimeoutMs = randElectionTimeout();
+  n.timeoutRemaining = n.electionTimeoutMs;
+  renderAll();
+  say(`💚 <strong>Node ${n.id}</strong> revived as FOLLOWER at term ${n.term}. Catches up on the latest term via heartbeats.`);
+}
+
+// ---------- Partition ----------
+function applyPartition() {
+  partitioned = true;
+  drawEdges();
+  renderAll();
+  say(`🌐 <strong>Network partitioned</strong>: {1,2} can't reach {3,4,5}. Minority (2 nodes) cannot elect a leader — needs ${MAJORITY}/${NODE_COUNT}. Majority side will elect if needed.`);
+}
+function healPartition() {
+  partitioned = false;
+  drawEdges();
+  renderAll();
+  say(`🔗 <strong>Partition healed</strong>. Stale-term node(s) will step down once they see a higher-term heartbeat.`);
+}
+
+// ---------- Auto simulate ----------
+async function autoSimulate() {
+  if (autoSimRunning) return;
+  autoSimRunning = true;
+  document.getElementById('btnAuto').textContent = '■ Stop Auto';
+
+  say('▶ Auto-sim started. Leader heartbeats, then we kill it, watch an election, recover.');
+
+  // Step 1: a couple heartbeats
+  for (let i = 0; i < 2 && autoSimRunning; i++) {
+    await leaderHeartbeat();
+    await delay(800);
+  }
+  if (!autoSimRunning) return stopAuto();
+
+  // Step 2: kill the leader
+  killLeader();
+  await delay(1500);
+  if (!autoSimRunning) return stopAuto();
+
+  // Step 3: pick a follower with shortest remaining timeout to drive the election
+  const candidates = nodes.filter(n => n.state === 'FOLLOWER');
+  if (candidates.length) {
+    candidates.sort((a, b) => a.timeoutRemaining - b.timeoutRemaining);
+    const c = candidates[0];
+    c.timeoutRemaining = 0;
+    await triggerElection(c.id);
+  }
+  if (!autoSimRunning) return stopAuto();
+
+  await delay(800);
+
+  // Step 4: more heartbeats from new leader
+  for (let i = 0; i < 2 && autoSimRunning; i++) {
+    await leaderHeartbeat();
+    await delay(800);
+  }
+  stopAuto();
+}
+function stopAuto() {
+  autoSimRunning = false;
+  document.getElementById('btnAuto').textContent = '▶ Auto Simulate';
+}
+
+function delay(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+// ---------- Reset ----------
+function resetAll() {
+  stopAuto();
+  partitioned = false;
+  currentTermTotalVotes = 0;
+  buildNodes();
+  layout();
+  say('Reset. Term 1, Node 1 is leader. Click <strong>💓 Send Heartbeat</strong> or <strong>💥 Kill Leader</strong>.');
+}
+
+// ---------- Wiring ----------
+document.getElementById('btnAuto').onclick = () => {
+  if (autoSimRunning) { stopAuto(); return; }
+  autoSimulate();
+};
+document.getElementById('btnHb').onclick      = () => leaderHeartbeat();
+document.getElementById('btnElect').onclick   = () => triggerElection();
+document.getElementById('btnKillLeader').onclick = () => killLeader();
+document.getElementById('btnKill3').onclick   = () => killNode(3);
+document.getElementById('btnRevive').onclick  = () => reviveAny();
+document.getElementById('btnPartition').onclick = () => applyPartition();
+document.getElementById('btnHeal').onclick    = () => healPartition();
+document.getElementById('btnReset').onclick   = () => resetAll();
+
+window.addEventListener('resize', () => layout());
+
+// ---------- Auto-fire elections when a follower's timeout hits 0 ----------
+let autoElectionGuard = false;
+setInterval(async () => {
+  if (autoElectionGuard) return;
+  // Any follower whose timeout has run out AND no live leader exists?
+  const liveLeader = nodes.find(n => n.state === 'LEADER' && n.alive);
+  if (liveLeader) return;
+  const timedOut = nodes.filter(n => n.state === 'FOLLOWER' && n.alive && n.timeoutRemaining <= 0);
+  if (!timedOut.length) return;
+  autoElectionGuard = true;
+  // pick the one with the smallest timeout (usually the first one to fire)
+  timedOut.sort((a, b) => a.electionTimeoutMs - b.electionTimeoutMs);
+  await triggerElection(timedOut[0].id);
+  autoElectionGuard = false;
+}, 500);
+
+// ---------- Boot ----------
+buildNodes();
+layout();
+startTicking();
+</script>
+</body>
+</html>

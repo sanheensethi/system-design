@@ -1,0 +1,652 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Vending Machine — State Pattern Visualization</title>
+<link rel="stylesheet" href="../assets/css/style.css">
+<link rel="stylesheet" href="../assets/css/viz.css">
+<style>
+  .vm-wrap { display: grid; grid-template-columns: 1fr 1fr; gap: 1.2rem; margin: 1rem 0; }
+  @media (max-width: 900px) { .vm-wrap { grid-template-columns: 1fr; } }
+
+  .vm-machine, .vm-diagram {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 1rem 1.1rem;
+  }
+
+  .vm-state-badge {
+    display: inline-block;
+    padding: 0.4rem 0.9rem;
+    border-radius: 8px;
+    font-family: "SF Mono", Monaco, Consolas, monospace;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    border: 2px solid var(--border);
+    font-size: 0.95rem;
+    transition: all 0.4s;
+  }
+  .vm-state-IDLE           { border-color: #8a8a8a; color: #bdbdbd; box-shadow: 0 0 14px rgba(138,138,138,0.25); }
+  .vm-state-HAS_MONEY      { border-color: #3498db; color: #5dade2; box-shadow: 0 0 14px rgba(52,152,219,0.35); }
+  .vm-state-ITEM_SELECTED  { border-color: #f1c40f; color: #f4d35e; box-shadow: 0 0 14px rgba(241,196,15,0.35); }
+  .vm-state-DISPENSING     { border-color: #2ecc71; color: #58d68d; box-shadow: 0 0 14px rgba(46,204,113,0.4); }
+  .vm-state-MAINTENANCE    { border-color: #e67e22; color: #eb984e; box-shadow: 0 0 14px rgba(230,126,34,0.35); }
+
+  .vm-row { display: flex; justify-content: space-between; align-items: center; margin: 0.6rem 0; }
+  .vm-label { font-size: 0.75rem; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.08em; }
+  .vm-money {
+    font-family: "SF Mono", Monaco, Consolas, monospace;
+    font-size: 1.4rem;
+    font-weight: 700;
+    color: #2ecc71;
+  }
+
+  .vm-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 0.6rem;
+    margin: 0.8rem 0 0.6rem;
+  }
+  .vm-item {
+    position: relative;
+    background: var(--bg-elev);
+    border: 1.5px solid var(--border);
+    border-radius: 8px;
+    padding: 0.55rem 0.3rem;
+    text-align: center;
+    cursor: pointer;
+    transition: all 0.25s;
+    user-select: none;
+  }
+  .vm-item:hover:not(.vm-disabled) { border-color: #5dade2; transform: translateY(-1px); }
+  .vm-item.vm-selected { border-color: #f1c40f; box-shadow: 0 0 12px rgba(241,196,15,0.45); }
+  .vm-item.vm-oos { opacity: 0.4; cursor: not-allowed; }
+  .vm-item.vm-disabled { opacity: 0.55; cursor: not-allowed; }
+  .vm-icon { font-size: 1.5rem; }
+  .vm-name { font-size: 0.78rem; font-weight: 600; margin-top: 0.15rem; }
+  .vm-price { font-size: 0.72rem; color: #2ecc71; font-family: "SF Mono", Monaco, Consolas, monospace; }
+  .vm-stock { font-size: 0.68rem; color: var(--text-dim); }
+
+  .vm-slot {
+    margin-top: 0.8rem;
+    height: 70px;
+    border: 2px dashed var(--border);
+    border-radius: 8px;
+    position: relative;
+    background: rgba(0,0,0,0.18);
+    overflow: hidden;
+  }
+  .vm-slot-label {
+    position: absolute; top: 4px; left: 8px;
+    font-size: 0.7rem; color: var(--text-dim);
+    text-transform: uppercase; letter-spacing: 0.08em;
+  }
+  .vm-drop {
+    position: absolute;
+    font-size: 1.6rem;
+    transition: all 0.9s cubic-bezier(0.5, 0, 0.7, 1);
+    opacity: 0;
+  }
+
+  .vm-btn-row { display: flex; flex-wrap: wrap; gap: 0.45rem; margin-top: 0.7rem; }
+
+  /* SVG diagram */
+  .vm-svg { width: 100%; height: 360px; }
+  .vm-node rect { transition: all 0.4s; }
+  .vm-node text { font-family: "SF Mono", Monaco, Consolas, monospace; font-size: 12px; font-weight: 700; fill: var(--text); }
+  .vm-node.active rect { stroke-width: 3; filter: drop-shadow(0 0 8px currentColor); }
+  .vm-edge {
+    fill: none; stroke: #5a5a5a; stroke-width: 1.6;
+    transition: stroke 0.3s, stroke-width 0.3s;
+  }
+  .vm-edge.pulse { stroke: #f4d35e; stroke-width: 3; }
+  .vm-edge-label { font-family: "SF Mono", Monaco, Consolas, monospace; font-size: 10px; fill: var(--text-dim); }
+
+  pre.code {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1rem;
+    font-family: "SF Mono", Monaco, Consolas, monospace;
+    font-size: 0.8rem;
+    line-height: 1.55;
+    overflow-x: auto;
+  }
+
+  .vm-log {
+    min-height: 58px;
+    padding: 0.7rem 0.9rem;
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    font-family: "SF Mono", Monaco, Consolas, monospace;
+    font-size: 0.84rem;
+    margin-top: 0.8rem;
+  }
+  .vm-log-ok   { color: #2ecc71; }
+  .vm-log-warn { color: #f1c40f; }
+  .vm-log-err  { color: #e74c3c; }
+  .vm-log-info { color: #5dade2; }
+</style>
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">System Design Books</div>
+    <div class="brand-sub">by Sanheen · Progressive Learning</div>
+    <div class="nav-section">
+      <h3>Home</h3>
+      <a href="../index.html">Overview</a>
+    </div>
+    <div class="nav-section">
+      <h3>Interactive Visualizations</h3>
+      <a href="index.html">Viz Index</a>
+      <a href="lru-cache.html">LRU Cache (LLD)</a>
+      <a href="vending-machine.html">Vending Machine (LLD)</a>
+      <a href="request-flow.html">Request Flow (HLD)</a>
+      <a href="load-balancer.html">Load Balancer (HLD)</a>
+      <a href="cache-aside.html">Cache Aside Pattern (HLD)</a>
+      <a href="circuit-breaker.html">Circuit Breaker (HLD)</a>
+    </div>
+    <div class="nav-section">
+      <h3>Book II — High Level Design</h3>
+      <a href="../hld/index.html">HLD Index</a>
+    </div>
+  </aside>
+
+  <main class="main">
+    <div class="breadcrumb"><a href="../index.html">Home</a> / <a href="index.html">Visualizations</a> / Vending Machine</div>
+    <h1>Vending Machine — State Pattern Visualization</h1>
+    <p>A classic LLD interview problem. The machine is modeled as a finite-state machine: <strong>IDLE → HAS_MONEY → ITEM_SELECTED → DISPENSING → IDLE</strong>. Each state is its own class and only accepts a subset of actions; the rest throw invalid-transition errors. Insert money, pick an item, watch it drop.</p>
+
+    <div class="viz-controls">
+      <button class="viz-btn primary" id="btnC25">💰 Insert $0.25</button>
+      <button class="viz-btn primary" id="btnC100">💵 Insert $1.00</button>
+      <button class="viz-btn" id="btnCard">💳 Pay with Card (exact)</button>
+      <button class="viz-btn" id="btnCancel">↩️ Cancel / Refund</button>
+      <button class="viz-btn" id="btnMaint">🔧 Maintenance Mode</button>
+      <button class="viz-btn" id="btnRestock">🔁 Restock Coke</button>
+      <button class="viz-btn" id="btnReset">Reset</button>
+    </div>
+
+    <div class="vm-wrap">
+      <!-- Left: the machine -->
+      <div class="vm-machine">
+        <div class="vm-row">
+          <div>
+            <div class="vm-label">Current State</div>
+            <div class="vm-state-badge vm-state-IDLE" id="stateBadge">IDLE</div>
+          </div>
+          <div style="text-align:right">
+            <div class="vm-label">Inserted</div>
+            <div class="vm-money" id="moneyDisplay">$0.00</div>
+          </div>
+        </div>
+
+        <div class="vm-grid" id="itemGrid"></div>
+
+        <div class="vm-slot">
+          <div class="vm-slot-label">Dispense Slot</div>
+          <div class="vm-drop" id="dropItem">🥤</div>
+        </div>
+      </div>
+
+      <!-- Right: state diagram -->
+      <div class="vm-diagram">
+        <div class="vm-label" style="margin-bottom:0.5rem">State Diagram</div>
+        <svg class="vm-svg" id="vmSvg" viewBox="0 0 400 360">
+          <defs>
+            <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+              <path d="M0,0 L10,5 L0,10 z" fill="#5a5a5a"/>
+            </marker>
+            <marker id="arrPulse" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+              <path d="M0,0 L10,5 L0,10 z" fill="#f4d35e"/>
+            </marker>
+          </defs>
+
+          <!-- Edges -->
+          <path class="vm-edge" id="e_IDLE_HAS"       d="M 110 65 C 200 65, 240 65, 295 65"  marker-end="url(#arr)"/>
+          <path class="vm-edge" id="e_HAS_ITEM"      d="M 335 95 C 335 150, 335 180, 335 215" marker-end="url(#arr)"/>
+          <path class="vm-edge" id="e_ITEM_DISP"     d="M 300 245 C 240 245, 200 245, 110 245" marker-end="url(#arr)"/>
+          <path class="vm-edge" id="e_DISP_IDLE"     d="M 75 215 C 75 160, 75 130, 75 95"    marker-end="url(#arr)"/>
+          <path class="vm-edge" id="e_HAS_IDLE"      d="M 300 90 C 230 120, 170 120, 110 90" marker-end="url(#arr)"/>
+
+          <!-- Edge labels -->
+          <text class="vm-edge-label" x="155" y="58">insert_coin</text>
+          <text class="vm-edge-label" x="345" y="160">select(item)</text>
+          <text class="vm-edge-label" x="175" y="260">dispense</text>
+          <text class="vm-edge-label" x="30"  y="160">complete</text>
+          <text class="vm-edge-label" x="180" y="115">cancel</text>
+
+          <!-- Nodes -->
+          <g class="vm-node" id="n_IDLE">
+            <rect x="20" y="40" width="110" height="50" rx="10" fill="#1a1a1a" stroke="#8a8a8a"/>
+            <text x="75" y="65" text-anchor="middle" fill="#bdbdbd">IDLE</text>
+            <text x="75" y="80" text-anchor="middle" font-size="9" fill="#8a8a8a">waiting</text>
+          </g>
+          <g class="vm-node" id="n_HAS_MONEY">
+            <rect x="290" y="40" width="100" height="55" rx="10" fill="#1a1a1a" stroke="#3498db"/>
+            <text x="340" y="62" text-anchor="middle" fill="#5dade2">HAS_MONEY</text>
+            <text x="340" y="80" text-anchor="middle" font-size="9" fill="#5dade2">$0.00</text>
+          </g>
+          <g class="vm-node" id="n_ITEM_SELECTED">
+            <rect x="285" y="215" width="110" height="55" rx="10" fill="#1a1a1a" stroke="#f1c40f"/>
+            <text x="340" y="238" text-anchor="middle" fill="#f4d35e">ITEM_</text>
+            <text x="340" y="255" text-anchor="middle" fill="#f4d35e">SELECTED</text>
+          </g>
+          <g class="vm-node" id="n_DISPENSING">
+            <rect x="20" y="215" width="100" height="55" rx="10" fill="#1a1a1a" stroke="#2ecc71"/>
+            <text x="70" y="240" text-anchor="middle" fill="#58d68d">DISPENSING</text>
+            <text x="70" y="257" text-anchor="middle" font-size="9" fill="#58d68d">dropping…</text>
+          </g>
+        </svg>
+      </div>
+    </div>
+
+    <div class="viz-stats">
+      <div class="viz-stat"><div class="viz-stat-val" id="st-tx">0</div><div class="viz-stat-label">Transactions</div></div>
+      <div class="viz-stat"><div class="viz-stat-val" id="st-sold">0</div><div class="viz-stat-label">Items Sold</div></div>
+      <div class="viz-stat"><div class="viz-stat-val" id="st-rev">$0.00</div><div class="viz-stat-label">Revenue</div></div>
+      <div class="viz-stat"><div class="viz-stat-val" id="st-ref">$0.00</div><div class="viz-stat-label">Refunds</div></div>
+      <div class="viz-stat"><div class="viz-stat-val" id="st-trans">0</div><div class="viz-stat-label">State Transitions</div></div>
+    </div>
+
+    <div class="vm-log" id="vmLog">State: <strong>IDLE</strong>. Insert money or enter maintenance.</div>
+
+    <h2>State Transition Table</h2>
+    <table>
+      <thead><tr><th>From State</th><th>Action</th><th>To State</th></tr></thead>
+      <tbody>
+        <tr><td><strong style="color:#bdbdbd">IDLE</strong></td><td><code>insert_coin</code></td><td><strong style="color:#5dade2">HAS_MONEY</strong></td></tr>
+        <tr><td><strong style="color:#bdbdbd">IDLE</strong></td><td><code>maintenance_key</code></td><td><strong style="color:#eb984e">MAINTENANCE</strong></td></tr>
+        <tr><td><strong style="color:#5dade2">HAS_MONEY</strong></td><td><code>insert_coin</code></td><td>HAS_MONEY <em>(add money)</em></td></tr>
+        <tr><td><strong style="color:#5dade2">HAS_MONEY</strong></td><td><code>select(item)</code> if funds cover price</td><td><strong style="color:#f4d35e">ITEM_SELECTED</strong></td></tr>
+        <tr><td><strong style="color:#5dade2">HAS_MONEY</strong></td><td><code>cancel</code></td><td>IDLE <em>(refund issued)</em></td></tr>
+        <tr><td><strong style="color:#f4d35e">ITEM_SELECTED</strong></td><td><code>dispense</code></td><td><strong style="color:#58d68d">DISPENSING</strong></td></tr>
+        <tr><td><strong style="color:#58d68d">DISPENSING</strong></td><td><code>complete</code></td><td>IDLE</td></tr>
+        <tr><td><strong style="color:#eb984e">MAINTENANCE</strong></td><td><code>exit</code></td><td>IDLE</td></tr>
+      </tbody>
+    </table>
+
+    <h2>Why State Pattern?</h2>
+    <p>A vending machine has genuinely different behavior depending on what just happened. A naive implementation ends up with giant <code>if state == 'X' and action == 'Y'</code> ladders inside every method — easy to get wrong, brittle when adding a new state. The State Pattern puts each state in its own class and makes <em>the object delegate actions to its current state</em>. Invalid transitions become a single line per state: "no, not here."</p>
+
+    <h2>The Four Core States</h2>
+    <ul>
+      <li><strong style="color:#bdbdbd">IDLE</strong> — No money in, no item chosen. Accepts coins and maintenance key. Rejects selection.</li>
+      <li><strong style="color:#5dade2">HAS_MONEY</strong> — Coins / card credit being held. Accepts more money, a selection (if affordable), or cancel (refund). Rejects dispense.</li>
+      <li><strong style="color:#f4d35e">ITEM_SELECTED</strong> — An affordable, in-stock item is locked in. Accepts dispense. Rejects further coins (already committed).</li>
+      <li><strong style="color:#58d68d">DISPENSING</strong> — Motor spinning. Accepts nothing from the user. On <code>complete</code> → IDLE, change returned.</li>
+    </ul>
+
+    <h2>Reference Implementation (Python)</h2>
+<pre class="code">class State:
+    def insert_coin(self, machine, amount): raise InvalidTransition()
+    def select(self, machine, item):        raise InvalidTransition()
+    def dispense(self, machine):            raise InvalidTransition()
+    def cancel(self, machine):              raise InvalidTransition()
+
+class IdleState(State):
+    def insert_coin(self, machine, amount):
+        machine.balance += amount
+        machine.set_state(HasMoneyState())
+
+class HasMoneyState(State):
+    def insert_coin(self, machine, amount):
+        machine.balance += amount        # stay in HAS_MONEY
+
+    def select(self, machine, item):
+        if machine.stock[item] &lt;= 0:
+            raise OutOfStock(item)
+        if machine.balance &lt; machine.prices[item]:
+            raise InsufficientFunds()
+        machine.selected = item
+        machine.set_state(ItemSelectedState())
+
+    def cancel(self, machine):
+        machine.refund(machine.balance)
+        machine.balance = 0
+        machine.set_state(IdleState())
+
+class ItemSelectedState(State):
+    def dispense(self, machine):
+        machine.set_state(DispensingState())
+        machine.drop_item(machine.selected)
+        machine.stock[machine.selected] -= 1
+        change = machine.balance - machine.prices[machine.selected]
+        if change &gt; 0: machine.return_change(change)
+        machine.balance = 0
+        machine.selected = None
+        machine.set_state(IdleState())
+
+class DispensingState(State):
+    pass   # all actions raise InvalidTransition — motor is busy
+
+class VendingMachine:
+    def __init__(self, prices, stock):
+        self.prices, self.stock = prices, stock
+        self.balance, self.selected = 0, None
+        self._state = IdleState()
+
+    def set_state(self, s): self._state = s
+    def insert_coin(self, a): self._state.insert_coin(self, a)
+    def select(self, item):   self._state.select(self, item)
+    def dispense(self):       self._state.dispense(self)
+    def cancel(self):         self._state.cancel(self)</pre>
+
+    <h2>Why This Beats The if-else Blob</h2>
+    <ul>
+      <li><strong>Adding a new state is local.</strong> Want a <code>LOW_POWER</code> state that refuses everything until plugged in? Write one class. You don't touch the other four.</li>
+      <li><strong>Invalid transitions are free.</strong> Every unsupported action inherits <code>raise InvalidTransition()</code> from the base.</li>
+      <li><strong>Each state is independently testable.</strong> Hand a <code>HasMoneyState</code> a mock machine and poke its methods — no setup to get <em>into</em> the state first.</li>
+      <li><strong>No hidden coupling.</strong> State transitions happen via <code>machine.set_state(...)</code>, so every edge in the diagram is literally searchable in the code.</li>
+    </ul>
+
+    <h2>Common Interview Follow-Ups</h2>
+    <ul>
+      <li><strong>Concurrency:</strong> two users pressing buttons at once → guard <code>set_state</code> with a lock, or make the state object immutable and swap atomically.</li>
+      <li><strong>Change-making:</strong> returning optimal coins is its own algorithm (greedy works for US coins, DP for arbitrary denominations). Keep it in a collaborator — don't bloat the state classes.</li>
+      <li><strong>Persistence:</strong> if the machine reboots mid-transaction, where does money go? Typical answer: log every transition; on boot, reconcile balance and refund if mid-flight.</li>
+      <li><strong>Maintenance mode:</strong> a physical key puts it into <code>MAINTENANCE</code> where restock / empty-coinbox operations are allowed. User actions are rejected.</li>
+    </ul>
+  </main>
+</div>
+<script src="../assets/js/nav.js"></script>
+<script src="../assets/js/animator.js"></script>
+<script>
+// --- Data model ---
+const PRICES = {
+  coke:  { icon: '🥤', name: 'Coke',   price: 1.50 },
+  chips: { icon: '🥔', name: 'Chips',  price: 1.25 },
+  water: { icon: '💧', name: 'Water',  price: 1.00 },
+  candy: { icon: '🍬', name: 'Candy',  price: 0.75 },
+  gum:   { icon: '🍬', name: 'Gum',    price: 0.50 },
+  juice: { icon: '🧃', name: 'Juice',  price: 2.00 },
+};
+// override gum icon so it's distinct
+PRICES.gum.icon = '🍭';
+
+const INITIAL_STOCK = { coke: 5, chips: 3, water: 4, candy: 6, gum: 8, juice: 2 };
+
+// --- Runtime state ---
+let state = 'IDLE';
+let balance = 0;       // cents
+let selected = null;
+let stock = { ...INITIAL_STOCK };
+let stats = { tx: 0, sold: 0, revenue: 0, refunds: 0, transitions: 0 };
+
+// --- Render helpers ---
+const $ = (id) => document.getElementById(id);
+
+function fmt(cents) { return '$' + (cents / 100).toFixed(2); }
+
+function renderItems() {
+  const grid = $('itemGrid');
+  grid.innerHTML = '';
+  for (const [key, meta] of Object.entries(PRICES)) {
+    const oos = stock[key] <= 0;
+    const div = document.createElement('div');
+    const cls = ['vm-item'];
+    if (oos) cls.push('vm-oos');
+    if (selected === key) cls.push('vm-selected');
+    if (state === 'DISPENSING' || state === 'ITEM_SELECTED') cls.push('vm-disabled');
+    div.className = cls.join(' ');
+    div.dataset.key = key;
+    div.innerHTML = `
+      <div class="vm-icon">${meta.icon}</div>
+      <div class="vm-name">${meta.name}</div>
+      <div class="vm-price">$${meta.price.toFixed(2)}</div>
+      <div class="vm-stock">stock: ${stock[key]}</div>
+    `;
+    div.onclick = () => onSelect(key, div);
+    grid.appendChild(div);
+  }
+}
+
+function renderState() {
+  const badge = $('stateBadge');
+  badge.className = 'vm-state-badge vm-state-' + state;
+  badge.textContent = state;
+  $('moneyDisplay').textContent = fmt(balance);
+
+  // Diagram: highlight active node
+  ['IDLE','HAS_MONEY','ITEM_SELECTED','DISPENSING'].forEach(s => {
+    const n = document.getElementById('n_' + s);
+    if (!n) return;
+    if (s === state) n.classList.add('active');
+    else n.classList.remove('active');
+  });
+  // Update HAS_MONEY label with live balance
+  const hasNode = $('n_HAS_MONEY');
+  if (hasNode) hasNode.querySelectorAll('text')[1].textContent = fmt(balance);
+}
+
+function renderStats() {
+  $('st-tx').textContent = stats.tx;
+  $('st-sold').textContent = stats.sold;
+  $('st-rev').textContent = fmt(stats.revenue);
+  $('st-ref').textContent = fmt(stats.refunds);
+  $('st-trans').textContent = stats.transitions;
+}
+
+function log(msg, cls) {
+  $('vmLog').innerHTML = `<span class="${cls || ''}">${msg}</span>`;
+}
+
+function setState(next, edgeId) {
+  if (state === next) return;
+  state = next;
+  stats.transitions++;
+  renderState();
+  renderItems();
+  renderStats();
+  if (edgeId) pulseEdge(edgeId);
+}
+
+function pulseEdge(id) {
+  const e = document.getElementById(id);
+  if (!e) return;
+  e.classList.add('pulse');
+  e.setAttribute('marker-end', 'url(#arrPulse)');
+  setTimeout(() => {
+    e.classList.remove('pulse');
+    e.setAttribute('marker-end', 'url(#arr)');
+  }, 900);
+}
+
+// --- Drop animation ---
+function animateDrop(itemKey, srcEl) {
+  const meta = PRICES[itemKey];
+  const drop = $('dropItem');
+  const slot = drop.parentElement;
+  const slotRect = slot.getBoundingClientRect();
+  const srcRect = srcEl ? srcEl.getBoundingClientRect() : slotRect;
+
+  // Start position: above the slot, at the x of the selected item
+  const startX = (srcRect.left + srcRect.width / 2) - slotRect.left - 14;
+  const startY = -80;
+
+  drop.textContent = meta.icon;
+  drop.style.transition = 'none';
+  drop.style.left = startX + 'px';
+  drop.style.top = startY + 'px';
+  drop.style.opacity = '0';
+
+  // next frame: animate into slot center
+  requestAnimationFrame(() => {
+    drop.style.transition = 'all 0.9s cubic-bezier(0.5, 0, 0.7, 1)';
+    drop.style.opacity = '1';
+    drop.style.left = (slotRect.width / 2 - 14) + 'px';
+    drop.style.top = (slotRect.height / 2 - 14) + 'px';
+  });
+}
+
+// --- State machine: actions ---
+function onInsert(amountCents, method) {
+  if (state === 'ITEM_SELECTED' || state === 'DISPENSING') {
+    log(`❌ Invalid: cannot insert in <strong>${state}</strong> state`, 'vm-log-err');
+    return;
+  }
+  if (state === 'MAINTENANCE') {
+    log('❌ Invalid: cannot insert in <strong>MAINTENANCE</strong>', 'vm-log-err');
+    return;
+  }
+  const was = state;
+  balance += amountCents;
+  if (was === 'IDLE') {
+    setState('HAS_MONEY', 'e_IDLE_HAS');
+    log(`Inserted ${fmt(amountCents)}${method ? ' via ' + method : ''}. Total: <strong>${fmt(balance)}</strong>. State: <strong>HAS_MONEY</strong>.`, 'vm-log-info');
+  } else {
+    renderState();
+    log(`Added ${fmt(amountCents)}. Total: <strong>${fmt(balance)}</strong> (stay in HAS_MONEY).`, 'vm-log-info');
+  }
+}
+
+function onSelect(key, el) {
+  const meta = PRICES[key];
+  if (state === 'MAINTENANCE') {
+    log('❌ Invalid: cannot select in MAINTENANCE', 'vm-log-err');
+    return;
+  }
+  if (state === 'IDLE') {
+    log('❌ Invalid: no money inserted. Current state: <strong>IDLE</strong>', 'vm-log-err');
+    return;
+  }
+  if (state === 'DISPENSING') {
+    log('❌ Invalid: cannot select in <strong>DISPENSING</strong> state', 'vm-log-err');
+    return;
+  }
+  if (stock[key] <= 0) {
+    log(`❌ <strong>${meta.name}</strong> is out of stock. Pick another or cancel.`, 'vm-log-err');
+    return;
+  }
+  const priceCents = Math.round(meta.price * 100);
+  if (balance < priceCents) {
+    const need = priceCents - balance;
+    log(`Selected ${meta.name} ($${meta.price.toFixed(2)}). Need ${fmt(need)} more — stay in <strong>HAS_MONEY</strong>.`, 'vm-log-warn');
+    return;
+  }
+  // Enough funds
+  selected = key;
+  setState('ITEM_SELECTED', 'e_HAS_ITEM');
+  log(`${meta.icon} <strong>${meta.name}</strong> selected. State: <strong>ITEM_SELECTED</strong>. Dispensing…`, 'vm-log-info');
+  // Auto-dispense
+  setTimeout(() => dispense(el), 650);
+}
+
+async function dispense(srcEl) {
+  if (state !== 'ITEM_SELECTED') {
+    log(`❌ Invalid: cannot dispense in <strong>${state}</strong> state`, 'vm-log-err');
+    return;
+  }
+  const key = selected;
+  const meta = PRICES[key];
+  const priceCents = Math.round(meta.price * 100);
+
+  setState('DISPENSING', 'e_ITEM_DISP');
+  log(`Dispensing <strong>${meta.name}</strong>… motor running. State: <strong>DISPENSING</strong>.`, 'vm-log-info');
+
+  animateDrop(key, srcEl);
+
+  await new Promise(r => setTimeout(r, 950));
+
+  stock[key] -= 1;
+  const change = balance - priceCents;
+  stats.tx++;
+  stats.sold++;
+  stats.revenue += priceCents;
+
+  balance = 0;
+  selected = null;
+  setState('IDLE', 'e_DISP_IDLE');
+
+  const changeMsg = change > 0 ? ` Change returned: <strong>${fmt(change)}</strong>.` : ' Change: $0.00.';
+  log(`${meta.icon} <strong>${meta.name}</strong> dropped!${changeMsg} State: <strong>IDLE</strong>.`, 'vm-log-ok');
+
+  // Hide drop after a bit
+  setTimeout(() => { $('dropItem').style.opacity = '0.55'; }, 1800);
+}
+
+function onCancel() {
+  if (state !== 'HAS_MONEY') {
+    log(`❌ Invalid: cancel only valid in HAS_MONEY. Current: <strong>${state}</strong>`, 'vm-log-err');
+    return;
+  }
+  const refunded = balance;
+  stats.refunds += refunded;
+  balance = 0;
+  selected = null;
+  setState('IDLE', 'e_HAS_IDLE');
+  log(`↩️ Cancelled. Refunded <strong>${fmt(refunded)}</strong>. State: <strong>IDLE</strong>.`, 'vm-log-warn');
+}
+
+function onMaintenance() {
+  if (state === 'MAINTENANCE') {
+    // exit
+    setState('IDLE');
+    log('🔧 Exit maintenance. State: <strong>IDLE</strong>.', 'vm-log-info');
+    return;
+  }
+  if (state !== 'IDLE') {
+    log('❌ Invalid: maintenance key only works from IDLE', 'vm-log-err');
+    return;
+  }
+  setState('MAINTENANCE');
+  log('🔧 Entered <strong>MAINTENANCE</strong>. Restock buttons enabled.', 'vm-log-info');
+}
+
+function onRestock() {
+  if (state !== 'MAINTENANCE') {
+    log('❌ Restock requires MAINTENANCE mode', 'vm-log-err');
+    return;
+  }
+  stock.coke = Math.min(stock.coke + 3, 9);
+  renderItems();
+  log(`🔁 Restocked Coke → ${stock.coke}.`, 'vm-log-ok');
+}
+
+function onCard() {
+  // Pay exact price of selection... or prompt to select first
+  if (state === 'ITEM_SELECTED' || state === 'DISPENSING' || state === 'MAINTENANCE') {
+    log(`❌ Invalid: card not accepted in <strong>${state}</strong>`, 'vm-log-err');
+    return;
+  }
+  // Card fills balance to $2.00 (covers anything)
+  const topUp = Math.max(0, 200 - balance);
+  balance += topUp;
+  if (state === 'IDLE') setState('HAS_MONEY', 'e_IDLE_HAS');
+  else renderState();
+  log(`💳 Card authorised. Balance: <strong>${fmt(balance)}</strong>. State: <strong>HAS_MONEY</strong>.`, 'vm-log-info');
+}
+
+function reset() {
+  state = 'IDLE';
+  balance = 0;
+  selected = null;
+  stock = { ...INITIAL_STOCK };
+  stats = { tx: 0, sold: 0, revenue: 0, refunds: 0, transitions: 0 };
+  $('dropItem').style.opacity = '0';
+  renderItems();
+  renderState();
+  renderStats();
+  log('Reset. State: <strong>IDLE</strong>. Insert money or enter maintenance.');
+}
+
+// --- Wire up buttons ---
+$('btnC25').onclick   = () => onInsert(25, 'coin');
+$('btnC100').onclick  = () => onInsert(100, 'bill');
+$('btnCard').onclick  = onCard;
+$('btnCancel').onclick = onCancel;
+$('btnMaint').onclick = onMaintenance;
+$('btnRestock').onclick = onRestock;
+$('btnReset').onclick = reset;
+
+// --- Initial render ---
+renderItems();
+renderState();
+renderStats();
+</script>
+</body>
+</html>

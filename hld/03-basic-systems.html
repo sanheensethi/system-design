@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Basic Systems Progressive — Book II · HLD</title>
 <link rel="stylesheet" href="../assets/css/style.css">
+<link rel="stylesheet" href="../assets/css/viz.css">
 </head>
 <body>
 <div class="app">
@@ -43,6 +44,14 @@
     </div>
 
     <h2>System 1 — URL Shortener (bit.ly-class)</h2>
+
+    <div class="embed-wrap">
+      <div class="embed-title">
+        <span>🎬 Interactive: Full request flow — User → DNS → CDN → LB → App → Cache → DB. First request MISSes, next HITs.</span>
+        <a href="../viz/request-flow.html" target="_blank">Open full viz ↗</a>
+      </div>
+      <iframe src="../viz/request-flow.html?embed=1" style="height:760px" loading="lazy"></iframe>
+    </div>
 
     <h3>1.1 Functional Requirements</h3>
     <p>Before touching architecture, drill the requirements. An interviewer who asks "design bit.ly" is really asking "which variant of bit.ly?" Pin it down:</p>

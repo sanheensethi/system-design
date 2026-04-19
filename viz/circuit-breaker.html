@@ -1,0 +1,504 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Circuit Breaker — Interactive Visualization</title>
+<link rel="stylesheet" href="../assets/css/style.css">
+<link rel="stylesheet" href="../assets/css/viz.css">
+<style>
+  .cb-box {
+    position: absolute;
+    transform: translate(-50%, -50%);
+    min-width: 180px;
+    padding: 0.9rem 1rem;
+    border-radius: 12px;
+    border: 2px solid var(--border);
+    background: var(--bg-card);
+    text-align: center;
+    transition: border-color 0.4s, box-shadow 0.4s, background 0.4s;
+    box-shadow: 0 4px 18px rgba(0,0,0,0.25);
+  }
+  .cb-box.state-CLOSED { border-color: #2ecc71; box-shadow: 0 0 22px rgba(46,204,113,0.35); }
+  .cb-box.state-OPEN   { border-color: #e74c3c; box-shadow: 0 0 22px rgba(231,76,60,0.45); }
+  .cb-box.state-HALF_OPEN { border-color: #f1c40f; box-shadow: 0 0 22px rgba(241,196,15,0.45); }
+  .cb-title { font-size: 0.78rem; color: var(--text-dim); letter-spacing: 0.08em; text-transform: uppercase; }
+  .cb-state { font-size: 1.1rem; font-weight: 700; margin: 0.35rem 0 0.5rem; font-family: "SF Mono", Monaco, Consolas, monospace; }
+  .cb-state.state-CLOSED { color: #2ecc71; }
+  .cb-state.state-OPEN { color: #e74c3c; }
+  .cb-state.state-HALF_OPEN { color: #f1c40f; }
+  .cb-fail-label { font-size: 0.7rem; color: var(--text-dim); margin-bottom: 0.3rem; }
+  .cb-dots { display: flex; justify-content: center; gap: 6px; }
+  .cb-dot {
+    width: 14px; height: 14px; border-radius: 50%;
+    border: 1.5px solid var(--border);
+    background: transparent;
+    transition: background 0.3s, border-color 0.3s, transform 0.3s;
+  }
+  .cb-dot.filled { background: #e74c3c; border-color: #e74c3c; transform: scale(1.15); }
+  .cb-timer {
+    margin-top: 0.5rem;
+    font-size: 0.7rem;
+    color: var(--text-dim);
+    font-family: "SF Mono", Monaco, Consolas, monospace;
+    min-height: 1em;
+  }
+  .state-diagram {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 1rem 1.2rem;
+    margin: 1.2rem 0;
+    font-family: "SF Mono", Monaco, Consolas, monospace;
+    font-size: 0.82rem;
+    line-height: 1.7;
+    white-space: pre;
+    color: var(--text);
+    overflow-x: auto;
+  }
+  .state-diagram .c { color: #2ecc71; }
+  .state-diagram .o { color: #e74c3c; }
+  .state-diagram .h { color: #f1c40f; }
+  .state-diagram .a { color: var(--text-dim); }
+  pre.code {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1rem;
+    font-family: "SF Mono", Monaco, Consolas, monospace;
+    font-size: 0.82rem;
+    line-height: 1.55;
+    overflow-x: auto;
+  }
+  .viz-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.4rem 0.75rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg-elev);
+    font-size: 0.85rem;
+    cursor: pointer;
+  }
+  .viz-toggle input { cursor: pointer; }
+  .log-line { padding: 0.15rem 0; }
+  .log-ok { color: #2ecc71; }
+  .log-fail { color: #e74c3c; }
+  .log-warn { color: #f1c40f; }
+</style>
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">System Design Books</div>
+    <div class="brand-sub">by Sanheen · Progressive Learning</div>
+    <div class="nav-section">
+      <h3>Home</h3>
+      <a href="../index.html">Overview</a>
+    </div>
+    <div class="nav-section">
+      <h3>Interactive Visualizations</h3>
+      <a href="index.html">Viz Index</a>
+      <a href="lru-cache.html">LRU Cache (LLD)</a>
+      <a href="request-flow.html">Request Flow (HLD)</a>
+      <a href="load-balancer.html">Load Balancer (HLD)</a>
+      <a href="cache-aside.html">Cache Aside Pattern (HLD)</a>
+      <a href="circuit-breaker.html">Circuit Breaker (HLD)</a>
+    </div>
+    <div class="nav-section">
+      <h3>Book II — High Level Design</h3>
+      <a href="../hld/index.html">HLD Index</a>
+    </div>
+  </aside>
+
+  <main class="main">
+    <div class="breadcrumb"><a href="../index.html">Home</a> / <a href="index.html">Visualizations</a> / Circuit Breaker</div>
+    <h1>Circuit Breaker Pattern — Fail Fast</h1>
+    <p>A client calls a downstream Payment Service through a Circuit Breaker. When failures pile up, the breaker trips OPEN and short-circuits subsequent calls — preventing cascading failure. After a cool-down, a single probe tests recovery.</p>
+
+    <div class="viz-controls">
+      <button class="viz-btn primary" id="btnHealthy">✅ Healthy Request</button>
+      <button class="viz-btn" id="btnFail">❌ Failing Request</button>
+      <button class="viz-btn" id="btnBurstOk">🚀 10 Healthy Burst</button>
+      <button class="viz-btn" id="btnBurstFail">💀 10 Failing Burst</button>
+      <button class="viz-btn" id="btnTimeout">⏰ Wait for Timeout</button>
+      <button class="viz-btn" id="btnProbe">🧪 Probe Request</button>
+      <button class="viz-btn" id="btnReset">Reset</button>
+      <label class="viz-toggle"><input type="checkbox" id="autoRecover"> Auto-recover (10s)</label>
+    </div>
+
+    <div class="viz-arch" id="arch" style="min-height: 440px;"></div>
+
+    <div class="viz-stats">
+      <div class="viz-stat"><div class="viz-stat-val" id="st-total">0</div><div class="viz-stat-label">Attempted</div></div>
+      <div class="viz-stat"><div class="viz-stat-val" id="st-allowed">0</div><div class="viz-stat-label">Allowed through</div></div>
+      <div class="viz-stat"><div class="viz-stat-val" id="st-rejected">0</div><div class="viz-stat-label">Rejected fast</div></div>
+      <div class="viz-stat"><div class="viz-stat-val" id="st-success">0</div><div class="viz-stat-label">Successes</div></div>
+      <div class="viz-stat"><div class="viz-stat-val" id="st-failure">0</div><div class="viz-stat-label">Failures</div></div>
+      <div class="viz-stat"><div class="viz-stat-val" id="st-changes">0</div><div class="viz-stat-label">State Changes</div></div>
+    </div>
+
+    <div class="viz-desc" id="desc" style="margin-top:1rem;min-height:60px;">Start with a healthy request. Then fire 10 failing requests to trip the breaker to <strong>OPEN</strong>.</div>
+
+    <h2>State Diagram</h2>
+    <div class="state-diagram"><span class="c">CLOSED</span> <span class="a">(normal)</span>   ──[ N failures ]──▶   <span class="o">OPEN</span> <span class="a">(fail fast)</span>
+<span class="o">OPEN</span>                   ──[ timeout   ]──▶   <span class="h">HALF_OPEN</span> <span class="a">(probe)</span>
+<span class="h">HALF_OPEN</span>              ──[ success   ]──▶   <span class="c">CLOSED</span>
+<span class="h">HALF_OPEN</span>              ──[ failure   ]──▶   <span class="o">OPEN</span></div>
+
+    <h2>Why Circuit Breaker?</h2>
+    <p>A slow or dead downstream dependency can drag down its callers: threads pile up waiting on timeouts, queues fill, upstream services exhaust resources, and the outage cascades. A circuit breaker <strong>fails fast</strong> when the downstream is unhealthy — freeing callers to degrade gracefully (serve cached data, show a friendly error, queue the request) instead of hanging.</p>
+
+    <h2>The Three States</h2>
+    <table>
+      <thead><tr><th>State</th><th>Behavior</th><th>Exit condition</th></tr></thead>
+      <tbody>
+        <tr><td><strong style="color:#2ecc71">CLOSED</strong></td><td>All calls pass through to downstream. Failures are counted.</td><td>N consecutive failures → OPEN</td></tr>
+        <tr><td><strong style="color:#e74c3c">OPEN</strong></td><td>All calls rejected immediately with <code>CircuitOpenError</code>. Downstream is not hit at all.</td><td>Timeout elapses → HALF_OPEN</td></tr>
+        <tr><td><strong style="color:#f1c40f">HALF_OPEN</strong></td><td>A single probe is allowed through. Everyone else still fails fast.</td><td>Probe succeeds → CLOSED<br>Probe fails → OPEN</td></tr>
+      </tbody>
+    </table>
+
+    <h2>Choosing Threshold and Timeout</h2>
+    <ul>
+      <li><strong>Threshold (N):</strong> too low → flaps OPEN on transient blips; too high → takes forever to protect callers. Common: 5–10 consecutive failures, or a failure <em>rate</em> over a rolling window (e.g. >50% of the last 20 calls).</li>
+      <li><strong>Timeout:</strong> how long OPEN lasts before probing. Must be ≥ the downstream's typical recovery time (restart, GC pause, failover). Common: 5–30 seconds with jitter to avoid thundering herd.</li>
+      <li><strong>Volume guard:</strong> don't trip on 2-out-of-2 calls. Require a minimum request volume in the window before evaluating failure rate.</li>
+    </ul>
+
+    <h2>Half-Open Probing</h2>
+    <p>When the timeout expires, the breaker admits <em>one</em> probe call. If it succeeds, the downstream is presumed healthy and the breaker snaps back to CLOSED (counters reset). If the probe fails, the breaker immediately re-opens and the timer restarts. Admitting only one probe prevents flooding a still-recovering service.</p>
+
+    <h2>Reference Code</h2>
+<pre class="code">class CircuitBreaker:
+    def __init__(self, threshold=5, timeout=10):
+        self.threshold = threshold
+        self.timeout = timeout
+        self.state = 'CLOSED'
+        self.failures = 0
+        self.opened_at = None
+
+    def call(self, fn):
+        if self.state == 'OPEN':
+            if time.now() - self.opened_at &gt; self.timeout:
+                self.state = 'HALF_OPEN'
+            else:
+                raise CircuitOpenError()
+        try:
+            result = fn()
+            self._on_success()
+            return result
+        except Exception:
+            self._on_failure()
+            raise
+
+    def _on_success(self):
+        self.failures = 0
+        self.state = 'CLOSED'
+
+    def _on_failure(self):
+        self.failures += 1
+        if self.failures &gt;= self.threshold:
+            self.state = 'OPEN'
+            self.opened_at = time.now()</pre>
+
+    <h2>Real-World Libraries</h2>
+    <ul>
+      <li><strong>Netflix Hystrix</strong> — the classic JVM implementation (now in maintenance). Introduced circuit breakers to mainstream microservices.</li>
+      <li><strong>Resilience4j</strong> — modern, lightweight JVM successor. Composable: CircuitBreaker + Retry + RateLimiter + Bulkhead + TimeLimiter.</li>
+      <li><strong>Polly</strong> — .NET resilience library.</li>
+      <li><strong>pybreaker</strong>, <strong>circuitbreaker</strong> — Python options.</li>
+      <li><strong>Envoy</strong>, <strong>Istio</strong> — service-mesh level outlier detection / circuit breaking at the proxy.</li>
+    </ul>
+
+    <h2>When To Use</h2>
+    <ul>
+      <li>Calls to <strong>external dependencies</strong> (third-party APIs, payment gateways, email providers).</li>
+      <li>Services known to be <strong>slow or flaky</strong>, or behind unreliable networks.</li>
+      <li>Any synchronous call on a <strong>critical request path</strong> where one sick dep can block the whole request.</li>
+      <li>Not needed for pure in-process calls or calls to rock-solid internal dependencies.</li>
+    </ul>
+
+    <h2>Combine With</h2>
+    <ul>
+      <li><strong>Timeout:</strong> prerequisite — without per-call timeouts, a hung request never registers as a failure.</li>
+      <li><strong>Retry + Backoff:</strong> retry transient blips <em>inside</em> the breaker. But cap retries so you don't mask real failures.</li>
+      <li><strong>Bulkhead:</strong> isolate calls into separate thread/connection pools so one sick dep can't starve the others.</li>
+      <li><strong>Fallback:</strong> when the breaker rejects, return a sensible default (cached value, empty list, graceful error) instead of bubbling the exception.</li>
+    </ul>
+  </main>
+</div>
+<script src="../assets/js/nav.js"></script>
+<script src="../assets/js/animator.js"></script>
+<script>
+const arch = new ArchAnimator('#arch');
+
+const THRESHOLD = 5;
+const TIMEOUT_MS = 10000;
+
+let state = 'CLOSED';
+let failures = 0;
+let openedAt = null;
+let probeInFlight = false;
+let autoRecoverTimer = null;
+let countdownTimer = null;
+
+let stats = { total: 0, allowed: 0, rejected: 0, success: 0, failure: 0, changes: 0 };
+
+function buildArch() {
+  arch.clear();
+  arch.addNode('client', '👤 Client', 10, 50);
+  arch.addNode('breaker', '', 45, 50);
+  arch.addNode('service', '⚙️ Payment<br>Service', 80, 50);
+  arch.addEdges([['client','breaker'], ['breaker','service']]);
+
+  // Replace breaker node contents with our custom markup
+  const n = arch.nodes.breaker.el;
+  n.classList.add('cb-box');
+  n.style.minWidth = '200px';
+  renderBreaker();
+}
+
+function renderBreaker() {
+  const n = arch.nodes.breaker.el;
+  n.className = 'node cb-box state-' + state;
+  let dots = '';
+  for (let i = 0; i < THRESHOLD; i++) {
+    dots += '<div class="cb-dot' + (i < failures ? ' filled' : '') + '"></div>';
+  }
+  n.innerHTML = `
+    <div class="cb-title">Circuit Breaker</div>
+    <div class="cb-state state-${state}">${state}</div>
+    <div class="cb-fail-label">Failures: ${failures}/${THRESHOLD}</div>
+    <div class="cb-dots">${dots}</div>
+    <div class="cb-timer" id="cbTimer"></div>
+  `;
+}
+
+function updateTimer(text) {
+  const t = document.getElementById('cbTimer');
+  if (t) t.textContent = text || '';
+}
+
+function renderStats() {
+  document.getElementById('st-total').textContent = stats.total;
+  document.getElementById('st-allowed').textContent = stats.allowed;
+  document.getElementById('st-rejected').textContent = stats.rejected;
+  document.getElementById('st-success').textContent = stats.success;
+  document.getElementById('st-failure').textContent = stats.failure;
+  document.getElementById('st-changes').textContent = stats.changes;
+}
+
+function log(html, cls) {
+  const desc = document.getElementById('desc');
+  desc.innerHTML = `<span class="log-line ${cls || ''}">${html}</span>`;
+}
+
+function setState(next, reason) {
+  if (state === next) return;
+  state = next;
+  stats.changes++;
+  renderStats();
+  renderBreaker();
+  if (reason) log(reason, next === 'CLOSED' ? 'log-ok' : next === 'OPEN' ? 'log-fail' : 'log-warn');
+
+  // Auto-recover scheduling
+  clearTimeout(autoRecoverTimer);
+  clearInterval(countdownTimer);
+  autoRecoverTimer = null;
+  countdownTimer = null;
+
+  if (state === 'OPEN') {
+    openedAt = Date.now();
+    startCountdown();
+    if (document.getElementById('autoRecover').checked) {
+      autoRecoverTimer = setTimeout(() => {
+        if (state === 'OPEN') {
+          setState('HALF_OPEN', '⏰ Auto-recover timer elapsed → <strong>HALF_OPEN</strong>. Awaiting probe.');
+        }
+      }, TIMEOUT_MS);
+    }
+  } else {
+    openedAt = null;
+    updateTimer('');
+  }
+}
+
+function startCountdown() {
+  updateTimer(`timeout ${Math.ceil(TIMEOUT_MS/1000)}s`);
+  countdownTimer = setInterval(() => {
+    if (state !== 'OPEN' || !openedAt) { clearInterval(countdownTimer); updateTimer(''); return; }
+    const remaining = Math.max(0, TIMEOUT_MS - (Date.now() - openedAt));
+    updateTimer(`timeout ${(remaining/1000).toFixed(1)}s`);
+    if (remaining <= 0) clearInterval(countdownTimer);
+  }, 100);
+}
+
+async function fireRequest(willFail, isProbe) {
+  stats.total++;
+  renderStats();
+
+  // --- Gatekeeping by state ---
+  if (state === 'OPEN') {
+    stats.rejected++;
+    renderStats();
+    arch.setNodeStatus('breaker', 'miss');
+    await arch.sendPacket('client', 'breaker', { duration: 400 });
+    log('⚡ Circuit <strong>OPEN</strong> — request rejected immediately (fail-fast). Downstream was not called.', 'log-fail');
+    await arch.sendPacket('breaker', 'client', { cls: 'response miss', duration: 400 });
+    setTimeout(() => arch.setNodeStatus('breaker', null), 400);
+    return;
+  }
+
+  if (state === 'HALF_OPEN' && !isProbe) {
+    stats.rejected++;
+    renderStats();
+    arch.setNodeStatus('breaker', 'miss');
+    await arch.sendPacket('client', 'breaker', { duration: 400 });
+    log('🧪 Circuit <strong>HALF_OPEN</strong> — only one probe allowed. Other requests still fail-fast.', 'log-warn');
+    await arch.sendPacket('breaker', 'client', { cls: 'response miss', duration: 400 });
+    setTimeout(() => arch.setNodeStatus('breaker', null), 400);
+    return;
+  }
+
+  if (isProbe && state !== 'HALF_OPEN') {
+    log('Probe only valid in HALF_OPEN state. Current: ' + state, 'log-warn');
+    return;
+  }
+
+  // --- Call allowed through ---
+  stats.allowed++;
+  renderStats();
+  const label = isProbe ? '🧪 Probe' : '→';
+  log(`${label} Request → Breaker (${state}) → Service...`);
+
+  await arch.sendPacket('client', 'breaker', { duration: 400 });
+  await arch.sendPacket('breaker', 'service', { duration: 500 });
+  await new Promise(r => setTimeout(r, 200));
+
+  if (willFail) {
+    stats.failure++;
+    arch.setNodeStatus('service', 'miss');
+    await arch.sendPacket('service', 'breaker', { cls: 'response miss', duration: 500 });
+    await arch.sendPacket('breaker', 'client', { cls: 'response miss', duration: 400 });
+    setTimeout(() => arch.setNodeStatus('service', null), 500);
+    _onFailure(isProbe);
+  } else {
+    stats.success++;
+    arch.setNodeStatus('service', 'hit');
+    await arch.sendPacket('service', 'breaker', { cls: 'response', duration: 500 });
+    await arch.sendPacket('breaker', 'client', { cls: 'response', duration: 400 });
+    setTimeout(() => arch.setNodeStatus('service', null), 500);
+    _onSuccess(isProbe);
+  }
+  renderStats();
+}
+
+function _onSuccess(isProbe) {
+  if (state === 'HALF_OPEN') {
+    failures = 0;
+    setState('CLOSED', '✅ Probe succeeded → <strong>CLOSED</strong>. Normal operation resumed.');
+  } else {
+    // in CLOSED: a success resets the consecutive failure count
+    if (failures > 0) {
+      failures = 0;
+      renderBreaker();
+    }
+    log(`✅ Request sent → service responded OK. Failure count: 0/${THRESHOLD}`, 'log-ok');
+  }
+}
+
+function _onFailure(isProbe) {
+  if (state === 'HALF_OPEN') {
+    setState('OPEN', '💥 Probe failed → back to <strong>OPEN</strong>. Waiting for timeout again.');
+    return;
+  }
+  failures++;
+  renderBreaker();
+  if (failures >= THRESHOLD) {
+    setState('OPEN', `💥 Failure ${failures}/${THRESHOLD} → Circuit <strong>OPEN</strong>! Subsequent requests will fail-fast without calling service.`);
+  } else {
+    const remaining = THRESHOLD - failures;
+    const warn = remaining === 1 ? ' one more failure triggers OPEN state' : '';
+    log(`❌ Failure ${failures}/${THRESHOLD}...${warn}`, 'log-fail');
+  }
+}
+
+// --- Button handlers ---
+function disableAll(v) { document.querySelectorAll('.viz-btn').forEach(b => b.disabled = v); }
+
+document.getElementById('btnHealthy').onclick = async () => {
+  disableAll(true);
+  await fireRequest(false, false);
+  disableAll(false);
+};
+document.getElementById('btnFail').onclick = async () => {
+  disableAll(true);
+  await fireRequest(true, false);
+  disableAll(false);
+};
+document.getElementById('btnBurstOk').onclick = async () => {
+  disableAll(true);
+  for (let i = 0; i < 10; i++) {
+    await fireRequest(false, false);
+    await new Promise(r => setTimeout(r, 120));
+  }
+  disableAll(false);
+};
+document.getElementById('btnBurstFail').onclick = async () => {
+  disableAll(true);
+  for (let i = 0; i < 10; i++) {
+    await fireRequest(true, false);
+    await new Promise(r => setTimeout(r, 120));
+  }
+  disableAll(false);
+};
+document.getElementById('btnTimeout').onclick = () => {
+  if (state !== 'OPEN') {
+    log('Breaker is not OPEN — nothing to skip.', 'log-warn');
+    return;
+  }
+  setState('HALF_OPEN', '⏰ Timeout skipped → <strong>HALF_OPEN</strong>. Send a probe request to test recovery.');
+};
+document.getElementById('btnProbe').onclick = async () => {
+  if (state !== 'HALF_OPEN') {
+    log('Probe only valid in HALF_OPEN. Trip the breaker OPEN, then wait for timeout first.', 'log-warn');
+    return;
+  }
+  disableAll(true);
+  // 50/50 probe outcome unless user last action implies something;
+  // keep it as a deliberate coin-flip so learners see both branches.
+  const willFail = Math.random() < 0.4;
+  await fireRequest(willFail, true);
+  disableAll(false);
+};
+document.getElementById('btnReset').onclick = () => {
+  clearTimeout(autoRecoverTimer);
+  clearInterval(countdownTimer);
+  state = 'CLOSED';
+  failures = 0;
+  openedAt = null;
+  stats = { total: 0, allowed: 0, rejected: 0, success: 0, failure: 0, changes: 0 };
+  renderStats();
+  renderBreaker();
+  log('Reset. Breaker is CLOSED. Try the failing burst to trip it.');
+};
+document.getElementById('autoRecover').onchange = (e) => {
+  if (e.target.checked && state === 'OPEN') {
+    const elapsed = Date.now() - (openedAt || Date.now());
+    const remaining = Math.max(0, TIMEOUT_MS - elapsed);
+    autoRecoverTimer = setTimeout(() => {
+      if (state === 'OPEN') setState('HALF_OPEN', '⏰ Auto-recover timer elapsed → <strong>HALF_OPEN</strong>.');
+    }, remaining);
+  } else {
+    clearTimeout(autoRecoverTimer);
+    autoRecoverTimer = null;
+  }
+};
+
+buildArch();
+renderStats();
+</script>
+</body>
+</html>

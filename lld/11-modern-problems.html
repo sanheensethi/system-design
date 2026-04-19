@@ -1,0 +1,2148 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Modern 2026 Problems — Book I · LLD</title>
+<link rel="stylesheet" href="../assets/css/style.css">
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">System Design Books</div>
+    <div class="brand-sub">by Sanheen · Progressive Learning</div>
+    <div class="nav-section">
+      <h3>Home</h3>
+      <a href="../index.html">Overview</a>
+    </div>
+    <div class="nav-section">
+      <h3>Book I — Low Level Design</h3>
+      <a href="index.html">LLD Index</a>
+      <a href="01-foundations.html">1. Foundations (OOP, SOLID)</a>
+      <a href="02-patterns.html">2. Design Patterns Primer</a>
+      <a href="03-basic-problems.html">3. Basic Problems</a>
+      <a href="04-intermediate.html">4. Intermediate Problems</a>
+      <a href="05-advanced.html">5. Advanced Problems</a>
+      <a href="06-concurrency.html">6. Concurrency in LLD</a>
+      <a href="07-war-room.html">7. War Room Scenarios</a>
+      <a href="08-real-code.html">8. Real Company Code</a>
+      <a href="09-real-world.html">9. Applying LLD in Real Work</a>
+      <a href="10-modern-patterns.html">10. Modern Patterns (2026)</a>
+      <a href="11-modern-problems.html">11. Modern 2026 Problems</a>
+    </div>
+    <div class="nav-section">
+      <h3>Book II — High Level Design</h3>
+      <a href="../hld/index.html">HLD Index</a>
+    </div>
+    <div class="nav-section">
+      <h3>Book III — AI System Design</h3>
+      <a href="../ai/index.html">AI Index</a>
+    </div>
+  </aside>
+  <main class="main">
+    <div class="breadcrumb"><a href="../index.html">Home</a> / <a href="index.html">Book I · LLD</a> / Chapter 11</div>
+    <h1>Chapter 11: Modern 2026 Problems</h1>
+
+    <div class="callout intro">
+      <p>These are the LLD problems currently asked in 2026 machine-coding rounds at <strong>Razorpay, Atlassian, Microsoft, Uber, Swiggy, Zomato, PhonePe, Paytm, Amazon, Flipkart</strong>. Each problem is solved with progressive versions (v1 &rarr; v6) showing the real quality that passes a 45-minute machine-coding round. Skim the list, pick two or three you have never attempted, and code them yourself before looking at the solution.</p>
+      <p>The format used in every section: <em>Requirements &rarr; Entities &rarr; Class diagram &rarr; Core code &rarr; Patterns &rarr; Edge cases &rarr; Extensions.</em> This is also the exact order you should use in a live interview.</p>
+    </div>
+
+    <h2>1. Text Editor (Microsoft favorite)</h2>
+
+    <div class="callout">
+      <div class="callout-title">How the pieces talk (inserting a character)</div>
+      <pre>
+  1. User types 'h' at cursor position 0
+  2. UI calls editor.execute(InsertCmd(pos=0, sc=StyledChar('h', style)))   # entry point
+  3. Editor.execute calls cmd.do(self)
+  4. InsertCmd.do calls ed.buffer.insert(0, sc) → GapBuffer shifts gap, places char
+  5. InsertCmd.do sets ed.cursor = pos + 1
+  6. execute pushes cmd onto undo_stack, clears redo_stack
+  7. execute calls _notify() → for each observer, call on_change(self)
+  8. Renderer observer redraws the visible region
+  9. User hits Ctrl-Z:
+      editor.undo() pops cmd, calls cmd.undo(ed) → buffer.delete(pos) → cursor=pos
+      Pushes cmd onto redo_stack, notifies observers
+ 10. Buffer strategy (GapBuffer vs Rope) is swappable — Editor doesn't care</pre>
+    </div>
+
+    <div class="callout">
+      <strong>Requirements</strong>
+      <ul>
+        <li>Character grid with styling (font family, size, bold, italic).</li>
+        <li>Cursor movement, insert and delete characters.</li>
+        <li>Undo and redo of every operation.</li>
+        <li>Copy, cut, paste across regions.</li>
+        <li>Find and replace (single and all).</li>
+      </ul>
+    </div>
+
+    <p><strong>Entities:</strong> <code>Document</code>, <code>Buffer</code> (Rope / Gap), <code>Cursor</code>, <code>Style</code>, <code>StyledChar</code>, <code>Command</code> (Insert/Delete), <code>History</code>, <code>Clipboard</code>, <code>Finder</code>, <code>Renderer</code>.</p>
+
+    <div class="diagram">
+<pre>
+  Document ─── Buffer (Rope)
+     │          │
+     │          └── StyledChar(ch, Style)
+     │
+     ├── Cursor(pos)
+     ├── History ── Command stack (undo/redo)
+     ├── Clipboard
+     └── Observers ── Renderer, StatusBar
+</pre>
+    </div>
+
+    <h3>v1: Naive list of styled characters</h3>
+<pre><code>class Style:
+    __slots__ = ("font", "size", "bold", "italic")
+    def __init__(self, font="Arial", size=12, bold=False, italic=False):
+        self.font, self.size, self.bold, self.italic = font, size, bold, italic
+
+class StyledChar:
+    __slots__ = ("ch", "style")
+    def __init__(self, ch, style): self.ch, self.style = ch, style
+
+class NaiveEditor:
+    def __init__(self):
+        self.buf = []          # list of StyledChar  -- O(n) insert at middle
+        self.cursor = 0
+    def insert(self, ch, style):
+        self.buf.insert(self.cursor, StyledChar(ch, style))
+        self.cursor += 1
+</code></pre>
+
+<pre><code># why __slots__: save ~40% memory per char — 1MB doc has 1M chars × ~40B = 40MB vs 70MB
+# why StyledChar bundles ch + style: adjacent chars with diff styles coexist
+# Break this: list.insert(0, x) on a 1M-element list = 1M memcpy per keystroke = lag</code></pre>
+
+<pre><code># Usage example — falls over on big docs
+ed = NaiveEditor()
+s = Style()
+for c in "hello":
+    ed.insert(c, s)
+# Fine for 5 chars. For a 1MB script file:
+# Each keystroke at position 0 → O(1M) memcpy → user sees typing lag</code></pre>
+
+    <p>Problem: <code>list.insert(i, x)</code> is O(n). For a 1&nbsp;MB document every keystroke copies a million elements.</p>
+
+    <h3>v2: Gap buffer for O(1) amortised insertion</h3>
+<pre><code>class GapBuffer:
+    def __init__(self, cap=64):
+        self.data = [None] * cap
+        self.gap_start = 0
+        self.gap_end   = cap        # [gap_start, gap_end) is empty
+
+    def _move_gap(self, pos):
+        if pos &lt; self.gap_start:
+            n = self.gap_start - pos
+            self.data[self.gap_end-n:self.gap_end] = self.data[pos:pos+n]
+            self.gap_start -= n; self.gap_end -= n
+        elif pos &gt; self.gap_start:
+            n = pos - self.gap_start
+            self.data[self.gap_start:self.gap_start+n] = self.data[self.gap_end:self.gap_end+n]
+            self.gap_start += n; self.gap_end += n
+
+    def insert(self, pos, sc):
+        self._move_gap(pos)
+        if self.gap_start == self.gap_end:    # grow
+            new = [None] * (len(self.data) * 2)
+            tail = len(self.data) - self.gap_end
+            new[:self.gap_start] = self.data[:self.gap_start]
+            new[len(new)-tail:]  = self.data[self.gap_end:]
+            self.gap_end = len(new) - tail
+            self.data = new
+        self.data[self.gap_start] = sc
+        self.gap_start += 1
+</code></pre>
+
+<pre><code># why gap_start/gap_end: the "hole" moves to the cursor — insertions become O(1) nearby
+# why shifting data[gap_end-n:gap_end] = data[pos:pos+n]: moves live chars OVER the gap
+#     so the gap now sits at cursor position, ready for fast inserts
+# why grow when gap_start == gap_end: gap exhausted → need new buffer (amortized doubling)
+# why new[len(new)-tail:] = old[gap_end:]: preserve characters to the RIGHT of the gap
+# Break this: move gap far away every keystroke (ping-pong) → O(n) per op, no better than list</code></pre>
+
+<pre><code># Usage example
+gb = GapBuffer(cap=8)
+# Initial:  [_, _, _, _, _, _, _, _]  gap=[0,8)
+gb.insert(0, StyledChar('h', Style()))
+# After:    [h, _, _, _, _, _, _, _]  gap=[1,8)
+gb.insert(1, StyledChar('i', Style()))
+# After:    [h, i, _, _, _, _, _, _]  gap=[2,8)
+gb.insert(0, StyledChar('x', Style()))   # insert at start — gap moves LEFT
+# _move_gap(0): slide 'h','i' RIGHT into gap
+# After move: [_, _, _, _, _, _, h, i]  gap=[0,6)
+# Then insert: [x, _, _, _, _, _, h, i]  gap=[1,6)</code></pre>
+
+    <div class="diagram">
+<pre>
+GapBuffer state evolution (cap=8):
+
+ initial:           . . . . . . . .        gap=[0,8)  data="........"
+ insert(0,'h'):     h . . . . . . .        gap=[1,8)  data="h......."
+ insert(1,'i'):     h i . . . . . . .      gap=[2,8)  data="hi......"
+ insert(0,'X'):     slide gap to pos 0:
+                    step a: move 'h','i' to right end
+                    . . . . . . h i        gap=[0,6)
+                    step b: place 'X'
+                    X . . . . . h i        gap=[1,6)
+ when gap fills (gap_start == gap_end):
+   - allocate new = [None]*16
+   - copy data[:gap_start] to front
+   - copy data[gap_end:] to back
+   - new gap in middle; continue O(1) inserts
+
+Cost profile:
+  consecutive inserts at cursor:      O(1) amortized
+  random inserts far from cursor:     O(|cursor - new_pos|) to move gap
+  file grows beyond capacity:         O(n) one-time doubling, amortized O(1)</pre>
+    </div>
+
+    <div class="callout danger">
+      <div class="callout-title">How this breaks in production</div>
+      <ul>
+        <li><strong>Ping-pong cursor:</strong> user jumps from line 1 to line 10000 to line 1 — gap moves thousands of cells each time, performance drops to O(n). <em>Why</em>: gap-move is O(distance). Fix: Rope data structure for arbitrary-position O(log n) inserts.</li>
+        <li><strong>Indices off-by-one:</strong> <code>pos == gap_start</code> branch missing — inserts treated as "move gap" no-op, chars vanish. <em>Why</em>: edge case at gap boundary. Fix: explicit test; assert after move that <code>gap_start == pos</code>.</li>
+        <li><strong>Unicode split:</strong> emoji stored as two UTF-16 surrogates → insert between surrogates corrupts char. <em>Why</em>: char ≠ code point. Fix: store grapheme clusters, not UTF-16 units.</li>
+        <li><strong>Delete exposes uninitialized:</strong> after delete, <code>data[gap_start..gap_end-1]</code> still holds stale refs → GC can't reclaim. <em>Why</em>: None not assigned. Fix: explicitly set to None in gap range.</li>
+      </ul>
+    </div>
+
+    <h3>v3: Command pattern for undo/redo</h3>
+<pre><code>class Command:
+    def do(self, ed): ...
+    def undo(self, ed): ...
+
+class InsertCmd(Command):
+    def __init__(self, pos, sc): self.pos, self.sc = pos, sc
+    def do(self, ed):   ed.buffer.insert(self.pos, self.sc); ed.cursor = self.pos + 1
+    def undo(self, ed): ed.buffer.delete(self.pos);          ed.cursor = self.pos
+
+class Editor:
+    def __init__(self):
+        self.buffer = GapBuffer(); self.cursor = 0
+        self.undo_stack, self.redo_stack = [], []
+        self.observers = []
+    def execute(self, cmd):
+        cmd.do(self); self.undo_stack.append(cmd); self.redo_stack.clear()
+        self._notify()
+    def undo(self):
+        if self.undo_stack:
+            c = self.undo_stack.pop(); c.undo(self); self.redo_stack.append(c); self._notify()
+</code></pre>
+
+<pre><code># why Command objects (not string log): each command KNOWS how to reverse itself
+# why redo_stack.clear() after a fresh execute: new action invalidates redo history — standard UX
+# why do/undo symmetry: undo(InsertCmd) = delete; undo(DeleteCmd) = insert — atomic pairs
+# why cursor tracked per command: restores EXACT state, not just text
+# Break this: command mutates shared state (e.g. sc) between do and undo → undo restores wrong char</code></pre>
+
+<pre><code># Usage example
+ed = Editor()
+s = Style()
+ed.execute(InsertCmd(0, StyledChar('h', s)))    # undo=[Ins(0,h)]  buf="h"
+ed.execute(InsertCmd(1, StyledChar('i', s)))    # undo=[Ins(0,h), Ins(1,i)]  buf="hi"
+ed.execute(InsertCmd(2, StyledChar('!', s)))    # buf="hi!"
+ed.undo()                                        # buf="hi"  redo=[Ins(2,!)]
+ed.undo()                                        # buf="h"   redo=[Ins(2,!), Ins(1,i)]
+ed.execute(InsertCmd(1, StyledChar('X', s)))    # buf="hX"  redo CLEARED (new branch)</code></pre>
+
+    <div class="diagram">
+<pre>
+Stack evolution:
+
+ step 1 execute Ins(0,'h')
+   do(): buffer=[h], cursor=1
+   undo_stack=[Ins(0,h)]                redo_stack=[]
+
+ step 2 execute Ins(1,'i')
+   do(): buffer=[h,i], cursor=2
+   undo_stack=[Ins(0,h), Ins(1,i)]      redo_stack=[]
+
+ step 3 execute Ins(2,'!')
+   do(): buffer=[h,i,!], cursor=3
+   undo_stack=[Ins(0,h), Ins(1,i), Ins(2,!)]
+
+ step 4 undo()
+   pop Ins(2,!) → undo(): buffer=[h,i], cursor=2
+   undo_stack=[Ins(0,h), Ins(1,i)]      redo_stack=[Ins(2,!)]
+
+ step 5 undo()
+   pop Ins(1,i) → undo(): buffer=[h], cursor=1
+   undo_stack=[Ins(0,h)]                redo_stack=[Ins(2,!), Ins(1,i)]
+
+ step 6 execute Ins(1,'X')
+   do(): buffer=[h,X], cursor=2
+   undo_stack=[Ins(0,h), Ins(1,X)]      redo_stack=[]    # cleared — new branch</pre>
+    </div>
+
+    <div class="callout danger">
+      <div class="callout-title">How this breaks in production</div>
+      <ul>
+        <li><strong>Unbounded undo stack:</strong> 1M keystrokes in a session → 1M Command objects pinned in memory. <em>Why</em>: no cap. Fix: ring buffer (keep last 1000 commands).</li>
+        <li><strong>Compound operations not grouped:</strong> paste of 10K chars pushes 10K commands; 10K Ctrl-Z presses to revert. <em>Why</em>: each char is its own Insert. Fix: CompoundCmd that wraps a sequence, single do/undo.</li>
+        <li><strong>Redo after modification:</strong> user undoes, modifies, then hits Ctrl-Y expecting original → gone because redo_stack was cleared. <em>Why</em>: standard UX. Educate users OR implement a tree-history.</li>
+        <li><strong>Non-atomic do:</strong> InsertCmd.do crashes halfway (insert succeeds, cursor update raises) → undo won't unwind cleanly. <em>Why</em>: do must be atomic. Fix: wrap in try/except; revert on failure.</li>
+      </ul>
+    </div>
+
+    <h3>v4 + v5: Observer rendering &amp; Memento snapshots</h3>
+<pre><code>    def _notify(self):
+        for o in self.observers: o.on_change(self)
+
+class Memento:
+    def __init__(self, ed):
+        self.snapshot = list(ed.buffer.as_text()); self.cursor = ed.cursor
+    def restore(self, ed):
+        ed.buffer = GapBuffer(); [ed.buffer.insert(i, c) for i, c in enumerate(self.snapshot)]
+        ed.cursor = self.cursor
+</code></pre>
+
+<pre><code># why _notify after every execute/undo: observers (Renderer, StatusBar) stay in sync automatically
+# why Memento captures ed.buffer.as_text(): serialization form that's buffer-impl-agnostic
+# why list(...): shallow copy of characters — cheap for chars, not for huge docs
+# why new GapBuffer + rebuild: simpler than deep-copying internal gap state
+# Break this: observer raises in on_change → notify halts → remaining observers stale</code></pre>
+
+<pre><code># Usage example
+ed = Editor(); hist = []
+class ConsoleRenderer:
+    def on_change(self, ed): print("Redraw:", ed.buffer.as_text())
+
+ed.observers.append(ConsoleRenderer())
+ed.execute(InsertCmd(0, StyledChar('h', Style())))  # prints "Redraw: h"
+hist.append(Memento(ed))                             # save point 1
+ed.execute(InsertCmd(1, StyledChar('i', Style())))  # prints "Redraw: hi"
+hist[0].restore(ed); ed._notify()                    # reverts to "h"</code></pre>
+
+    <div class="diagram">
+<pre>
+Observer flow:
+  Editor.execute(cmd)
+     │
+     ├─ cmd.do(self)                    # mutate buffer + cursor
+     ├─ undo_stack.append(cmd)
+     ├─ redo_stack.clear()
+     └─ _notify()
+          for o in self.observers:
+             o.on_change(self)         # Renderer re-renders; StatusBar updates "line X col Y"
+
+Memento restore:
+  m.restore(ed)
+     │
+     ├─ ed.buffer = GapBuffer()        # fresh buffer
+     ├─ replay each char via insert
+     └─ ed.cursor = m.cursor
+  (caller must call _notify manually after restore, OR wrap restore inside execute)</pre>
+    </div>
+
+    <div class="callout danger">
+      <div class="callout-title">How this breaks in production</div>
+      <ul>
+        <li><strong>Observer raises:</strong> one Renderer throws during on_change — subsequent observers skipped, UI and StatusBar go out of sync. <em>Why</em>: no isolation. Fix: try/except per observer, log and continue.</li>
+        <li><strong>Notify storms:</strong> typing fires 100/sec; each calls 5 observers → UI can't keep up. <em>Why</em>: synchronous. Fix: debounce notify by ~16ms (one frame).</li>
+        <li><strong>Memento inconsistent with Command history:</strong> restore to past state but undo_stack still holds commands that point at newer chars → ghosts. <em>Why</em>: two undo mechanisms collide. Fix: pick ONE (Command OR Memento) for user-level undo.</li>
+        <li><strong>Deep snapshot on big doc:</strong> Memento of a 500 MB doc takes seconds to build. <em>Why</em>: O(n) copy. Fix: copy-on-write buffer (Rope), or snapshot only dirty regions.</li>
+      </ul>
+    </div>
+
+    <div class="callout patterns">
+      <strong>Patterns used:</strong> <em>Command</em> (undo/redo), <em>Memento</em> (save points), <em>Observer</em> (renderer), <em>Strategy</em> (Rope vs GapBuffer backend).<br>
+      <strong>Edge cases:</strong> multi-byte Unicode (combining marks, emoji with ZWJ), selection across mixed styles, very long lines, undo after paste (one command, not N), find-replace interaction with undo.<br>
+      <strong>Extensions:</strong> collaborative editing (CRDT / OT), syntax highlighting (tokeniser observer), word-wrap (virtual line layer), persistence (autosave).
+    </div>
+
+    <h2>2. In-Memory Database (Flipkart, Atlassian)</h2>
+
+    <div class="callout">
+      <div class="callout-title">How the pieces talk (BEGIN / INSERT / ROLLBACK)</div>
+      <pre>
+  1. Client: txn = Transaction(db); txn.do(InsertOp(table="users", row=Row(pk=42)))
+  2. Transaction.do calls op.apply(db) → db.tables["users"].rows[42] = row
+  3. Transaction records the op in self.ops (for undo)
+  4. Client does 10 more inserts — each appends to self.ops
+  5. Client calls txn.savepoint("sp1") → self.savepoints["sp1"] = 10
+  6. Client does more ops (ops 11-15), decides to undo them
+  7. txn.rollback_to("sp1") → pop ops 15→14→...→11, calling op.revert(db) each
+  8. Each revert restores the previous state (InsertOp.revert pops the row)
+  9. Client calls txn.commit() → self.active = False — the final state becomes "real"
+ 10. In MVCC version: reads never see other txn's writes (snapshot_ts gate)</pre>
+    </div>
+
+    <div class="callout">
+      <strong>Requirements</strong>
+      <ul>
+        <li>CREATE/DROP tables with typed columns.</li>
+        <li>INSERT / SELECT / UPDATE / DELETE with WHERE predicates.</li>
+        <li>Transactions: BEGIN, COMMIT, ROLLBACK, nested SAVEPOINT.</li>
+        <li>Secondary indexes for fast lookup.</li>
+        <li>Concurrent transactions with isolation.</li>
+      </ul>
+    </div>
+
+    <p><strong>Entities:</strong> <code>Database</code>, <code>Table</code>, <code>Column</code>, <code>Row</code>, <code>Index</code>, <code>Transaction</code>, <code>TxnLog</code>, <code>Lock</code>, <code>MVCCVersion</code>.</p>
+
+    <div class="diagram">
+<pre>
+Database
+  ├── tables: {name -> Table}
+  │         Table ── Column[], Row[], Index[]
+  │                  Row ── values + versions[tx_id, value]
+  └── txn_manager
+           └── Transaction ── ops[], savepoints, snapshot_ts
+</pre>
+    </div>
+
+    <h3>v1 &rarr; v3: From dict to transactional log</h3>
+<pre><code>class Op:
+    def apply(self, db): ...
+    def revert(self, db): ...
+
+class InsertOp(Op):
+    def __init__(self, table, row): self.table, self.row = table, row
+    def apply(self, db):  db.tables[self.table].rows[self.row.pk] = self.row
+    def revert(self, db): db.tables[self.table].rows.pop(self.row.pk, None)
+
+class Transaction:
+    def __init__(self, db):
+        self.db = db; self.ops = []; self.savepoints = {}; self.active = True
+    def do(self, op):
+        op.apply(self.db); self.ops.append(op)
+    def savepoint(self, name): self.savepoints[name] = len(self.ops)
+    def rollback_to(self, name):
+        target = self.savepoints[name]
+        while len(self.ops) &gt; target:
+            self.ops.pop().revert(self.db)
+    def commit(self):   self.active = False
+    def rollback(self):
+        while self.ops: self.ops.pop().revert(self.db)
+        self.active = False
+</code></pre>
+
+<pre><code># why Op with apply/revert: each mutation knows how to undo itself (Command pattern)
+# why savepoints stored as LEN of ops at mark time: rollback_to = pop until we reach that index
+# why rollback iterates in REVERSE (pop): undo in LIFO order or you get wrong intermediate states
+# why commit() just sets active=False: optimistic — no WAL here; in real DB, commit = fsync log
+# Break this: op.apply throws mid-execution → half-applied state; next revert corrupts more</code></pre>
+
+<pre><code># Usage example
+db = Database(); db.tables["users"] = Table()
+txn = Transaction(db)
+txn.do(InsertOp("users", Row(pk=1, name="Alice")))
+txn.do(InsertOp("users", Row(pk=2, name="Bob")))
+txn.savepoint("after_bob")
+txn.do(InsertOp("users", Row(pk=3, name="Charlie")))
+txn.do(InsertOp("users", Row(pk=4, name="Dave")))
+
+txn.rollback_to("after_bob")
+# reverts Dave, then Charlie — users now {1: Alice, 2: Bob}
+# ops stack trimmed to length 2
+
+txn.commit()   # Alice, Bob persist</code></pre>
+
+    <div class="diagram">
+<pre>
+State evolution:
+
+ t=0   db.tables["users"].rows = {}
+       txn.ops = [], savepoints = {}
+ t=1   do(InsertOp("users", {pk:1, name:"Alice"}))
+       apply: rows = {1: Alice}
+       ops = [Ins1]
+ t=2   do(InsertOp("users", {pk:2, name:"Bob"}))
+       apply: rows = {1: Alice, 2: Bob}
+       ops = [Ins1, Ins2]
+ t=3   savepoint("after_bob")
+       savepoints = {"after_bob": 2}
+ t=4   do(InsertOp("users", {pk:3, name:"Charlie"}))
+       rows = {1, 2, 3}; ops = [Ins1, Ins2, Ins3]
+ t=5   do(InsertOp("users", {pk:4, name:"Dave"}))
+       rows = {1, 2, 3, 4}; ops = [Ins1, Ins2, Ins3, Ins4]
+ t=6   rollback_to("after_bob")
+       target = 2
+       pop Ins4 → revert → rows = {1, 2, 3}
+       pop Ins3 → revert → rows = {1, 2}
+       ops = [Ins1, Ins2]
+ t=7   commit()
+       active = False; rows = {1: Alice, 2: Bob}
+
+MVCC read isolation:
+  Txn A (snapshot_ts=10) reads row pk=42
+    row.versions = [(txB, "v1", cts=5), (txC, "v2", cts=15)]
+    visible: walks versions in REVERSE, returns FIRST with cts ≤ 10
+    → returns "v1" (ignores "v2" because cts=15 > 10)</pre>
+    </div>
+
+    <div class="callout danger">
+      <div class="callout-title">How this breaks in production</div>
+      <ul>
+        <li><strong>Non-reversible op:</strong> an op mutates shared state across instances; revert can't fully undo (e.g., external API call). <em>Why</em>: commands aren't always reversible. Fix: forbid external I/O inside txn, or use compensating transactions (saga).</li>
+        <li><strong>Savepoint across commit:</strong> commit happens, then rollback_to("sp1") after — operates on empty ops list, NOP but user thinks rollback worked. <em>Why</em>: no validity check. Fix: assert txn.active; raise if committed.</li>
+        <li><strong>Index not updated:</strong> InsertOp updates rows dict but skips index.add() → WHERE queries miss the row. <em>Why</em>: dual-write not atomic. Fix: InsertOp updates both; revert removes from both.</li>
+        <li><strong>Write skew under snapshot isolation:</strong> two txns read same balances, each withdraws — both succeed, total goes negative. <em>Why</em>: snapshot isolation ≠ serializable. Fix: SSI (Serializable Snapshot Isolation) with read-tracking.</li>
+      </ul>
+    </div>
+
+    <h3>v4: Sorted-list index (stand-in for B-tree)</h3>
+<pre><code>import bisect
+class Index:
+    def __init__(self, col): self.col = col; self.keys = []; self.pks = []
+    def add(self, key, pk):
+        i = bisect.bisect_left(self.keys, key)
+        self.keys.insert(i, key); self.pks.insert(i, pk)
+    def range(self, lo, hi):
+        i = bisect.bisect_left(self.keys, lo); j = bisect.bisect_right(self.keys, hi)
+        return self.pks[i:j]
+</code></pre>
+
+<pre><code># why two parallel lists (keys, pks): co-sorted — keys[i] always matches pks[i]
+# why bisect_left for lo + bisect_right for hi: INCLUSIVE on both ends
+# why insert(i, ...) not append: maintains sorted order for next binary search
+# Break this: Python list insert is O(n); 1M inserts = 1M² ops = real B-tree needed at scale</code></pre>
+
+<pre><code># Usage example
+idx = Index("age")
+idx.add(25, pk=1)    # keys=[25], pks=[1]
+idx.add(30, pk=2)    # keys=[25,30], pks=[1,2]
+idx.add(28, pk=3)    # keys=[25,28,30], pks=[1,3,2]
+idx.add(35, pk=4)    # keys=[25,28,30,35], pks=[1,3,2,4]
+
+idx.range(26, 32)    # bisect_left(26)=1, bisect_right(32)=3 → pks[1:3] = [3, 2]
+# ages 28 and 30 → pks 3 and 2</code></pre>
+
+    <h3>v5 + v6: Per-row locks + MVCC snapshot isolation</h3>
+<pre><code>class Row:
+    def __init__(self, pk): self.pk = pk; self.versions = []   # [(txn_id, data, committed_ts)]
+    def visible(self, snapshot_ts):
+        for tid, data, cts in reversed(self.versions):
+            if cts is not None and cts &lt;= snapshot_ts: return data
+        return None
+
+class MVCCTxn:
+    def __init__(self, db, ts):
+        self.db = db; self.snapshot_ts = ts; self.writes = []
+    def read(self, table, pk):
+        return self.db.tables[table].rows[pk].visible(self.snapshot_ts)
+    def write(self, table, pk, data):
+        row = self.db.tables[table].rows.setdefault(pk, Row(pk))
+        row.versions.append((id(self), data, None))
+        self.writes.append(row)
+    def commit(self, commit_ts):
+        for row in self.writes:
+            for i, (tid, d, cts) in enumerate(row.versions):
+                if tid == id(self) and cts is None:
+                    row.versions[i] = (tid, d, commit_ts)
+</code></pre>
+
+<pre><code># why versions is a LIST of (txn_id, data, commit_ts): append-only log per row
+# why cts=None for uncommitted: invisible to other readers until commit stamps a timestamp
+# why read walks versions in REVERSE: newest COMMITTED visible wins
+# why commit scans versions: stamps all this txn's pending writes atomically (at one ts)
+# Break this: forget to check cts is not None in visible() → reader sees uncommitted data
+#   (dirty read) — violates isolation</code></pre>
+
+<pre><code># Usage example — concurrent readers see consistent snapshots
+db = Database(); db.tables["users"].rows = {}
+
+tA = MVCCTxn(db, ts=10)           # snapshot at t=10
+tA.write("users", 1, {"name": "Alice", "balance": 100})
+# Row 1 now has versions=[(idA, Alice, None)]  — uncommitted
+
+tB = MVCCTxn(db, ts=12)           # snapshot at t=12
+tB.read("users", 1)               # → None (A's write not committed yet; nothing visible)
+
+tA.commit(commit_ts=14)           # versions=[(idA, Alice, 14)]
+
+tC = MVCCTxn(db, ts=15)
+tC.read("users", 1)               # walks versions reversed, 14 ≤ 15 → returns Alice
+tB.read("users", 1)               # still None — B's snapshot_ts=12 < commit_ts=14</code></pre>
+
+    <div class="diagram">
+<pre>
+MVCC timeline for row pk=1:
+
+ t=5   tA writes v1    versions = [(idA, v1, None)]
+ t=10  tB reads         visible(10): (idA,v1,None) — None cts → skip; return None
+ t=14  tA commits       versions = [(idA, v1, 14)]
+ t=15  tC writes v2    versions = [(idA, v1, 14), (idC, v2, None)]
+ t=18  tD (ts=16) reads visible(16): reverse iterate
+                         (idC,v2,None) skip; (idA,v1,14) 14≤16 → return v1
+ t=20  tC commits       versions = [(idA, v1, 14), (idC, v2, 20)]
+ t=22  tE (ts=21) reads visible(21): (idC,v2,20) 20≤21 → return v2
+
+Snapshot property: each txn sees a FROZEN view as of its snapshot_ts.
+Other txns' concurrent writes are invisible → no phantoms from concurrent inserts.</pre>
+    </div>
+
+    <div class="callout danger">
+      <div class="callout-title">How this breaks in production</div>
+      <ul>
+        <li><strong>Versions list grows forever:</strong> 10K updates to one row → versions has 10K entries → read walks them all. <em>Why</em>: no GC. Fix: vacuum removing versions older than oldest active snapshot_ts.</li>
+        <li><strong>Write-write conflict not detected:</strong> two txns write same row; last commit wins silently. <em>Why</em>: no conflict check in commit(). Fix: on commit, verify no newer committed version exists since snapshot_ts; abort if so.</li>
+        <li><strong>id(self) collision:</strong> a txn object is GC'd; Python reuses its id for a new txn; old versions confused with new. <em>Why</em>: id() is not a unique identifier across lifetimes. Fix: monotonic txn_id counter.</li>
+        <li><strong>Read your own writes:</strong> txA writes then reads — expects to see its own write but visible() checks only committed versions. <em>Why</em>: need a "see own uncommitted" path. Fix: visible() prefers versions with tid == id(self) unconditionally.</li>
+      </ul>
+    </div>
+
+    <div class="callout patterns">
+      <strong>Patterns:</strong> <em>Command</em> (log/undo), <em>Strategy</em> (index type, isolation level), <em>Memento</em> (savepoint), <em>Iterator</em> (result sets).<br>
+      <strong>Edge cases:</strong> write skew on serializable, phantom reads, deadlock between two txns, index not updated on UPDATE, NULL comparison semantics.<br>
+      <strong>Extensions:</strong> WAL for durability, query planner, foreign keys, triggers, replication.
+    </div>
+
+    <h2>3. Distributed Task Scheduler (Uber, Swiggy)</h2>
+
+    <div class="callout">
+      <div class="callout-title">How the pieces talk (submitting + executing a task)</div>
+      <pre>
+  1. Client: scheduler.submit(Task(next_run_at=now+30, fn=send_email, cron="* * * * *"))
+  2. submit checks dedupe_key → if seen, drop silently
+  3. Under lock: heappush(heap, task) → task placed by next_run_at (min-heap)
+  4. cv.notify() wakes loop() thread waiting on empty heap
+  5. loop() acquires leader lock (only ONE worker fires tasks)
+  6. loop() peeks heap top: if next_run_at &gt; now → cv.wait(timeout=delta)
+  7. On wake: heappop task; spawn worker thread for _run_once(task)
+  8. _run_once: try task.fn(); on exception → attempt+1, reschedule with backoff
+  9. On success: if cron → re-submit with next_after(now); if dedupe_key → add to seen
+ 10. Failures + retries flow back through submit → heap → loop — cycle continues</pre>
+    </div>
+
+    <div class="callout">
+      <strong>Requirements</strong>
+      <ul>
+        <li>Submit task with delay or cron expression.</li>
+        <li>One-shot or recurring; priority ordering.</li>
+        <li>Retry on failure with exponential backoff.</li>
+        <li>Idempotent execution (at-least-once with dedupe key).</li>
+        <li>Survive worker crashes; exactly one worker fires a given task.</li>
+      </ul>
+    </div>
+
+    <p><strong>Entities:</strong> <code>Task</code>, <code>CronExpr</code>, <code>Scheduler</code>, <code>Worker</code>, <code>Queue</code> (DB-backed), <code>LeaderLock</code>, <code>RetryPolicy</code>.</p>
+
+    <div class="diagram">
+<pre>
+ submit(task) ──&gt; PriorityQueue [min-heap by next_run_at]
+                      │
+                  Scheduler loop
+                      │  (holds distributed lock)
+                      ├── due? ── pop, mark RUNNING in DB
+                      ├── execute(task) on worker pool
+                      └── on fail  &rarr; RetryPolicy.next_delay() &rarr; re-enqueue
+</pre>
+    </div>
+
+    <h3>Core scheduler (~100 lines, Python)</h3>
+<pre><code>import heapq, time, threading, uuid, random
+from dataclasses import dataclass, field
+from typing import Callable, Optional
+
+@dataclass(order=True)
+class Task:
+    next_run_at: float
+    priority:    int = 0
+    id:          str = field(default_factory=lambda: str(uuid.uuid4()), compare=False)
+    fn:          Callable = field(default=None, compare=False)
+    cron:        Optional[str] = field(default=None, compare=False)
+    max_retries: int = field(default=3, compare=False)
+    attempt:     int = field(default=0, compare=False)
+    dedupe_key:  Optional[str] = field(default=None, compare=False)
+
+class CronExpr:
+    """minimal m h dom mon dow — only '*' and integers supported here."""
+    def __init__(self, expr):
+        self.fields = [self._parse(f) for f in expr.split()]
+    def _parse(self, f): return None if f == '*' else int(f)
+    def next_after(self, ts):
+        t = int(ts) + 60 - (int(ts) % 60)         # round up to next minute
+        while True:
+            lt = time.localtime(t)
+            m, h, dom, mon, dow = lt.tm_min, lt.tm_hour, lt.tm_mday, lt.tm_mon, lt.tm_wday
+            vals = [m, h, dom, mon, dow]
+            if all(f is None or f == v for f, v in zip(self.fields, vals)): return t
+            t += 60
+
+class RetryPolicy:
+    def __init__(self, base=1.0, cap=300.0, jitter=0.2): self.base, self.cap, self.jitter = base, cap, jitter
+    def next_delay(self, attempt):
+        d = min(self.cap, self.base * (2 ** attempt))
+        return d * (1 + random.uniform(-self.jitter, self.jitter))
+
+class LeaderLock:                                 # replace with Redis/ZK in production
+    def __init__(self): self._lock = threading.Lock(); self._owner = None
+    def acquire(self, who, ttl):
+        if self._lock.acquire(blocking=False):
+            self._owner = who; return True
+        return False
+    def release(self): self._owner = None; self._lock.release()
+
+class Scheduler:
+    def __init__(self, retry=RetryPolicy(), lock=LeaderLock()):
+        self.heap: list[Task] = []
+        self.cv   = threading.Condition()
+        self.retry, self.lock = retry, lock
+        self.seen: set[str] = set()                # idempotency
+        self.stopped = False
+
+    def submit(self, task: Task):
+        if task.dedupe_key and task.dedupe_key in self.seen: return
+        with self.cv:
+            heapq.heappush(self.heap, task); self.cv.notify()
+
+    def _run_once(self, t: Task):
+        try:
+            t.fn()
+            if t.dedupe_key: self.seen.add(t.dedupe_key)
+            if t.cron:
+                t.next_run_at = CronExpr(t.cron).next_after(time.time())
+                t.attempt = 0; self.submit(t)
+        except Exception:
+            if t.attempt &lt; t.max_retries:
+                t.attempt += 1
+                t.next_run_at = time.time() + self.retry.next_delay(t.attempt)
+                self.submit(t)
+
+    def loop(self, worker_id="w1"):
+        if not self.lock.acquire(worker_id, ttl=30): return     # only leader fires
+        try:
+            while not self.stopped:
+                with self.cv:
+                    while not self.heap and not self.stopped: self.cv.wait()
+                    if self.stopped: return
+                    now = time.time(); head = self.heap[0]
+                    if head.next_run_at &gt; now:
+                        self.cv.wait(timeout=head.next_run_at - now); continue
+                    task = heapq.heappop(self.heap)
+                threading.Thread(target=self._run_once, args=(task,), daemon=True).start()
+        finally:
+            self.lock.release()
+</code></pre>
+
+<pre><code># why @dataclass(order=True): heap uses `&lt;` on Task — order=True auto-generates comparisons
+# why compare=False on fn/id/cron: heap compares by next_run_at ONLY, not callable refs (unhashable)
+# why LeaderLock: in a cluster, many schedulers run; only one should fire a given task
+# why cv.wait(timeout=delta): sleep UNTIL next task due OR until submit wakes us
+# why seen set for dedupe: duplicate submissions (retries, cron doubles) are suppressed
+# why threading.Thread for _run_once: doesn't block the scheduler loop on long tasks
+# Break this: scheduler runs a 5-min task but holds lock with ttl=30s → ANOTHER worker
+#   grabs leader mid-task and schedules the same task again → double execution</code></pre>
+
+<pre><code># Usage example
+sched = Scheduler()
+sched.submit(Task(next_run_at=time.time()+2, fn=lambda: print("hi"),
+                  dedupe_key="msg-42"))
+sched.submit(Task(next_run_at=time.time()+2, fn=lambda: print("hi"),
+                  dedupe_key="msg-42"))    # dropped — already seen
+sched.submit(Task(next_run_at=time.time()+5, fn=flaky_api_call,
+                  max_retries=3))           # will auto-retry on exception
+sched.submit(Task(next_run_at=time.time(), fn=cron_job,
+                  cron="0 * * * *"))        # hourly
+
+threading.Thread(target=sched.loop, args=("worker-1",), daemon=True).start()
+# t=0    worker-1 acquires leader lock
+# t=2    runs "hi" task
+# t=5    runs flaky_api_call; raises → schedules retry at t=~5.5 (backoff)
+# t=5.5  retries flaky_api_call; succeeds</code></pre>
+
+    <div class="diagram">
+<pre>
+Heap state (min-heap by next_run_at):
+
+ t=0.0  submit A(run_at=10), submit B(run_at=5), submit C(run_at=8)
+        heap = [B(5), A(10), C(8)]          # heap-ordered by next_run_at
+
+ t=0.1  loop() peeks heap[0] = B(5); now=0.1; delta=4.9 → cv.wait(4.9)
+ t=5.0  wake up. heap[0] = B(5), 5 ≤ 5.0 → heappop → B
+        spawn Thread(_run_once(B))
+        heap = [C(8), A(10)]
+ t=5.0  loop iterates; peek heap[0] = C(8); delta=3.0 → cv.wait(3.0)
+
+ Thread(_run_once(B)):
+   B.fn() raises TimeoutError
+   B.attempt = 1 &lt; max_retries=3
+   B.next_run_at = 5.0 + retry.next_delay(1) ≈ 5.0 + 2.3 = 7.3
+   self.submit(B) → cv.notify()
+   loop wakes, pushes B; heap = [B(7.3), C(8), A(10)]
+
+ t=7.3  loop pops B → retry successful → seen.add(dedupe_key)
+
+Retry backoff: base=1.0, cap=300, jitter=0.2
+ attempt=1: d = min(300, 1*2) = 2.0; jitter ±0.2 → [1.6, 2.4]
+ attempt=2: d = min(300, 1*4) = 4.0 → [3.2, 4.8]
+ attempt=3: d = min(300, 1*8) = 8.0 → [6.4, 9.6]</pre>
+    </div>
+
+    <div class="callout danger">
+      <div class="callout-title">How this breaks in production</div>
+      <ul>
+        <li><strong>Clock skew between workers:</strong> worker-1 at t=100, worker-2 at t=130; task scheduled for t=120 runs twice (once by each leader during failover window). <em>Why</em>: timestamps compared across hosts. Fix: trust one clock (DB/Redis), not local time.</li>
+        <li><strong>Leader lock expires mid-task:</strong> task runs 60s, lock ttl=30s; second worker takes leader at t=30, pops same tasks. <em>Why</em>: no heartbeat. Fix: renew lock every N seconds while running.</li>
+        <li><strong>seen set grows unbounded:</strong> 10M dedupe keys over a week — memory leak. <em>Why</em>: no TTL on dedupe. Fix: LRU cache or Redis with expiration matching task lifetime.</li>
+        <li><strong>Poison task retries forever:</strong> an op with a bug throws every time; retry loop burns CPU. <em>Why</em>: no max_retries check before re-submit logic (bug in the code above — <code>attempt &lt; max_retries</code> gate works, but a fix would move exhausted tasks to a DLQ).</li>
+      </ul>
+    </div>
+
+    <div class="callout patterns">
+      <strong>Patterns:</strong> <em>Strategy</em> (retry policy, lock impl), <em>Command</em> (Task is a command), <em>Singleton</em> (leader), <em>Template Method</em> (loop), <em>Observer</em> (task lifecycle events).<br>
+      <strong>Edge cases:</strong> clock skew between workers, DST jumps in cron, dedupe key TTL, poison messages (max_retries exhausted), long-running tasks exceeding lock TTL (need heartbeat renew).<br>
+      <strong>Extensions:</strong> priority classes with weighted fair scheduling, task dependency DAG, dead-letter queue, rate-limited queues per tenant.
+    </div>
+
+    <h2>4. Cache with TTL (Zomato, PhonePe)</h2>
+
+    <div class="callout">
+      <div class="callout-title">How the pieces talk (GET / SET / expire)</div>
+      <pre>
+  1. Client: cache.set("user:42", obj, ttl=60)                  # entry point
+  2. Under lock: check capacity; if full, policy.victim() picks key to evict
+  3. Pop victim from store + policy; stats.evict++; notify observers
+  4. Create Entry(value, expiry=now+60); store[k] = entry; policy.add(k)
+  5. Client: cache.get("user:42")
+  6. Under lock: look up entry; if expired → pop, stats.expire++, notify, return None
+  7. Else: policy.touch(k) — LRU moves to end; LFU bumps frequency
+  8. Background sweeper thread loops: scan store for expired, delete, notify
+  9. Policy strategy (LRU / LFU / FIFO) plugged in at construction — Cache doesn't care</pre>
+    </div>
+
+    <div class="callout">
+      <strong>Requirements</strong>
+      <ul>
+        <li>GET, SET with optional TTL seconds.</li>
+        <li>Lazy + active expiration.</li>
+        <li>Pluggable eviction: LRU, LFU, FIFO.</li>
+        <li>Thread-safe under concurrent access.</li>
+        <li>Stats: hit rate, evictions, expirations.</li>
+      </ul>
+    </div>
+
+    <p><strong>Entities:</strong> <code>Cache</code>, <code>Entry(value, expiry)</code>, <code>EvictionPolicy</code>, <code>Stats</code>, <code>Subscriber</code>.</p>
+
+    <div class="diagram">
+<pre>
+ Cache
+  ├── store: {k -&gt; Entry}
+  ├── policy: EvictionPolicy  ── LRUPolicy | LFUPolicy | FIFOPolicy
+  ├── sweeper thread  ── removes expired lazily missed keys
+  ├── lock: RLock
+  └── observers       ── on_expire(k), on_evict(k)
+</pre>
+    </div>
+
+    <h3>v3 + v4: LRU + Strategy for eviction</h3>
+<pre><code>from collections import OrderedDict, Counter
+import threading, time
+
+class EvictionPolicy:
+    def touch(self, k): ...
+    def add(self, k):   ...
+    def remove(self, k): ...
+    def victim(self):    ...
+
+class LRUPolicy(EvictionPolicy):
+    def __init__(self): self.od = OrderedDict()
+    def touch(self, k): self.od.move_to_end(k)
+    def add(self, k):   self.od[k] = None
+    def remove(self, k): self.od.pop(k, None)
+    def victim(self):    return next(iter(self.od))
+
+class LFUPolicy(EvictionPolicy):
+    def __init__(self): self.freq = Counter()
+    def touch(self, k): self.freq[k] += 1
+    def add(self, k):   self.freq[k] = 1
+    def remove(self, k): self.freq.pop(k, None)
+    def victim(self):   return min(self.freq, key=self.freq.get)
+
+class FIFOPolicy(EvictionPolicy):
+    def __init__(self): self.q = OrderedDict()
+    def touch(self, k): pass
+    def add(self, k):   self.q[k] = None
+    def remove(self, k): self.q.pop(k, None)
+    def victim(self):   return next(iter(self.q))
+</code></pre>
+
+<pre><code># why EvictionPolicy is an ABC: Strategy pattern — swap LRU/LFU/FIFO without touching Cache
+# why OrderedDict.move_to_end: O(1) in CPython — perfect for LRU touch
+# why LFU uses Counter: O(1) increment; O(n) victim search (acceptable unless huge)
+# why FIFO.touch does nothing: insertion order is all that matters; never reorder
+# why min() with key=self.freq.get: finds least-frequently-used in O(n)
+# Break this: wrong policy for access pattern — LFU on a stream of unique keys
+#   → nothing is "frequent", victim() essentially random</code></pre>
+
+<pre><code># Usage example
+lru = LRUPolicy()
+lru.add("a"); lru.add("b"); lru.add("c")      # od = {a, b, c}
+lru.touch("a")                                  # od = {b, c, a}  — a is newest
+lru.victim()                                    # "b"  — least recently used
+
+lfu = LFUPolicy()
+lfu.add("x"); lfu.add("y")                      # freq = {x:1, y:1}
+lfu.touch("x"); lfu.touch("x")                  # freq = {x:3, y:1}
+lfu.victim()                                    # "y"  — lowest frequency</code></pre>
+
+    <h3>v5 + v6: Thread-safe cache with expiry pub/sub</h3>
+<pre><code>class Entry:
+    __slots__ = ("value", "expiry")
+    def __init__(self, v, exp): self.value, self.expiry = v, exp
+    def expired(self, now): return self.expiry is not None and self.expiry &lt;= now
+
+class Cache:
+    def __init__(self, capacity, policy: EvictionPolicy, sweep_interval=1.0):
+        self.capacity, self.policy = capacity, policy
+        self.store: dict[str, Entry] = {}
+        self.lock  = threading.RLock()
+        self.stats = {"hit": 0, "miss": 0, "evict": 0, "expire": 0}
+        self.subs: list = []
+        threading.Thread(target=self._sweep, args=(sweep_interval,), daemon=True).start()
+
+    def set(self, k, v, ttl=None):
+        with self.lock:
+            now = time.time(); exp = now + ttl if ttl else None
+            if k not in self.store and len(self.store) &gt;= self.capacity:
+                victim = self.policy.victim()
+                self.store.pop(victim); self.policy.remove(victim)
+                self.stats["evict"] += 1; self._emit("evict", victim)
+            self.store[k] = Entry(v, exp)
+            self.policy.add(k)
+
+    def get(self, k):
+        with self.lock:
+            e = self.store.get(k)
+            if e is None: self.stats["miss"] += 1; return None
+            if e.expired(time.time()):
+                self.store.pop(k); self.policy.remove(k)
+                self.stats["expire"] += 1; self._emit("expire", k); return None
+            self.policy.touch(k); self.stats["hit"] += 1; return e.value
+
+    def subscribe(self, fn): self.subs.append(fn)
+    def _emit(self, ev, k): [fn(ev, k) for fn in self.subs]
+
+    def _sweep(self, interval):
+        while True:
+            time.sleep(interval); now = time.time()
+            with self.lock:
+                dead = [k for k, e in self.store.items() if e.expired(now)]
+                for k in dead:
+                    self.store.pop(k); self.policy.remove(k)
+                    self.stats["expire"] += 1; self._emit("expire", k)
+</code></pre>
+
+<pre><code># why RLock (re-entrant): if an observer callback calls cache.get → same thread reacquires lock
+# why sweeper thread is daemon=True: dies with the process, no shutdown dance
+# why Entry.expired check on GET (not just sweep): LAZY expiration — correctness regardless of sweep cadence
+# why we evict BEFORE insert (if at capacity): keeps invariant `len(store) ≤ capacity`
+# why observers receive (event, key): hooks for metrics, cascade invalidation, etc.
+# Break this: observer callback does cache.set (nested lock ok with RLock, but RECURSIVE MUTATION during eviction → confused state)</code></pre>
+
+<pre><code># Usage example
+cache = Cache(capacity=3, policy=LRUPolicy(), sweep_interval=0.5)
+
+def on_event(ev, k): print(f"{ev}: {k}")
+cache.subscribe(on_event)
+
+cache.set("a", 1, ttl=5)
+cache.set("b", 2, ttl=2)
+cache.set("c", 3)                       # no TTL
+print(cache.get("a"))                   # 1 (hit, LRU moves 'a' to end)
+cache.set("d", 4)                       # capacity full → evict LRU victim = 'b'
+# prints: "evict: b"
+
+# After 2+s:  sweeper finds 'b' expired (but already evicted); nothing to do
+# After 5+s:  sweeper finds 'a' expired → removes, prints "expire: a"
+print(cache.stats)   # {"hit": 1, "miss": 0, "evict": 1, "expire": 1}</code></pre>
+
+    <div class="diagram">
+<pre>
+Cache(cap=3) with LRU, subscribers = [on_event]:
+
+ t=0.0  set("a",1,ttl=5)     store={a:E(1,5)}      order=[a]
+ t=0.0  set("b",2,ttl=2)     store={a,b}            order=[a,b]
+ t=0.0  set("c",3)           store={a,b,c}          order=[a,b,c]
+ t=0.1  get("a") = 1         policy.touch(a)        order=[b,c,a]  hit++
+ t=0.1  set("d",4)           capacity full!
+                             victim = next(order) = b
+                             pop 'b'; emit evict:b
+                             store={a,c,d}          order=[c,a,d]
+ t=0.5  sweeper tick now=0.5
+                             nothing expired yet
+ t=2.1  sweeper tick now=2.1
+                             'b' would have expired at 2.0 but it's already gone
+                             nothing expired
+ t=5.1  sweeper tick now=5.1
+                             'a' expiry=5.0 ≤ 5.1 → EXPIRED
+                             pop 'a'; policy.remove(a); emit expire:a
+                             store={c,d}</pre>
+    </div>
+
+    <div class="callout danger">
+      <div class="callout-title">How this breaks in production</div>
+      <ul>
+        <li><strong>Cache stampede:</strong> popular key expires; 1000 requests concurrently miss, all hit DB, then all SET. <em>Why</em>: no single-flight. Fix: per-key lock on miss, or probabilistic early expiration (refresh before TTL).</li>
+        <li><strong>Slow subscriber blocks cache:</strong> observer.on_event does a remote call → holds cache lock for 100ms → all GETs queue. <em>Why</em>: synchronous emit under lock. Fix: emit after releasing lock, or deliver via queue.</li>
+        <li><strong>Sweeper holds lock too long:</strong> 10M entries, sweeper scans under lock for seconds → whole cache frozen. <em>Why</em>: O(n) scan inside lock. Fix: segmented sweep (1/60th of keys per tick), or expiry heap.</li>
+        <li><strong>TTL=0 ambiguity:</strong> some APIs treat 0 as "never expire", others as "immediately expired". <em>Why</em>: underspecified. Fix: explicit policy — None = never, 0 = invalid (raise).</li>
+      </ul>
+    </div>
+
+    <div class="callout patterns">
+      <strong>Patterns:</strong> <em>Strategy</em> (eviction), <em>Observer</em> (pub/sub), <em>Template Method</em> (sweeper).<br>
+      <strong>Edge cases:</strong> TTL of zero, SET on existing key keeps or resets expiry? Negative TTL, clock going backwards, stampede on hot key expiry (use probabilistic early expiration), subscriber slow &rarr; blocks cache.<br>
+      <strong>Extensions:</strong> tiered cache (L1 in-proc + L2 Redis), write-through vs write-back, sharded lock striping, approximate LFU (Redis style) with decay.
+    </div>
+
+    <h2>5. Pub/Sub Event System (Razorpay, Paytm)</h2>
+
+    <div class="callout">
+      <div class="callout-title">How the pieces talk (subscribe + publish + deliver)</div>
+      <pre>
+  1. Subscriber registers pattern: trie.subscribe("order.*", sub1)
+  2. TopicTrie walks parts: inserts node "order" → node "*"; appends sub1
+  3. Publisher: broker.publish("order.created", msg)                # entry point
+  4. trie.match("order.created") walks parts ["order", "created"]:
+      - matches literal children first, then wildcard * nodes, then # catch-all
+  5. Returns list of matching Subscriptions [sub1, sub2]
+  6. For each sub: sub.enqueue(msg)
+  7. sub.enqueue applies filter_fn; if false, drop
+  8. If queue full → backpressure strategy (drop_oldest / buffer / block)
+  9. Worker thread drains queue → invokes sub.cb(msg)
+ 10. Consumer acks → sub.ack(offset); broker may delete from durable store</pre>
+    </div>
+
+    <div class="callout">
+      <strong>Requirements</strong>
+      <ul>
+        <li>Topics; subscribe, unsubscribe, publish.</li>
+        <li>Wildcard subscriptions: <code>order.*</code>, <code>payments.#</code>.</li>
+        <li>Per-subscriber filter predicate.</li>
+        <li>At-least-once delivery with durable per-subscriber queue and offsets.</li>
+        <li>Backpressure strategy when subscribers lag.</li>
+      </ul>
+    </div>
+
+    <p><strong>Entities:</strong> <code>Broker</code>, <code>Topic</code>, <code>Subscription</code>, <code>SubscriberQueue</code>, <code>Message</code>, <code>TopicTrie</code>.</p>
+
+    <div class="diagram">
+<pre>
+  publish("order.created", msg)
+       │
+       └─&gt; TopicTrie.match("order.created") ─&gt; [Subscription s1, s2, s3]
+                                                    │
+                                       for each sub: queue.append(msg)
+                                                    │
+                                          worker drains queue -&gt; callback
+</pre>
+    </div>
+
+    <h3>Topic trie + filter + at-least-once</h3>
+<pre><code>class TrieNode:
+    def __init__(self): self.children = {}; self.subs: list = []
+
+class TopicTrie:
+    def __init__(self): self.root = TrieNode()
+    def subscribe(self, pattern, sub):
+        node = self.root
+        for part in pattern.split('.'):
+            node = node.children.setdefault(part, TrieNode())
+        node.subs.append(sub)
+    def _walk(self, node, parts, i, out):
+        if i == len(parts):
+            out.extend(node.subs); return
+        part = parts[i]
+        if part in node.children:  self._walk(node.children[part],  parts, i+1, out)
+        if '*'  in node.children:  self._walk(node.children['*'],   parts, i+1, out)
+        if '#'  in node.children:  out.extend(node.children['#'].subs)   # multi-level
+    def match(self, topic):
+        out = []; self._walk(self.root, topic.split('.'), 0, out); return out
+
+class Subscription:
+    def __init__(self, sub_id, callback, filter_fn=None, backpressure="buffer"):
+        self.id, self.cb, self.filter = sub_id, callback, filter_fn
+        self.queue: list = []        # durable: persist to disk in prod
+        self.offset = 0
+        self.backpressure = backpressure  # "buffer" | "drop_oldest" | "block"
+        self.max_q = 10_000
+
+    def enqueue(self, msg):
+        if self.filter and not self.filter(msg): return
+        if len(self.queue) &gt;= self.max_q:
+            if   self.backpressure == "drop_oldest": self.queue.pop(0)
+            elif self.backpressure == "block":       return "BLOCK"
+        self.queue.append(msg)
+
+    def ack(self, offset): self.offset = max(self.offset, offset)
+</code></pre>
+
+<pre><code># why a trie keyed on '.' parts: matches "order.created" efficiently — O(parts), not O(subs)
+# why '*' matches SINGLE level and '#' matches MULTI-LEVEL: MQTT-compatible semantics
+# why filter_fn is per-subscription: one subscriber for "order.*" but only interested in amount&gt;100
+# why backpressure "drop_oldest": favours freshness (stock prices); "block" gives flow control
+# why ack advances offset: receiver-driven delivery — broker knows what's already consumed
+# Break this: publisher does sub.cb() inline (not via queue) → one slow subscriber blocks publish</code></pre>
+
+<pre><code># Usage example
+trie = TopicTrie()
+orders_sub = Subscription("s1", lambda m: print("orders:", m))
+all_sub    = Subscription("s2", lambda m: print("any:", m))
+
+trie.subscribe("order.*", orders_sub)       # one level wildcard
+trie.subscribe("#", all_sub)                 # catch-all
+
+matches = trie.match("order.created")
+for s in matches: s.enqueue({"id": 42})
+# orders_sub.queue=[{id:42}]   all_sub.queue=[{id:42}]
+
+matches = trie.match("payment.succeeded")
+for s in matches: s.enqueue({"amt": 99})
+# orders_sub.queue unchanged   all_sub.queue=[{id:42},{amt:99}]
+
+# Filter example
+priority_sub = Subscription("s3", lambda m: print(m),
+                            filter_fn=lambda m: m.get("amt", 0) &gt; 100)
+trie.subscribe("payment.#", priority_sub)
+for s in trie.match("payment.big"): s.enqueue({"amt": 500})   # passes filter
+for s in trie.match("payment.big"): s.enqueue({"amt": 50})    # filter drops</code></pre>
+
+    <div class="diagram">
+<pre>
+Trie after subscribes("order.*" → s1), ("#" → s2), ("payment.#" → s3):
+
+              ┌──────── ROOT ────────┐
+              │           │          │
+            order       payment      #──(subs=[s2])
+              │           │
+              *           #──(subs=[s3])
+              │
+          (subs=[s1])
+
+match("order.created"):
+  parts = ["order", "created"], walk from root
+   - 'order' in children → descend
+       - 'created' in children? no
+       - '*' in children? YES → descend to * node → collect subs [s1]
+       - '#' in children? no
+   - '*' in children of root? no
+   - '#' in children of root? YES → collect subs [s2] (multi-level match)
+  returns [s1, s2]
+
+Deliver step:
+ For each sub in [s1, s2]:
+   enqueue(msg)  checks filter → appends OR applies backpressure
+ Worker pool later drains queues asynchronously</pre>
+    </div>
+
+    <div class="callout danger">
+      <div class="callout-title">How this breaks in production</div>
+      <ul>
+        <li><strong>Slow subscriber backs up publish:</strong> no queue → publish blocks on slow callback. <em>Why</em>: sync delivery. Fix: per-subscription queue + dedicated worker thread/task.</li>
+        <li><strong>Unbounded queue:</strong> subscriber goes down; queue grows until OOM. <em>Why</em>: no max_q enforcement. Fix: bounded queue + backpressure (drop_oldest / block / DLQ).</li>
+        <li><strong>Redelivery after crash:</strong> worker crashed after callback but before ack → broker redelivers → double-handling. <em>Why</em>: at-least-once. Fix: idempotent consumer or dedupe store keyed on message id.</li>
+        <li><strong>Order not preserved:</strong> two threads publish to "order.*" concurrently; deliveries interleave. <em>Why</em>: no per-key ordering. Fix: partition queue by message key (same key → same worker).</li>
+      </ul>
+    </div>
+
+    <div class="callout patterns">
+      <strong>Patterns:</strong> <em>Observer</em> (core), <em>Strategy</em> (backpressure), <em>Composite</em> (topic trie), <em>Specification</em> (filter predicates).<br>
+      <strong>Edge cases:</strong> unsubscribe while delivering, duplicate delivery (idempotent consumer needed), ordering across topics is NOT guaranteed, only per-topic, queue growth unbounded for slow subscribers, crash between deliver and ack (redelivery).<br>
+      <strong>Extensions:</strong> exactly-once via idempotency key + dedupe store, consumer groups (Kafka-style), replay from offset, schema registry.
+    </div>
+
+    <h2>6. Meeting Scheduler (Google, Microsoft)</h2>
+
+    <div class="callout">
+      <div class="callout-title">How the pieces talk (booking a recurring meeting)</div>
+      <pre>
+  1. Client: scheduler.book(BookRequest(rrule=RRule("DAILY",count=5), start=dt, capacity=8))
+  2. Scheduler expands RRULE → instances = [dt, dt+1d, dt+2d, dt+3d, dt+4d]
+  3. For each instance: RoomAssigner.pick(rooms, start, end, capacity) [Strategy]
+  4. SmallestFit filters: r.capacity ≥ 8 AND NOT r.tree.overlaps(start, end)
+  5. IntervalTree.overlaps binary-searches start list, scans for any end > s
+  6. Pick min-capacity viable room
+  7. If ANY instance has no room → all-or-nothing FAIL (rollback)
+  8. Else commit: for each (room, instance) → room.tree.add(start, end)
+  9. Notifier.notify(participants) — Observer pattern fans out email/calendar invites</pre>
+    </div>
+
+    <div class="callout">
+      <strong>Requirements</strong>
+      <ul>
+        <li>Book rooms; reject conflicts.</li>
+        <li>Recurring meetings via RRULE.</li>
+        <li>Waitlist if preferred room is busy.</li>
+        <li>Participant availability check.</li>
+        <li>Time-zone aware; store UTC, display local.</li>
+      </ul>
+    </div>
+
+    <p><strong>Entities:</strong> <code>Room</code>, <code>Meeting</code>, <code>Participant</code>, <code>IntervalTree</code>, <code>RRule</code>, <code>RoomAssigner</code>, <code>Notifier</code>.</p>
+
+    <div class="diagram">
+<pre>
+  Scheduler.book(req)
+      ├── expand RRULE -&gt; instances[]
+      ├── for each instance:
+      │     RoomAssigner.pick(capacity, instance) [Strategy]
+      │         └── IntervalTree.overlap(room, start, end)?
+      ├── all-or-nothing commit across instances
+      └── Notifier.notify(participants)        [Observer]
+</pre>
+    </div>
+
+    <h3>Interval tree conflict detection + RRULE expansion</h3>
+<pre><code>from datetime import datetime, timedelta
+import bisect
+
+class IntervalTree:
+    """Ordered list variant — fine up to a few thousand intervals per room."""
+    def __init__(self): self.starts, self.ends = [], []
+    def add(self, s, e):
+        i = bisect.bisect_left(self.starts, s)
+        self.starts.insert(i, s); self.ends.insert(i, e)
+    def overlaps(self, s, e):
+        i = bisect.bisect_right(self.starts, e)
+        for k in range(i):
+            if self.ends[k] &gt; s: return True
+        return False
+
+class RRule:
+    """FREQ=DAILY;COUNT=5 etc. simplified subset."""
+    def __init__(self, freq, count=None, until=None, interval=1):
+        self.freq, self.count, self.until, self.interval = freq, count, until, interval
+    def expand(self, start):
+        step = {"DAILY": timedelta(days=1), "WEEKLY": timedelta(weeks=1)}[self.freq]
+        out, cur, n = [], start, 0
+        while True:
+            out.append(cur); n += 1
+            if self.count and n &gt;= self.count: break
+            cur = cur + step * self.interval
+            if self.until and cur &gt; self.until: break
+            if n &gt; 10_000: break              # safety
+        return out
+
+class RoomAssigner:                                   # Strategy
+    def pick(self, rooms, start, end, capacity): ...
+
+class SmallestFit(RoomAssigner):
+    def pick(self, rooms, start, end, capacity):
+        viable = [r for r in rooms if r.capacity &gt;= capacity and not r.tree.overlaps(start, end)]
+        return min(viable, key=lambda r: r.capacity) if viable else None
+</code></pre>
+
+<pre><code># why bisect_right(starts, e) as upper bound: any interval that STARTS after our end can't overlap
+# why scan k in range(i): any interval with start≤e AND end&gt;s overlaps — linear scan within bound
+# why `step * self.interval`: RRULE "interval=2" means every 2nd day
+# why `if n &gt; 10_000: break`: DoS guard — a rogue RRULE could expand infinitely
+# why SmallestFit picks MIN capacity: don't waste a 100-seat room on a 2-person standup
+# Break this: RoomAssigner that reads tree in one thread while another thread adds →
+#   overlap check races with add → two meetings accepted into same slot</code></pre>
+
+<pre><code># Usage example
+rooms = [Room("R1", capacity=4), Room("R2", capacity=8), Room("R3", capacity=20)]
+assigner = SmallestFit()
+
+from datetime import datetime as D, timedelta as T
+start = D(2026, 4, 20, 10, 0)
+end = start + T(hours=1)
+
+r = assigner.pick(rooms, start, end, capacity=6)
+# filters: R2 (cap≥6, no overlap), R3 (cap≥6, no overlap); R1 too small
+# min by capacity → R2
+r.tree.add(start, end)                      # book it
+
+# Now try to book a conflicting meeting in R2
+r2_again = assigner.pick([r], start + T(minutes=30), end + T(minutes=30), capacity=6)
+# tree.overlaps detects conflict → viable=[] → returns None
+
+# RRULE expansion
+rrule = RRule("DAILY", count=3)
+instances = rrule.expand(start)
+# [2026-04-20 10:00, 2026-04-21 10:00, 2026-04-22 10:00]</code></pre>
+
+    <div class="diagram">
+<pre>
+IntervalTree state after 3 bookings:
+ starts = [09:00, 10:00, 14:00]
+ ends   = [10:00, 11:30, 15:00]
+
+ overlaps(s=10:30, e=11:00)?
+   i = bisect_right(starts, 11:00) = 2  (upper bound)
+   scan k=0: end=10:00 &gt; 10:30? NO
+   scan k=1: end=11:30 &gt; 10:30? YES → return True ✓ (overlap detected)
+
+ overlaps(s=12:00, e=13:00)?
+   i = bisect_right(starts, 13:00) = 2
+   scan k=0: 10:00 &gt; 12:00? NO
+   scan k=1: 11:30 &gt; 12:00? NO
+   return False ✓ (free slot)
+
+Booking recurring meeting:
+ rrule.expand(D(2026,4,20,10)) with DAILY count=3
+  → [Apr 20 10:00, Apr 21 10:00, Apr 22 10:00]
+ For each:
+   pick room → R2 all days (R2 free all 3 days)
+ All-or-nothing commit:
+   R2.tree.add(Apr 20 10-11)
+   R2.tree.add(Apr 21 10-11)
+   R2.tree.add(Apr 22 10-11)
+ If Day 2 conflicted: rollback Day 1 add, return failure</pre>
+    </div>
+
+    <div class="callout danger">
+      <div class="callout-title">How this breaks in production</div>
+      <ul>
+        <li><strong>Timezone drift:</strong> meeting created in IST (UTC+5:30), viewer in PST sees 10:00 local but stored as 04:30 UTC — edge case near DST transitions flips the hour. <em>Why</em>: mixing local + UTC. Fix: store UTC always; render in user TZ only at display time.</li>
+        <li><strong>Double-book race:</strong> two threads both call pick() seeing R2 free; both add() → two meetings in same room. <em>Why</em>: check-then-act not atomic. Fix: per-room lock around pick+add.</li>
+        <li><strong>RRULE expansion explodes:</strong> user sets FREQ=SECONDLY;COUNT=10000000 → 10M instances. <em>Why</em>: no rate limit. Fix: max instances cap + reject pathological rules.</li>
+        <li><strong>DST skipped hour:</strong> recurring 2:30 AM meeting on spring-forward day — 2:30 AM doesn't exist. <em>Why</em>: naive clock math. Fix: use tz-aware libs (pytz / zoneinfo) that skip/duplicate instances per iCalendar spec.</li>
+      </ul>
+    </div>
+
+    <div class="callout patterns">
+      <strong>Patterns:</strong> <em>Strategy</em> (assignment), <em>Composite/Iterator</em> (RRULE instances), <em>Observer</em> (notifications), <em>Command</em> (cancel a whole series vs this occurrence).<br>
+      <strong>Edge cases:</strong> DST transitions shifting 2AM meetings, participant in different TZ sees wrong slot, cancelling one occurrence of a series, overlapping participants not rooms, back-to-back meetings with zero gap, waitlist promotion race.<br>
+      <strong>Extensions:</strong> free-slot finding (NWNT intersection across participants), booking approvals, capacity-constrained rooms, video-conference link generation.
+    </div>
+
+    <h2>7. Food Delivery Order System (Swiggy, Zomato, Uber Eats)</h2>
+
+    <div class="callout">
+      <div class="callout-title">How the pieces talk (place order → deliver / cancel)</div>
+      <pre>
+  1. Customer builds Cart from Menu; clicks "Place order"
+  2. OrderService.place(cart, payment_kind) [entry point]
+  3. PaymentFactory.create(kind) → UPI/Card/Wallet/COD strategy — Factory pattern
+  4. payment.charge(amount) → payment_id  (or raises PaymentFailed)
+  5. Order created with state=Placed(); OrderBuilder wires everything
+  6. PartnerAssigner.pick(...) → NearestPartner or RatingWeighted — Strategy
+  7. partner.assign(order); Notifier.notify(customer, "order_placed") — Observer
+  8. State transitions: order.state.next() → Placed→Accepted→Preparing→OutForDelivery→Delivered
+  9. Any time user cancels: CancelCmd.execute()
+       checks state.can_cancel(); transitions state; refunds; releases partner; notifies
+ 10. Every state change fans out via observers → customer app + partner app + analytics</pre>
+    </div>
+
+    <div class="callout">
+      <strong>Requirements</strong>
+      <ul>
+        <li>Browse restaurants &amp; menu; build cart; place order.</li>
+        <li>Assign delivery partner by strategy.</li>
+        <li>Lifecycle: PLACED &rarr; ACCEPTED &rarr; PREPARING &rarr; OUT_FOR_DELIVERY &rarr; DELIVERED | CANCELLED.</li>
+        <li>Payment via multiple methods (UPI, card, wallet, COD).</li>
+        <li>Status pushes to customer and partner; ratings post-delivery.</li>
+      </ul>
+    </div>
+
+    <p><strong>Entities:</strong> <code>Restaurant</code>, <code>MenuItem</code>, <code>Cart</code>, <code>Order</code>, <code>OrderState</code>, <code>DeliveryPartner</code>, <code>Customer</code>, <code>PaymentMethod</code>, <code>CancelCmd</code>.</p>
+
+    <div class="diagram">
+<pre>
+  Customer --&gt; Cart --&gt; Order ----&gt; OrderState (State pattern)
+                            │         PLACED -&gt; ACCEPTED -&gt; PREPARING
+                            │           -&gt; OUT_FOR_DELIVERY -&gt; DELIVERED
+                            │
+                            ├── PartnerAssigner (Strategy)
+                            ├── PaymentFactory  (Factory)
+                            ├── Notifier        (Observer)
+                            └── CancelCmd       (Command + compensations)
+</pre>
+    </div>
+
+    <h3>State machine + partner strategy + cancel command</h3>
+<pre><code>from abc import ABC, abstractmethod
+
+class OrderState(ABC):
+    @abstractmethod
+    def next(self, order): ...
+    def can_cancel(self): return True
+
+class Placed(OrderState):
+    def next(self, o): o.state = Accepted()
+class Accepted(OrderState):
+    def next(self, o): o.state = Preparing()
+class Preparing(OrderState):
+    def next(self, o): o.state = OutForDelivery()
+class OutForDelivery(OrderState):
+    def next(self, o): o.state = Delivered()
+    def can_cancel(self): return False      # too late
+class Delivered(OrderState):
+    def next(self, o): raise RuntimeError("terminal")
+    def can_cancel(self): return False
+
+class PartnerAssigner(ABC):
+    @abstractmethod
+    def pick(self, partners, order): ...
+
+class NearestPartner(PartnerAssigner):
+    def pick(self, partners, order):
+        return min((p for p in partners if p.available),
+                   key=lambda p: p.distance_to(order.restaurant), default=None)
+
+class RatingWeighted(PartnerAssigner):
+    def pick(self, partners, order):
+        cand = [p for p in partners if p.available and p.rating &gt;= 4.0]
+        return min(cand, key=lambda p: p.distance_to(order.restaurant) / max(p.rating, 1e-3),
+                   default=None)
+
+class CancelCmd:
+    def __init__(self, order, payment_gw, notifier):
+        self.order, self.pg, self.notifier = order, payment_gw, notifier
+    def execute(self):
+        if not self.order.state.can_cancel(): raise RuntimeError("cannot cancel")
+        self.order.state = Cancelled()
+        if self.order.paid: self.pg.refund(self.order.payment_id)
+        if self.order.partner: self.order.partner.release()
+        self.notifier.notify(self.order.customer, "order_cancelled", self.order.id)
+
+class PaymentFactory:
+    @staticmethod
+    def create(kind):
+        return {"upi": UPI(), "card": Card(), "wallet": Wallet(), "cod": COD()}[kind]
+</code></pre>
+
+<pre><code># why OrderState as ABC: each state KNOWS what transitions are legal (can_cancel)
+# why OutForDelivery.can_cancel = False: once partner has your food, refund logic is different
+# why Delivered.next() raises: terminal state — no further transitions allowed
+# why CancelCmd orchestrates refund + partner release + notify TOGETHER: atomic from user POV
+# why PaymentFactory uses a dict literal: adding new payment types = one line change
+# Break this: partner.release() happens BEFORE pg.refund(); refund fails;
+#   partner now free but user still charged → support ticket</code></pre>
+
+<pre><code># Usage example
+# Happy path
+cart = Cart([MenuItem("pizza", 15), MenuItem("coke", 2)])
+order = Order(id=101, customer=c, restaurant=r, items=cart.items,
+              state=Placed(), paid=False)
+
+pay = PaymentFactory.create("upi")
+payment_id = pay.charge(17)
+order.paid = True; order.payment_id = payment_id
+
+order.state.next(order)       # Placed → Accepted
+order.state.next(order)       # Accepted → Preparing
+
+# Partner assignment
+partner = NearestPartner().pick(all_partners, order)
+order.partner = partner
+
+order.state.next(order)       # Preparing → OutForDelivery
+order.state.next(order)       # OutForDelivery → Delivered
+
+# Attempt late cancel
+cancel = CancelCmd(order, pay, notifier)
+try: cancel.execute()
+except RuntimeError as e: print(e)    # "cannot cancel" (Delivered)</code></pre>
+
+    <div class="diagram">
+<pre>
+State machine:
+   Placed ──next──&gt; Accepted ──next──&gt; Preparing ──next──&gt; OutForDelivery ──next──&gt; Delivered
+     │                 │                    │                     X                      X
+     │ can_cancel:     │ can_cancel:        │ can_cancel:         │ cannot               │ cannot
+     ▼                 ▼                    ▼                     ▼                      ▼
+   Cancelled        Cancelled          Cancelled               (refuse)               (refuse)
+
+CancelCmd.execute() flow:
+  if not state.can_cancel(): raise "cannot cancel"
+  state = Cancelled()
+  if order.paid:     pg.refund(payment_id)    # revert money
+  if order.partner:  partner.release()         # free partner for next order
+  notifier.notify(customer, "order_cancelled") # push + email
+
+Strategy swap:
+  Peak lunch hour: PartnerAssigner = NearestPartner()        # speed matters
+  Off-peak:       PartnerAssigner = RatingWeighted()        # quality matters
+  New city:       PartnerAssigner = RegionSpecific()        # regulation
+
+Sample order lifecycle (times):
+  t=0    Placed
+  t=30s  Accepted   (restaurant tap)
+  t=2m   Preparing
+  t=18m  OutForDelivery  (partner picks up)
+  t=35m  Delivered</pre>
+    </div>
+
+    <div class="callout danger">
+      <div class="callout-title">How this breaks in production</div>
+      <ul>
+        <li><strong>Payment succeeded, order failed:</strong> charge() returns ok but Order creation raises (DB down) — user charged, no order. <em>Why</em>: no saga/compensation. Fix: two-phase: reserve payment, commit after order persisted; refund on failure.</li>
+        <li><strong>Partner goes offline mid-trip:</strong> state says OutForDelivery but partner never completes. <em>Why</em>: no timeout. Fix: heartbeat + reassignment; partner's order returns to the pool.</li>
+        <li><strong>Simultaneous state transitions:</strong> system auto-advances Preparing → OutForDelivery while user's "cancel" is being processed → race. <em>Why</em>: state mutation not serialized. Fix: pessimistic lock per order, or optimistic concurrency token.</li>
+        <li><strong>Refund to closed card:</strong> user canceled the card after paying; refund() fails. <em>Why</em>: gateway can't push. Fix: store-to-wallet fallback, or DLQ for manual handling.</li>
+      </ul>
+    </div>
+
+    <div class="callout patterns">
+      <strong>Patterns:</strong> <em>State</em> (order), <em>Strategy</em> (assignment), <em>Observer</em> (notifications), <em>Command</em> (cancel with compensation), <em>Factory</em> (payment method), <em>Builder</em> (cart &rarr; order).<br>
+      <strong>Edge cases:</strong> restaurant rejects after PLACED, partner goes offline mid-trip (reassign), partial cancellation of items, payment succeeded but order failed (refund), simultaneous status update from partner and system, rating before DELIVERED.<br>
+      <strong>Extensions:</strong> batching multiple orders for one partner, live GPS tracking, surge pricing, promo codes, loyalty points, scheduled orders.
+    </div>
+
+    <h2>8. Cricket Scorecard (Razorpay, Disney+Hotstar, PhonePe)</h2>
+
+    <div class="callout">
+      <div class="callout-title">How the pieces talk (recording a ball, then undoing)</div>
+      <pre>
+  1. Scorer: innings.record(Four())                    # entry point — Four is a State
+  2. Innings.record calls outcome.apply(self)
+  3. Four.apply: innings.score += 4; innings.balls += 1 (legal ball)
+  4. runs=4 is even → no strike rotation from this ball
+  5. record() appends outcome to ball_log (Command pattern — for undo)
+  6. record() checks if balls%6==0 → over ended → swap_strike()
+  7. record() notifies observers: Scoreboard.on_ball(innings, outcome)
+  8. Mistake? Scorer calls innings.undo()
+  9. undo() pops last outcome from ball_log
+ 10. undo() reverses: score-=runs, balls-=1 if legal, reverses any strike swaps</pre>
+    </div>
+
+    <div class="callout">
+      <strong>Requirements</strong>
+      <ul>
+        <li>Teams, players, innings, overs, balls.</li>
+        <li>Record dot/runs/boundary/wicket/extras (wide, no-ball, byes, legbyes).</li>
+        <li>Strike rotation on odd runs and over-end.</li>
+        <li>Live scoreboard and player stats.</li>
+        <li>Undo a mis-recorded ball.</li>
+      </ul>
+    </div>
+
+    <p><strong>Entities:</strong> <code>Match</code>, <code>Team</code>, <code>Player</code>, <code>Innings</code>, <code>Over</code>, <code>Ball</code>, <code>BallOutcome</code> (state), <code>Scoreboard</code> (observer), <code>Format</code> (strategy).</p>
+
+    <div class="diagram">
+<pre>
+ Match
+  ├── Format (T20 | ODI | Test)   [Strategy]
+  ├── innings[]
+  │      └── Over[]
+  │            └── Ball(outcome)  [State: Dot/Runs/Four/Six/Wicket/Wide/NoBall]
+  ├── on_strike, non_strike, bowler
+  └── observers -&gt; Scoreboard, StatsAggregator
+</pre>
+    </div>
+
+    <h3>Working core: Ball outcomes, strike rotation, undo</h3>
+<pre><code>class BallOutcome:
+    runs = 0; legal = True; wicket = False; extra_type = None
+    def apply(self, innings):
+        innings.score += self.runs
+        if self.legal: innings.balls += 1
+        if self.runs % 2 == 1: innings.swap_strike()
+        if self.wicket: innings.wickets += 1
+
+class Dot(BallOutcome): pass
+class Runs(BallOutcome):
+    def __init__(self, r): self.runs = r
+class Four(BallOutcome): runs = 4
+class Six(BallOutcome):  runs = 6
+class Wide(BallOutcome): runs = 1; legal = False; extra_type = "wide"
+class NoBall(BallOutcome): runs = 1; legal = False; extra_type = "no_ball"
+class Wicket(BallOutcome): wicket = True
+
+class Innings:
+    def __init__(self, batting, bowling, overs_limit):
+        self.batting, self.bowling, self.overs_limit = batting, bowling, overs_limit
+        self.score = 0; self.wickets = 0; self.balls = 0
+        self.on_strike, self.non_strike = batting.players[0], batting.players[1]
+        self.bowler = bowling.bowlers[0]
+        self.ball_log: list = []
+        self.observers: list = []
+
+    def swap_strike(self): self.on_strike, self.non_strike = self.non_strike, self.on_strike
+
+    def record(self, outcome: BallOutcome):
+        outcome.apply(self)
+        self.ball_log.append(outcome)
+        if self.balls % 6 == 0 and self.balls &gt; 0:
+            self.swap_strike()           # over end: strike rotates
+        for o in self.observers: o.on_ball(self, outcome)
+
+    def undo(self):
+        if not self.ball_log: return
+        last = self.ball_log.pop()
+        self.score -= last.runs
+        if last.legal: self.balls -= 1
+        if last.wicket: self.wickets -= 1
+        if last.runs % 2 == 1: self.swap_strike()    # reverse strike flip
+        if (self.balls + 1) % 6 == 0: self.swap_strike()   # reverse over-end flip
+        for o in self.observers: o.on_undo(self, last)
+
+class Format:                                # Strategy
+    def overs_per_innings(self): raise NotImplementedError
+class T20(Format):  overs_per_innings = lambda self: 20
+class ODI(Format):  overs_per_innings = lambda self: 50
+class Test(Format): overs_per_innings = lambda self: None  # unlimited
+</code></pre>
+
+<pre><code># why each BallOutcome is its own class: encapsulates rules (Four.runs=4 is a class attr, not magic number)
+# why `legal = False` on Wide/NoBall: illegal deliveries DON'T count toward the over — 7-ball overs possible
+# why record() AND undo() both deal with strike rotation: cricket's edge case — odd runs + over-end stack
+# why ball_log stores outcomes (not just runs): undo needs ALL state to revert cleanly
+# why observers notified AFTER state change: consumers see the authoritative new state
+# Break this: custom Six = Runs(6) gets `legal = False` inherited wrong from Wide → six doesn't count</code></pre>
+
+<pre><code># Usage example
+t1 = Team("India", ["Rohit", "Gill", "Kohli"]); t2 = Team("Australia", ["Smith","Warner","Head"], bowlers=["Starc"])
+innings = Innings(t1, t2, overs_limit=20)
+
+class LiveScoreboard:
+    def on_ball(self, inn, out): print(f"{inn.score}/{inn.wickets} ({inn.balls//6}.{inn.balls%6})")
+    def on_undo(self, inn, out): print("UNDO:", inn.score)
+
+innings.observers.append(LiveScoreboard())
+
+innings.record(Four())         # "4/0 (0.1)"  score=4, balls=1
+innings.record(Runs(1))        # "5/0 (0.2)"  score=5, balls=2, strike swaps
+innings.record(Wide())         # "6/0 (0.2)"  score=6, balls=2 (still!), extra
+innings.record(Six())          # "12/0 (0.3)" score=12, balls=3
+innings.record(Dot())          # "12/0 (0.4)"
+innings.record(Runs(2))        # "14/0 (0.5)"
+innings.record(Runs(1))        # "15/0 (1.0)" 6 legal balls → over end → strike swaps
+
+innings.undo()                 # UNDO: 14  — removes last Run(1), reverses BOTH strike flips</code></pre>
+
+    <div class="diagram">
+<pre>
+State evolution over an over (6 legal balls):
+
+ ball   outcome   runs legal  score   balls   on_strike   notes
+ 0      Four        4   T       4       1     Rohit       no swap (even)
+ 1      Runs(1)     1   T       5       2     Gill        odd → swapped
+ 2      Wide        1   F       6       2     Gill        illegal → no ball count
+ 3      Six         6   T      12       3     Gill        no swap
+ 4      Dot         0   T      12       4     Gill
+ 5      Runs(2)     2   T      14       5     Gill
+ 6      Runs(1)     1   T      15       6     Rohit       odd swap + over-end swap
+                                                          net: Gill→Rohit (odd) → Rohit back to Gill
+                                                          wait — two swaps cancel? No:
+                                                          - odd run swap: Gill→Rohit
+                                                          - over end swap: Rohit→Gill
+                                                          Result: Gill on strike (double swap = same end)
+
+Undo of last ball (Runs(1)):
+  pop Runs(1) from ball_log
+  score -= 1 → 14
+  balls -= 1 → 5
+  runs%2==1 → swap_strike  (reverses the odd-run swap)
+  (balls+1) % 6 == 0 (i.e. 6%6==0) → swap again (reverses over-end swap)
+  → on_strike back to Gill (who was on strike before ball 6)</pre>
+    </div>
+
+    <div class="callout danger">
+      <div class="callout-title">How this breaks in production</div>
+      <ul>
+        <li><strong>No-ball + 4 runs:</strong> runs=1 from the no-ball PLUS 4 off the bat — single BallOutcome class can't represent this. <em>Why</em>: outcomes not composable. Fix: CompoundOutcome or runs + extra_runs separately.</li>
+        <li><strong>Wicket on wide:</strong> stumped off a wide — wicket=True AND legal=False. <em>Why</em>: undo() doesn't reverse wicket count (only pops score). Fix: explicitly reverse every field in undo().</li>
+        <li><strong>Over-abandoned (rain):</strong> 3 balls bowled, over ends at 3. balls%6 != 0, so over-end swap doesn't fire. <em>Why</em>: over-end assumed to coincide with ball 6. Fix: explicit end_over() method that swaps regardless.</li>
+        <li><strong>Undo across over boundary:</strong> last ball was ball 7 (first of next over); undo must reverse TWO swaps (previous over-end + strike). <em>Why</em>: edge case in undo. The code handles it via `(balls+1)%6==0` — but only if records are perfectly chronological.</li>
+      </ul>
+    </div>
+
+    <div class="callout patterns">
+      <strong>Patterns:</strong> <em>State</em> (ball outcomes), <em>Strategy</em> (format), <em>Observer</em> (live scorecard), <em>Command</em> (undo last ball), <em>Composite</em> (Match &rarr; Innings &rarr; Over &rarr; Ball).<br>
+      <strong>Edge cases:</strong> no-ball plus runs (nb+4), wicket on a wide (stumped/run-out), over abandoned mid-way (rain), retired hurt, DLS method for rain-shortened games, undo across over boundary.<br>
+      <strong>Extensions:</strong> DLS calculator, fantasy points streaming, commentary lines (NLG), partnership tracker, Manhattan/worm charts.
+    </div>
+
+    <h2>9. Notification Preference Manager (Atlassian, Slack)</h2>
+
+    <div class="callout">
+      <div class="callout-title">How the pieces talk (send vs. suppress)</div>
+      <pre>
+  1. Client: send_notification(notif, user, now)                    # entry point
+  2. should_send(notif, prefs, now) builds Spec tree:
+       HasPermission() &amp; ~InQuietHours() &amp; ~GlobalDND()
+  3. Spec tree evaluates AGAINST ctx (prefs + notif + now)
+  4. If Spec returns False → drop (quiet hours, dnd, etc.)
+  5. If True → FallbackChain.deliver(notif, user, prefs)
+  6. FallbackChain iterates [push, email, sms]:
+       - If prefs.channels[ch] false → skip
+       - Instantiate ChannelStrategy; call send()
+       - On success → return channel name (done)
+       - On exception/false → try next channel
+  7. All channels exhausted → None returned → DLQ or log
+  8. Preference change arrives → observer fires → in-flight digests recompute</pre>
+    </div>
+
+    <div class="callout">
+      <strong>Requirements</strong>
+      <ul>
+        <li>Per-user preferences by notification type and channel (email/push/SMS/in-app).</li>
+        <li>Quiet hours and global DND.</li>
+        <li>Digest mode (batch hourly/daily).</li>
+        <li>Channel fallback when primary fails.</li>
+        <li>Live update of running subscriptions on preference change.</li>
+      </ul>
+    </div>
+
+    <p><strong>Entities:</strong> <code>UserPrefs</code>, <code>ChannelStrategy</code>, <code>Specification</code>, <code>FallbackChain</code>, <code>Notification</code>, <code>DigestBuffer</code>.</p>
+
+    <div class="diagram">
+<pre>
+ send(notification)
+    └── Specification: hasPermission AND notInQuietHours AND channelEnabled AND !DND
+              │
+              └── true &rarr; FallbackChain: push -&gt; email -&gt; sms
+                                │
+                                └── ChannelStrategy.send()
+</pre>
+    </div>
+
+    <h3>Specification + Chain of Responsibility</h3>
+<pre><code>class Spec:
+    def is_satisfied(self, ctx): ...
+    def __and__(self, o): return And(self, o)
+    def __or__(self, o):  return Or(self, o)
+    def __invert__(self): return Not(self)
+
+class And(Spec):
+    def __init__(self, a, b): self.a, self.b = a, b
+    def is_satisfied(self, ctx): return self.a.is_satisfied(ctx) and self.b.is_satisfied(ctx)
+class Or(Spec):
+    def __init__(self, a, b): self.a, self.b = a, b
+    def is_satisfied(self, ctx): return self.a.is_satisfied(ctx) or self.b.is_satisfied(ctx)
+class Not(Spec):
+    def __init__(self, s): self.s = s
+    def is_satisfied(self, ctx): return not self.s.is_satisfied(ctx)
+
+class HasPermission(Spec):
+    def is_satisfied(self, ctx): return ctx.prefs.allows(ctx.notif.type)
+class InQuietHours(Spec):
+    def is_satisfied(self, ctx): return ctx.prefs.quiet_hours.contains(ctx.now)
+class ChannelEnabled(Spec):
+    def __init__(self, ch): self.ch = ch
+    def is_satisfied(self, ctx): return ctx.prefs.channels.get(self.ch, False)
+class GlobalDND(Spec):
+    def is_satisfied(self, ctx): return ctx.prefs.dnd
+
+class ChannelStrategy:
+    def send(self, notif, user): raise NotImplementedError
+
+class EmailCh(ChannelStrategy):
+    def send(self, n, u): return gateway.email(u.email, n.render_email())
+class PushCh(ChannelStrategy):
+    def send(self, n, u): return gateway.push(u.device_token, n.render_push())
+class SMSCh(ChannelStrategy):
+    def send(self, n, u): return gateway.sms(u.phone, n.render_sms())
+
+class FallbackChain:
+    def __init__(self, channels): self.channels = channels
+    def deliver(self, notif, user, prefs):
+        for ch_name in self.channels:
+            if not prefs.channels.get(ch_name, False): continue
+            try:
+                ok = {"push": PushCh(), "email": EmailCh(), "sms": SMSCh()}[ch_name].send(notif, user)
+                if ok: return ch_name
+            except Exception: continue
+        return None
+
+def should_send(notif, prefs, now):
+    spec = HasPermission() &amp; ~InQuietHours() &amp; ~GlobalDND()
+    ctx  = type("Ctx", (), {"prefs": prefs, "notif": notif, "now": now})
+    return spec.is_satisfied(ctx)
+</code></pre>
+
+<pre><code># why spec combinators (&amp;, |, ~): rule logic reads like English, composes unit-tested atoms
+# why Spec is per-user context ctx: prefs vary per user; rules don't
+# why FallbackChain LOOPS channels: if push fails, next try email, etc. — resilience
+# why `if not prefs.channels.get(ch_name, False): continue`: respect user's wishes —
+#   even if fallback reaches email, skip if user disabled email
+# why `except Exception: continue`: ONE channel failure shouldn't kill delivery
+# Break this: channel send() returns True even on silent failure → chain stops after "success"
+#   user never gets the notification</code></pre>
+
+<pre><code># Usage example
+prefs = UserPrefs(
+    allows={"mention": True, "digest": True},
+    quiet_hours=TimeRange(22, 7),
+    dnd=False,
+    channels={"push": True, "email": True, "sms": False},
+)
+user = User(email="u@x.com", phone="+91...", device_token="abc")
+notif = Notification(type="mention", title="@sanheen tagged you")
+
+now = datetime(2026, 4, 19, 14, 30)    # 2:30 PM IST
+if should_send(notif, prefs, now):
+    chain = FallbackChain(["push", "email", "sms"])
+    delivered_via = chain.deliver(notif, user, prefs)
+    print("delivered via", delivered_via)   # "push" if device online
+
+# Quiet hours case
+now = datetime(2026, 4, 19, 23, 0)     # 11:00 PM
+should_send(notif, prefs, now)          # False → InQuietHours satisfied → ~InQuietHours False</code></pre>
+
+    <div class="diagram">
+<pre>
+Spec tree for send rule:
+                 AndSpec
+                /       \
+          AndSpec        Not(GlobalDND)
+          /     \
+   HasPermission Not(InQuietHours)
+
+Evaluation with ctx={prefs, notif@14:30, dnd=false}:
+ HasPermission.is_satisfied(ctx)     → prefs.allows["mention"] = True
+ InQuietHours.is_satisfied(ctx)      → 14:30 not in [22,7) → False
+ Not.is_satisfied(ctx)                → !False = True
+ AndSpec returns True AND True        → True
+ GlobalDND.is_satisfied(ctx)          → prefs.dnd = False
+ Not.is_satisfied                     → True
+ Outer AndSpec                        → True AND True = True ✓
+
+FallbackChain.deliver:
+  channels=["push", "email", "sms"]
+  push: enabled? yes → PushCh.send(notif, user)
+      device_token valid → gateway.push(...) → True
+      return "push"                                          ← DONE
+  (email and sms never tried)
+
+Failure path (device offline):
+  push: enabled, send() raises ConnectionError → except → continue
+  email: enabled → EmailCh.send() → SMTP success → return "email"
+  sms: not tried (already delivered)</pre>
+    </div>
+
+    <div class="callout danger">
+      <div class="callout-title">How this breaks in production</div>
+      <ul>
+        <li><strong>Quiet hours timezone:</strong> user travels; quiet hours stored in their HOME timezone but notifications arrive in UTC → midnight in London is not quiet for them in Tokyo. <em>Why</em>: tz mismatch. Fix: store TZ with quiet hours; convert before comparing.</li>
+        <li><strong>Digest lost on pref change:</strong> user disables digest during buffering window — pending digest items orphaned. <em>Why</em>: observer doesn't flush before change. Fix: finalize in-flight digest on pref change.</li>
+        <li><strong>All channels fail:</strong> push offline, email bounced, sms blocked → silent drop. <em>Why</em>: no DLQ. Fix: deliver() returns None → enqueue to retry-later store with exponential backoff.</li>
+        <li><strong>Critical alert suppressed:</strong> on-call paging during DND → ignored. <em>Why</em>: DND absolute. Fix: notif.priority = "critical" bypasses quiet_hours + dnd specs.</li>
+      </ul>
+    </div>
+
+    <div class="callout patterns">
+      <strong>Patterns:</strong> <em>Specification</em> (composable rules), <em>Strategy</em> (channel), <em>Chain of Responsibility</em> (fallback), <em>Observer</em> (prefs change).<br>
+      <strong>Edge cases:</strong> timezone on quiet hours (user travels), digest flush at exactly quiet-hour end, channel fallback when email also fails (dead-letter), preference change mid-delivery, DND override for critical alerts (on-call).<br>
+      <strong>Extensions:</strong> ML-based quiet hour prediction, per-workspace defaults that user inherits, A/B test on channel effectiveness, user consent audit log (GDPR).
+    </div>
+
+    <h2>10. Rate Limiter — Multi-Algorithm (Razorpay, PhonePe, Stripe-like)</h2>
+
+    <div class="callout">
+      <div class="callout-title">How the pieces talk (decorating an endpoint)</div>
+      <pre>
+  1. App startup: algo = TokenBucket(capacity=10, refill_per_sec=5)
+  2. @limit(algo=algo, key_fn=lambda req: req.user_id) decorates api()
+  3. wrapper(req) called on every incoming request
+  4. key_fn(req) extracts bucket key ("user:42")
+  5. algo.acquire("user:42") → Decision(allowed, remaining, retry_after)
+  6. TokenBucket: lock → refill since last_ts → try take 1 token
+  7. If allowed=False → return {"status": 429, "Retry-After": X} IMMEDIATELY
+  8. If allowed → call fn(req) → response; attach X-RateLimit-Remaining header
+  9. Distributed mode: algo is a thin wrapper over Redis Lua script (atomic check+update)
+ 10. Swap algorithms (TokenBucket → SlidingWindowCounter) by passing a different instance</pre>
+    </div>
+
+    <div class="callout">
+      <strong>Requirements</strong>
+      <ul>
+        <li>Pluggable algorithms: token bucket, leaky bucket, fixed window, sliding window counter, sliding window log.</li>
+        <li>Dimensions: per-user, per-IP, per-API-key, per-endpoint.</li>
+        <li>Distributed across hosts (Redis).</li>
+        <li>Decorator to wrap any endpoint.</li>
+        <li>Return informative headers (X-RateLimit-Remaining, Retry-After).</li>
+      </ul>
+    </div>
+
+    <p><strong>Entities:</strong> <code>RateLimiter</code>, <code>Algorithm</code>, <code>KeyExtractor</code>, <code>RedisStore</code>, <code>Decision</code>.</p>
+
+    <div class="diagram">
+<pre>
+ @limit(algo=TokenBucket(10, 5), key=lambda req: req.user_id)
+ def api():
+     ...
+           │
+           └── limiter.check(key) -&gt; Decision(allowed, remaining, retry_after)
+                     │
+                     └── Algorithm.acquire()  [Strategy]
+                           ├── TokenBucket   (local or Lua-backed Redis)
+                           ├── LeakyBucket
+                           ├── FixedWindow
+                           ├── SlidingWindowCounter
+                           └── SlidingWindowLog
+</pre>
+    </div>
+
+    <h3>Five algorithms side by side</h3>
+<pre><code>import time, collections, threading
+
+class Decision:
+    __slots__ = ("allowed", "remaining", "retry_after")
+    def __init__(self, allowed, remaining=0, retry_after=0.0):
+        self.allowed, self.remaining, self.retry_after = allowed, remaining, retry_after
+
+class Algorithm:
+    def acquire(self, key) -&gt; Decision: ...
+
+class TokenBucket(Algorithm):
+    def __init__(self, capacity, refill_per_sec):
+        self.cap, self.rate = capacity, refill_per_sec
+        self.state = {}              # key -&gt; (tokens, last_ts)
+        self.lock = threading.Lock()
+    def acquire(self, key):
+        with self.lock:
+            now = time.time(); tokens, last = self.state.get(key, (self.cap, now))
+            tokens = min(self.cap, tokens + (now - last) * self.rate)
+            if tokens &gt;= 1:
+                self.state[key] = (tokens - 1, now)
+                return Decision(True, int(tokens - 1))
+            self.state[key] = (tokens, now)
+            return Decision(False, 0, (1 - tokens) / self.rate)
+
+class LeakyBucket(Algorithm):
+    def __init__(self, capacity, leak_per_sec):
+        self.cap, self.rate = capacity, leak_per_sec
+        self.state = {}              # key -&gt; (water, last_ts)
+        self.lock = threading.Lock()
+    def acquire(self, key):
+        with self.lock:
+            now = time.time(); water, last = self.state.get(key, (0, now))
+            water = max(0, water - (now - last) * self.rate)
+            if water + 1 &lt;= self.cap:
+                self.state[key] = (water + 1, now)
+                return Decision(True, int(self.cap - water - 1))
+            self.state[key] = (water, now)
+            return Decision(False, 0, (water + 1 - self.cap) / self.rate)
+
+class FixedWindow(Algorithm):
+    def __init__(self, limit, window_sec):
+        self.limit, self.win = limit, window_sec
+        self.state = {}              # key -&gt; (window_id, count)
+        self.lock = threading.Lock()
+    def acquire(self, key):
+        with self.lock:
+            wid = int(time.time() // self.win)
+            cur_wid, count = self.state.get(key, (wid, 0))
+            if cur_wid != wid: count = 0
+            if count &lt; self.limit:
+                self.state[key] = (wid, count + 1)
+                return Decision(True, self.limit - count - 1)
+            return Decision(False, 0, self.win - (time.time() % self.win))
+
+class SlidingWindowLog(Algorithm):
+    def __init__(self, limit, window_sec):
+        self.limit, self.win = limit, window_sec
+        self.state: dict = collections.defaultdict(collections.deque)
+        self.lock = threading.Lock()
+    def acquire(self, key):
+        with self.lock:
+            now = time.time(); dq = self.state[key]
+            while dq and dq[0] &lt;= now - self.win: dq.popleft()
+            if len(dq) &lt; self.limit:
+                dq.append(now)
+                return Decision(True, self.limit - len(dq))
+            return Decision(False, 0, dq[0] + self.win - now)
+
+class SlidingWindowCounter(Algorithm):
+    """Approximate: weighted blend of current + previous fixed window."""
+    def __init__(self, limit, window_sec):
+        self.limit, self.win = limit, window_sec
+        self.state = {}              # key -&gt; (wid, prev_count, cur_count)
+        self.lock = threading.Lock()
+    def acquire(self, key):
+        with self.lock:
+            now = time.time(); wid = int(now // self.win); frac = (now % self.win) / self.win
+            cwid, prev, cur = self.state.get(key, (wid, 0, 0))
+            if cwid != wid:
+                prev = cur if cwid == wid - 1 else 0; cur = 0; cwid = wid
+            est = prev * (1 - frac) + cur
+            if est &lt; self.limit:
+                cur += 1; self.state[key] = (cwid, prev, cur)
+                return Decision(True, int(self.limit - est - 1))
+            self.state[key] = (cwid, prev, cur)
+            return Decision(False, 0, (1 - frac) * self.win)
+</code></pre>
+
+<pre><code># why TokenBucket refills continuously: allows bursts up to capacity, smooths long-term rate
+# why LeakyBucket FILLS up (water): serves as a shaper — strict constant output rate
+# why FixedWindow has boundary problem: 2× limit possible across window edges (see diagram)
+# why SlidingWindowLog is exact but expensive: stores EVERY timestamp — O(N) memory per key
+# why SlidingWindowCounter interpolates: approximate (~99% accurate), O(1) memory
+# why self.lock around all state: check-and-update must be atomic under contention
+# Break this: omit lock → 10 threads each see tokens≥1, all consume → 10× over limit</code></pre>
+
+<pre><code># Usage example — four algorithms side-by-side
+tb = TokenBucket(capacity=5, refill_per_sec=1)
+# t=0: bucket full (5 tokens)
+for i in range(7):
+    d = tb.acquire("user-42")
+    print(f"t={i}: allowed={d.allowed} remaining={d.remaining}")
+# t=0: allowed=True  remaining=4
+# t=1: allowed=True  remaining=3    ... etc. (assume no time passes)
+# t=5: allowed=False remaining=0  retry_after≈1.0
+
+lb = LeakyBucket(capacity=5, leak_per_sec=2)
+# water starts at 0; adds 1 per call; leaks 2/sec
+# allow: water+1 ≤ capacity
+
+fw = FixedWindow(limit=3, window_sec=60)
+# First 3 calls in the minute: allowed
+# 4th call: 429 until next minute
+
+swl = SlidingWindowLog(limit=3, window_sec=60)
+# At t=0 ack 3 calls; at t=30 log = [0, 0, 0]
+# 4th call at t=30: len &gt;= 3 → 429, retry_after = 0+60-30 = 30s</code></pre>
+
+    <div class="diagram">
+<pre>
+Token Bucket trace (cap=5, refill=1/sec):
+ t=0.0  first call: state miss → (tokens=5, last=0)
+        tokens = min(5, 5 + 0*1) = 5; take 1 → (4, 0.0)
+        Decision(True, 4)
+ t=0.5  call: tokens = min(5, 4 + 0.5*1) = 4.5; take 1 → (3.5, 0.5)
+ t=0.6  call: tokens = min(5, 3.5 + 0.1) = 3.6; take 1 → (2.6, 0.6)
+ ...bursts up to 5 back-to-back, then throttles at refill rate
+
+Fixed Window flaw at boundaries (limit=5 per minute):
+ 0:00:50 to 0:00:59 — 5 requests (window_id=0)
+ 0:01:00 to 0:01:05 — 5 requests (window_id=1) — ALL allowed
+ → 10 requests in 15 seconds, twice the intended rate
+
+Sliding Window Counter smooths it:
+ 0:01:00 frac=0.0  est = prev * 1.0 + cur * 0.0 = 5 → LIMIT REACHED
+ 0:01:30 frac=0.5  est = prev * 0.5 + cur = 2.5 + cur; still bounded
+
+Decision flow through decorator:
+  wrapper(req)
+    d = algo.acquire(key_fn(req))   # "user-42" + TokenBucket
+    d.allowed = False
+    return {"status":429, "Retry-After": 1.2}    # immediate 429
+  vs:
+    d.allowed = True, d.remaining=3
+    resp = fn(req)
+    resp["X-RateLimit-Remaining"] = 3</pre>
+    </div>
+
+    <div class="callout danger">
+      <div class="callout-title">How this breaks in production</div>
+      <ul>
+        <li><strong>Distributed inconsistency:</strong> in-memory state across 3 hosts → each allows 10 → 30 per user. <em>Why</em>: local state. Fix: Redis-backed (Lua script ensures atomic check+update).</li>
+        <li><strong>Clock skew in Lua:</strong> pass client time as ARGV → attacker sends now=0 → unlimited tokens. <em>Why</em>: trust client. Fix: use <code>redis.call('TIME')</code> server-side.</li>
+        <li><strong>Key cardinality explosion:</strong> per-IP limiting during a DDoS → millions of keys, Redis OOM. <em>Why</em>: unbounded keyspace. Fix: EXPIRE on keys; bucket IPs into /24 prefixes.</li>
+        <li><strong>Rate-limited retries:</strong> client gets 429, retries in 100ms, retries again, hits same 429 → burn your CPU printing 429s. <em>Why</em>: no Retry-After respect. Fix: honor Retry-After; circuit-break the client.</li>
+      </ul>
+    </div>
+
+    <h3>Distributed token bucket — Redis Lua script</h3>
+<pre><code>LUA_TOKEN_BUCKET = """
+local key = KEYS[1]
+local cap = tonumber(ARGV[1])
+local rate= tonumber(ARGV[2])
+local now = tonumber(ARGV[3])
+local data = redis.call('HMGET', key, 'tokens', 'ts')
+local tokens = tonumber(data[1]) or cap
+local ts     = tonumber(data[2]) or now
+tokens = math.min(cap, tokens + (now - ts) * rate)
+local allowed = 0
+if tokens &gt;= 1 then
+  tokens = tokens - 1; allowed = 1
+end
+redis.call('HMSET', key, 'tokens', tokens, 'ts', now)
+redis.call('EXPIRE', key, math.ceil(cap / rate) + 1)
+return {allowed, tokens}
+"""
+
+def limit(algo, key_fn):
+    def deco(fn):
+        def wrapper(req, *a, **kw):
+            d = algo.acquire(key_fn(req))
+            if not d.allowed:
+                return {"status": 429, "Retry-After": round(d.retry_after, 2)}
+            resp = fn(req, *a, **kw)
+            resp["X-RateLimit-Remaining"] = d.remaining
+            return resp
+        return wrapper
+    return deco
+</code></pre>
+
+<pre><code># why Lua script atomic: HMGET + compute + HMSET happen as one Redis op — no races across shards
+# why ARGV[3] is now (passed in): Lua has `redis.call('TIME')` too, but tests want deterministic clock
+# why EXPIRE math.ceil(cap/rate)+1: auto-cleanup idle keys (no traffic → bucket expires)
+# why the decorator takes algo as a param: Strategy — one decorator, any algorithm
+# Break this: Lua script updated mid-flight but old script cached on some Redis nodes
+#   → inconsistent limits per node → unfair user experience</code></pre>
+
+<pre><code># Usage example
+limiter_per_user = TokenBucket(capacity=100, refill_per_sec=10)
+limiter_per_ip   = FixedWindow(limit=1000, window_sec=60)
+
+@limit(algo=limiter_per_user, key_fn=lambda r: f"user:{r.user_id}")
+@limit(algo=limiter_per_ip,   key_fn=lambda r: f"ip:{r.ip}")
+def search(req):
+    return {"status": 200, "body": search_index.query(req.q)}
+
+# Two limits in series: user quota AND global IP quota
+# First acquire is user's TokenBucket (inner decorator runs last in Python)
+# If both allow → search executes
+# If either denies → 429 with appropriate Retry-After</code></pre>
+
+    <div class="callout patterns">
+      <strong>Patterns:</strong> <em>Strategy</em> (algorithm), <em>Decorator</em> (endpoint wrap), <em>Template Method</em> (acquire skeleton), <em>Singleton</em> (shared limiter), <em>Proxy</em> (Redis-backed remote algorithm).<br>
+      <strong>Edge cases:</strong> clock skew in distributed mode (use server time inside Lua), thundering herd at window boundary (fixed window problem — prefer sliding), burst of 2 &times; limit across boundary (fixed window flaw), limit changes at runtime (hot config), key cardinality explosion (per-IP DDoS).<br>
+      <strong>Extensions:</strong> tenant-tiered limits (free/pro/enterprise), adaptive limits via queue length, concurrency limiter (semaphore variant), cost-based (weighted requests), global vs per-region pools.
+    </div>
+
+    <h2>Interview Strategy</h2>
+
+    <h3>Opening 5 minutes — clarify requirements</h3>
+    <div class="callout good">
+      <p><strong>Five questions to ask for ANY LLD problem:</strong></p>
+      <ol>
+        <li><strong>Scale:</strong> how many users, requests per second, data size? (drives choice of data structures — in-memory vs. persistent, dict vs. trie.)</li>
+        <li><strong>Read vs write ratio:</strong> tells me where to cache and what to index.</li>
+        <li><strong>Concurrency model:</strong> single-threaded, multi-threaded, or distributed? (Thread safety is the number one thing juniors miss.)</li>
+        <li><strong>Persistence:</strong> does state survive a restart? crash recovery? (changes everything — DB, WAL, snapshots.)</li>
+        <li><strong>What is out of scope?</strong> Say this out loud so the interviewer and you agree (e.g. &quot;I will not implement authentication today&quot;).</li>
+      </ol>
+    </div>
+
+    <h3>Middle 30 minutes — entities, diagram, code</h3>
+    <ol>
+      <li><strong>List the nouns</strong> in the problem statement. Those are your classes (usually 5-8).</li>
+      <li><strong>Draw the class diagram on the whiteboard</strong> — boxes with attributes and methods, arrows for "has-a" and "is-a". Point to it while you talk.</li>
+      <li><strong>Identify patterns</strong>: state machine? strategy? observer? Write one sentence justifying each — do not just name-drop.</li>
+      <li><strong>Code the hot path first</strong>: if it's a cache, write <code>get/set</code> before stats. If it's an order system, write <code>placeOrder</code> before ratings.</li>
+      <li><strong>Stub what you don't need yet</strong>: <code>def payment_gateway(): pass  # pluggable</code> — interviewer will appreciate that you know where extension points go.</li>
+    </ol>
+
+    <h3>Closing 10 minutes — edge cases, extensibility, concurrency</h3>
+    <ul>
+      <li>Walk through 3-4 <strong>edge cases</strong> proactively (don't wait to be asked).</li>
+      <li>Point at two places your design would <strong>extend cleanly</strong> — interviewer now knows you designed for change, not just today.</li>
+      <li>Talk through <strong>concurrency</strong>: which locks, which data races, which operations need to be atomic. If you chose immutable objects or single-writer design, say so.</li>
+    </ul>
+
+    <h3>Red flags interviewers watch for</h3>
+    <table>
+      <tr><th>Red flag</th><th>What it signals</th></tr>
+      <tr><td>Coding before clarifying</td><td>Builds the wrong thing; cannot ship real features.</td></tr>
+      <tr><td>Premature optimisation</td><td>Reaches for B-trees when a dict would do; over-engineers.</td></tr>
+      <tr><td>Ten patterns on a 30-line problem</td><td>Has read the GoF book, cannot apply judgement.</td></tr>
+      <tr><td>No thread-safety story</td><td>Has never maintained a production service.</td></tr>
+      <tr><td>No edge cases until asked</td><td>Happy-path-only thinking; will miss incidents in prod.</td></tr>
+      <tr><td>Cannot explain trade-offs</td><td>Copy-pasted a solution; doesn't understand why.</td></tr>
+    </table>
+
+    <h3>Green flags that land offers</h3>
+    <table>
+      <tr><th>Green flag</th><th>Why it works</th></tr>
+      <tr><td>Asks 3-5 clarifying questions first</td><td>Shows engineering discipline.</td></tr>
+      <tr><td>Starts with the simplest version, then iterates</td><td>Proves you can ship v1 and evolve.</td></tr>
+      <tr><td>Explicitly declares what's out of scope</td><td>Manages scope — senior engineer trait.</td></tr>
+      <tr><td>Names tradeoffs when picking a pattern</td><td>"I used Strategy here instead of inheritance because eviction policy may change per deploy."</td></tr>
+      <tr><td>Writes testable code (pure functions, DI)</td><td>Will not block their team on untestable messes.</td></tr>
+      <tr><td>Volunteers edge cases &amp; concurrency without prompting</td><td>Thinks like an on-call engineer.</td></tr>
+    </table>
+
+    <div class="callout intro">
+      <p><strong>Practice protocol for this chapter:</strong> pick one problem per day, set a 45-minute timer, code it from scratch in Python without looking at this file, then diff your solution against the chapter. Within 10 problems you will have the machine-coding round completely de-risked for any of the listed companies.</p>
+    </div>
+
+    <div class="chapter-nav">
+      <a href="10-modern-patterns.html"><div class="label">← Previous</div><div class="title">Chapter 10: Modern Patterns</div></a>
+      <a class="next" href="../hld/index.html"><div class="label">Next →</div><div class="title">Book II: HLD</div></a>
+    </div>
+  </main>
+</div>
+<script src="../assets/js/nav.js"></script>
+</body>
+</html>

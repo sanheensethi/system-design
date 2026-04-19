@@ -1,0 +1,1065 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Modern 2026 Problems — Book II · HLD</title>
+<link rel="stylesheet" href="../assets/css/style.css">
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">System Design Books</div>
+    <div class="brand-sub">by Sanheen · Progressive Learning</div>
+    <div class="nav-section">
+      <h3>Home</h3>
+      <a href="../index.html">Overview</a>
+    </div>
+    <div class="nav-section">
+      <h3>Book I — Low Level Design</h3>
+      <a href="../lld/index.html">LLD Index</a>
+    </div>
+    <div class="nav-section">
+      <h3>Book II — High Level Design</h3>
+      <a href="index.html">HLD Index</a>
+      <a href="01-foundations.html">1. Foundations & Capacity</a>
+      <a href="02-building-blocks.html">2. Building Blocks</a>
+      <a href="03-basic-systems.html">3. Basic Systems</a>
+      <a href="04-intermediate.html">4. Intermediate Systems</a>
+      <a href="05-advanced.html">5. Advanced Systems</a>
+      <a href="06-very-high-scale.html">6. Very High Scale</a>
+      <a href="07-war-room.html">7. War Room Scenarios</a>
+      <a href="07b-war-room-extra.html">7b. War Room Extras</a>
+      <a href="08-real-architectures.html">8. Real Architectures</a>
+      <a href="09-modern-patterns.html">9. Modern Architecture Patterns (2026)</a>
+      <a href="10-modern-problems.html">10. Modern 2026 Problems</a>
+    </div>
+    <div class="nav-section">
+      <h3>Book III — AI System Design</h3>
+      <a href="../ai/index.html">AI Index</a>
+    </div>
+  </aside>
+  <main class="main">
+    <div class="breadcrumb"><a href="../index.html">Home</a> / <a href="index.html">Book II · HLD</a> / Chapter 10</div>
+    <h1>Chapter 10: Modern 2026 Problems</h1>
+
+    <div class="callout">
+      <strong>Why this chapter exists.</strong> The classic "design Twitter / URL shortener / news feed" problems still show up, but in 2026 FAANG+ interviews a new class of questions dominates: real-time collaboration, live video, AI-native recommenders, global IoT, and low-latency feature flags. These problems build on Chapter 9's modern patterns (edge, CRDT, vector search, streaming) and on Book III's AI system design. Each system below is solved with: functional reqs, capacity math, architecture diagram, 2-3 deep dives on the <em>hardest</em> pieces, a tradeoff table, and who actually built it in production.
+    </div>
+
+    <div class="callout info">
+      <strong>How to use this chapter.</strong> Don't memorize. For each system, internalize the <em>one idea</em> that makes it hard. Meet is "how do I route N×N video streams cheaply" → SFU. Figma is "how do two people edit the same rectangle offline" → CRDT. TikTok is "how do I pick 10 videos from 1 billion in 200ms" → two-tower retrieval + ranker. If you grasp the single defining constraint, the rest of the architecture follows.
+    </div>
+
+    <h2>1. Google Meet / Zoom — Real-time Video Conferencing</h2>
+
+    <h3>Functional Requirements</h3>
+    <ul>
+      <li>1-on-1 and group video calls up to ~1000 participants per meeting</li>
+      <li>Audio, video, screen share, chat, reactions</li>
+      <li>Sub-200ms end-to-end latency for conversational flow</li>
+      <li>Recording to cloud, live captions, background blur, noise suppression</li>
+      <li>Works on Chrome, mobile apps, dial-in PSTN</li>
+    </ul>
+
+    <h3>Scale Targets &amp; Capacity Math</h3>
+    <div class="callout stat">
+      <strong>Zoom-scale numbers (2026):</strong><br>
+      10M concurrent participants, 100K concurrent meetings, avg 10 people/meeting, peak 300M minutes/day.
+    </div>
+
+    <pre><code>Bandwidth per participant:
+  - 720p video upstream  = 1.5 Mbps
+  - 720p video downstream = 1.5 Mbps × (N-1) other participants
+  - audio  = 50 kbps each direction
+
+For a 10-person meeting, each client:
+  upload   = 1.5 Mbps (one stream)
+  download = 9 × 1.5 Mbps = 13.5 Mbps   (if SFU forwards all)
+
+Total egress per SFU server (handles say 2000 streams):
+  2000 × 1.5 Mbps = 3 Gbps per box
+
+10M concurrent users × 1.5 Mbps upstream = 15 Tbps aggregate upload
+Downstream is roughly (N-1)× that = ~135 Tbps aggregate
+→ requires hundreds of PoPs globally, not a single datacenter.
+
+Storage for recording:
+  avg meeting 30 min × 1 GB/hour (720p H.264) = 500 MB/meeting
+  100K meetings/day recorded × 500 MB = 50 TB/day = ~18 PB/year</code></pre>
+
+    <h3>Core Design Decisions</h3>
+
+    <h4>SFU vs MCU vs Mesh</h4>
+    <table>
+      <tr><th>Topology</th><th>How it works</th><th>CPU cost</th><th>Bandwidth cost</th><th>Verdict</th></tr>
+      <tr><td>Mesh (P2P)</td><td>Each client sends to every other client directly</td><td>Low on server (zero)</td><td>O(N²) on clients — kills mobile</td><td>Only 1-on-1 or ≤4 people</td></tr>
+      <tr><td>MCU (mixer)</td><td>Server decodes all streams, composites one video, encodes, sends one stream back</td><td>Extreme — transcoding per meeting</td><td>O(N) per client</td><td>Dead — too expensive at scale</td></tr>
+      <tr><td><strong>SFU (forwarder)</strong></td><td>Server receives each stream once, forwards it to other participants without transcoding</td><td>Low — just packet routing</td><td>O(N) per client, O(N²) server egress</td><td><strong>Industry standard</strong> (Meet, Zoom, Teams, Discord)</td></tr>
+    </table>
+
+    <div class="callout success">
+      <strong>Why SFU wins.</strong> Transcoding 1080p is ~2 vCPU-seconds per second of video. MCU's N-person meeting = N transcodes per meeting = $$$. SFU just forwards packets, so one commodity server handles thousands of streams. The tradeoff is client-side CPU (has to decode N streams) but modern devices handle this fine.
+    </div>
+
+    <h4>Simulcast &amp; SVC</h4>
+    <p>The sender doesn't know which resolution each receiver wants (mobile on LTE wants 180p; desktop on fiber wants 1080p). Two solutions:</p>
+
+    <ul>
+      <li><strong>Simulcast:</strong> sender encodes the <em>same</em> video at 3 bitrates simultaneously (e.g., 180p/360p/720p) and sends all three to the SFU. SFU picks which layer to forward per receiver based on network conditions. Upload bandwidth ~2× a single stream. Used by Zoom, Meet.</li>
+      <li><strong>SVC (Scalable Video Coding, H.264/SVC or VP9/AV1):</strong> one bitstream with embedded layers. SFU drops packets to downscale. More efficient upload, but encoder complexity is higher. Used by Teams, increasingly Meet.</li>
+    </ul>
+
+    <h3>Architecture Diagram</h3>
+
+    <div class="diagram"><pre>
+                         ┌───────────────────────┐
+                         │  Signaling Service    │
+                         │  (WebSocket, room     │
+                         │   create/join, SDP    │
+                         │   exchange, ICE)      │
+                         └──────────┬────────────┘
+                                    │
+       ┌────────────────────────────┼────────────────────────────┐
+       │                            │                            │
+  Participant A                Participant B                Participant C
+   (Chrome)                     (iOS app)                    (dial-in PSTN)
+       │   ▲                         │   ▲                         │   ▲
+       │   │ DTLS-SRTP (encrypted    │   │                         │   │
+       │   │  media over UDP)        │   │                         │   │
+       ▼   │                         ▼   │                         ▼   │
+  ┌────────────────── GLOBAL POP ───────────────────┐         ┌──────────────┐
+  │  STUN/TURN  ←(NAT traversal)   SFU Cluster      │ ◄─────► │ PSTN Gateway │
+  │                                ─ forwards pkts  │         │ (SIP ↔ SRTP) │
+  │                                ─ simulcast pick │         └──────────────┘
+  │                                ─ bandwidth est. │
+  └───────┬─────────────────────────────────────────┘
+          │ (recording fork)
+          ▼
+  ┌─────────────────┐    ┌──────────────────┐    ┌──────────────────────┐
+  │ Recording Mixer │ →  │ Object Storage   │ →  │ Post-process:        │
+  │ (compose + H264)│    │ (GCS / S3)       │    │  - live captions (AI)│
+  └─────────────────┘    └──────────────────┘    │  - noise suppress    │
+                                                  │  - background blur   │
+                                                  └──────────────────────┘
+    </pre></div>
+
+    <h3>Deep Dive 1 — TURN/STUN &amp; NAT Traversal</h3>
+    <p>~25% of users are behind symmetric NATs where direct P2P fails. Flow:</p>
+    <ol>
+      <li><strong>STUN:</strong> client asks "what's my public IP?" — works for ~75% of NATs (full cone, restricted cone, port-restricted).</li>
+      <li><strong>TURN:</strong> for symmetric NATs, the TURN server relays media. This means the server sees encrypted traffic and spends bandwidth — TURN boxes are the most expensive part of the fleet.</li>
+      <li><strong>ICE:</strong> tries candidates in order (host → server-reflexive → relay). First to succeed wins.</li>
+    </ol>
+
+    <h3>Deep Dive 2 — Live Captions Pipeline</h3>
+    <div class="diagram"><pre>
+  audio stream (Opus 20ms frames)
+        │
+        ▼
+  ┌───────────────┐   ┌──────────────────┐   ┌─────────────────┐
+  │ VAD (voice    │→  │ Streaming ASR    │→  │ Punctuation +   │→  to all participants
+  │ activity det.)│   │ (Whisper-online/ │   │ diarization     │    via the signaling
+  │ 20ms windows  │   │  Conformer, 300ms│   │ (speaker ID)    │    channel as text
+  └───────────────┘   │  chunks)         │   └─────────────────┘
+                      └──────────────────┘
+  Latency budget: 500ms chunk + 200ms ASR + 100ms fan-out = 800ms captions</pre></div>
+
+    <h3>Deep Dive 3 — Bandwidth Estimation (BWE) + Congestion Control</h3>
+    <p>Networks change constantly. The SFU and client run <strong>GCC (Google Congestion Control)</strong> or the newer <strong>SCReAM</strong>: measure packet inter-arrival jitter, estimate available bandwidth, instruct the sender to downswitch simulcast layer (720p → 360p) when congestion rises. This is <em>the</em> secret sauce for "Zoom just works on hotel wifi."</p>
+
+    <h3>Tradeoffs</h3>
+    <table>
+      <tr><th>Choice</th><th>Pro</th><th>Con</th></tr>
+      <tr><td>UDP + SRTP</td><td>Low latency, tolerates packet loss via FEC</td><td>Firewalls block — need TURN/TCP fallback</td></tr>
+      <tr><td>SFU not MCU</td><td>10× cheaper CPU</td><td>Client decodes N streams</td></tr>
+      <tr><td>Simulcast</td><td>Adapts to heterogeneous receivers</td><td>2-3× upload bandwidth</td></tr>
+    </table>
+
+    <div class="callout info">
+      <strong>Who built this.</strong> Google Meet (WebRTC, Google's own SFU "Pacer"), Zoom (proprietary SDK, own UDP protocol not WebRTC until 2023), Teams (built on Skype infrastructure), Discord (uses WebRTC + custom SFUs written in Elixir for audio, Rust for video), Livekit (open-source SFU — read their code).
+    </div>
+
+    <h2>2. Figma — Real-time Collaborative Design</h2>
+
+    <h3>Functional Requirements</h3>
+    <ul>
+      <li>Multiple users edit same design file simultaneously, see each other's cursors live</li>
+      <li>Offline editing merges cleanly when reconnecting</li>
+      <li>Unlimited version history + branching (like Git for designs)</li>
+      <li>Large files: 10,000+ layers, vector + raster, rendered in browser at 60fps</li>
+      <li>Comments, components, design tokens</li>
+    </ul>
+
+    <h3>Scale Targets</h3>
+    <pre><code>4M DAU, avg file size 20 MB, 500M files stored
+Peak concurrent editors on a hot file: 50 (brainstorming session)
+Cursor updates: 20 Hz × 50 users = 1000 msg/s per file (trivial)
+Edit ops: ~5 ops/s per active user × 50 = 250 ops/s per hot file
+WebSocket connections: 500K concurrent
+
+Storage:
+  500M files × 20 MB avg = 10 PB raw
+  Version history (every keystroke is an op) → append-only op log, ~100× file size
+  → ~1 PB/year new data</code></pre>
+
+    <h3>Core Design Decision — CRDT Wins Over OT</h3>
+
+    <table>
+      <tr><th></th><th>Operational Transformation (OT)</th><th>CRDT (used by Figma)</th></tr>
+      <tr><td>Core idea</td><td>Transform ops against concurrent ops so they still converge</td><td>Ops are commutative/associative by construction → apply in any order</td></tr>
+      <tr><td>Needs central server?</td><td>Yes — a single serializer resolves conflicts</td><td>No — peers can merge directly (in practice Figma still uses a server for simplicity)</td></tr>
+      <tr><td>Offline edits</td><td>Brittle — long divergences break the transform matrix</td><td>Natural — merge when reconnecting</td></tr>
+      <tr><td>Complexity</td><td>Transform function for every op pair — O(N²) cases</td><td>Pick the right CRDT type per field; proven correct</td></tr>
+      <tr><td>Used by</td><td>Google Docs (legacy), Etherpad</td><td>Figma, Notion, Linear, Apple Notes (2024+)</td></tr>
+    </table>
+
+    <div class="callout success">
+      <strong>Why CRDT won.</strong> Google Docs' OT server is a single point of failure — if it hiccups, collab freezes. CRDTs let you keep editing locally and merge lazily. Figma's insight in 2016 was that a <em>design tool</em> has a bounded vocabulary of operations (move, resize, set color, add layer) and each operation has a clean CRDT form. They built one of the first production CRDT systems outside academia.
+    </div>
+
+    <h3>Architecture</h3>
+
+    <div class="diagram"><pre>
+  Client (WASM + Canvas)          Client (WASM + Canvas)
+         │                                  │
+         │ WebSocket (binary ops)           │
+         ▼                                  ▼
+  ┌─────────────────────────────────────────────────┐
+  │  Multiplayer Service (Rust)                     │
+  │  ─ one process owns one document ("shard")      │
+  │  ─ receives ops, re-broadcasts to all peers     │
+  │  ─ applies op to in-memory CRDT state           │
+  │  ─ appends to durable op log                    │
+  └────┬──────────────────────────┬─────────────────┘
+       │                          │
+       ▼                          ▼
+  ┌──────────────┐         ┌──────────────────────┐
+  │ Op Log       │         │ Snapshot Service     │
+  │ (Kafka-like, │         │ checkpoints every    │
+  │ per-doc      │         │ N ops → S3; replay   │
+  │ partition)   │         │ from snapshot + log  │
+  └──────────────┘         └──────────────────────┘
+                                    │
+                                    ▼
+                            ┌───────────────┐
+                            │ Asset CDN     │
+                            │ (images, fonts)│
+                            └───────────────┘
+    </pre></div>
+
+    <h3>Deep Dive 1 — Figma's CRDT Model</h3>
+    <p>Figma treats a document as a <strong>tree of objects</strong>, each with properties. Each property uses the CRDT type that matches its semantics:</p>
+
+    <ul>
+      <li><strong>Last-Write-Wins Register</strong> for "simple" properties (fill color, opacity): attach Lamport timestamp, highest wins.</li>
+      <li><strong>Fractional indexing</strong> for ordering (z-order in a parent): insert between "0.3" and "0.4" → "0.35". Two users inserting at same spot get unique fractions → both survive, stable order.</li>
+      <li><strong>Parent pointer with tiebreak</strong> for tree moves: if two users drag same layer to different parents concurrently, the one with larger timestamp wins. Prevents cycles by rejecting any op that would create one during merge.</li>
+    </ul>
+
+    <div class="callout warn">
+      <strong>Figma's elegant simplification:</strong> they picked a single "server-owns-the-truth" model (not peer-to-peer CRDT) but still use CRDT ops so offline edits merge. This trades pure decentralization for simpler ops. Pragmatism beats theoretical purity.
+    </div>
+
+    <h3>Deep Dive 2 — Browser Rendering at 60fps</h3>
+    <p>Figma ships a custom rendering engine written in C++, compiled to WebAssembly. DOM/SVG would collapse at 10k layers — they render directly to WebGL. Only the visible viewport is rendered each frame; offscreen objects are culled in a quadtree. Hover testing also uses the quadtree (spatial index over bounding boxes).</p>
+
+    <h3>Tradeoffs</h3>
+    <table>
+      <tr><th>Choice</th><th>Win</th><th>Cost</th></tr>
+      <tr><td>CRDT over OT</td><td>Offline merge, simpler recovery</td><td>More bytes per op (metadata)</td></tr>
+      <tr><td>Single-writer shard per doc</td><td>Simple in-memory CRDT, strong ordering</td><td>Hot doc = hot shard; hard to scale 1 doc beyond 1 core</td></tr>
+      <tr><td>WASM renderer</td><td>60fps on huge files</td><td>Large binary (2-3 MB WASM), long cold start</td></tr>
+    </table>
+
+    <div class="callout info">
+      <strong>Who built this.</strong> Figma (foundational CRDT blog by Evan Wallace — required reading), Linear (CRDT for issue state), Automerge &amp; Yjs (open-source CRDT libraries — Yjs powers many knockoffs).
+    </div>
+
+    <h2>3. Notion — Collaborative Documents</h2>
+
+    <h3>Functional Requirements</h3>
+    <ul>
+      <li>Block-based editor: pages are trees of blocks (paragraph, heading, toggle, database, embed)</li>
+      <li>Real-time collaboration + offline</li>
+      <li>Per-block permissions, workspace sharing, guest users</li>
+      <li>Full-text search across entire workspace</li>
+      <li>AI features: summarize page, generate draft, Q&amp;A over workspace</li>
+    </ul>
+
+    <h3>Scale Targets</h3>
+    <pre><code>30M DAU, 100M workspaces, 20B blocks total
+Avg page ≈ 50 blocks, avg workspace ≈ 10K pages
+Read:write ratio ≈ 20:1
+Peak QPS ≈ 500K reads, 25K writes
+Search index: 20B docs → sharded Elasticsearch (~1000 shards)</code></pre>
+
+    <h3>Data Model — Why Blocks, Not Documents</h3>
+    <p>Unlike Google Docs (one XML blob per doc), Notion stores each block as a row in Postgres. Schema (simplified):</p>
+    <pre><code>block (
+  id UUID PK,
+  parent_id UUID,
+  type TEXT,           -- 'paragraph', 'heading', 'toggle', 'page', ...
+  properties JSONB,    -- content, annotations
+  content UUID[],      -- ordered child block ids
+  permissions JSONB,
+  version BIGINT,
+  created_at, updated_at, ...
+)</code></pre>
+
+    <div class="callout success">
+      <strong>Why blocks as rows.</strong> You can share one block, move it across pages, reference it (sync blocks), and render partial pages without loading the whole tree. A page is just "a block whose type is page." This is the single most important design decision in Notion.
+    </div>
+
+    <h3>Block-Based CRDT</h3>
+    <p>Each block's <code>properties</code> (text content) is a sequence CRDT (similar to RGA or Yjs Y.Text). The <code>content</code> array (child order) uses fractional indexing like Figma. The <code>parent_id</code> move uses a timestamp-based last-writer-wins with cycle rejection.</p>
+
+    <h3>Architecture</h3>
+
+    <div class="diagram"><pre>
+  Browser / Mobile / Desktop (Electron)
+         │
+         │ WebSocket + REST
+         ▼
+  ┌───────────────────────────┐    ┌──────────────────────┐
+  │ API Gateway               │    │ Auth / Permissions   │
+  └──────┬─────────────┬──────┘    │ (ReBAC-style graph)  │
+         │             │           └──────────────────────┘
+         ▼             ▼
+  ┌───────────────┐  ┌────────────────────┐
+  │ Block Service │  │ Realtime Service   │
+  │ (CRUD on      │  │ (WebSocket fan-out │
+  │  blocks)      │  │  of CRDT ops)      │
+  └────┬──────────┘  └────────────────────┘
+       │
+       ▼
+  ┌───────────────────────────────────────────┐
+  │ Postgres (sharded by workspace_id)        │
+  │ ─ block table (20B rows, ~2000 shards)    │
+  │ ─ Citus / Vitess-style sharding           │
+  └───────────────────────────────────────────┘
+         │ CDC
+         ▼
+  ┌──────────────────┐    ┌────────────────────┐
+  │ Kafka            │ →  │ Elasticsearch      │
+  │ (block changes)  │    │ (per-workspace idx)│
+  │                  │ →  │ Vector DB          │
+  │                  │    │ (embeddings for AI)│
+  └──────────────────┘    └────────────────────┘
+                                   │
+                                   ▼
+                          ┌────────────────────┐
+                          │ AI Service         │
+                          │ (LLM + RAG over    │
+                          │  workspace)        │
+                          └────────────────────┘
+    </pre></div>
+
+    <h3>Deep Dive — Permissions at Block Granularity</h3>
+    <p>Notion uses a <strong>graph-based permission model (ReBAC)</strong>, similar to Zanzibar. A block inherits from its parent unless it has an explicit override. To check "can user U read block B?" walk up the parent chain until you hit an explicit grant/deny. Caching is critical: materialize effective ACL in Redis keyed by <code>(user_id, block_id)</code> with invalidation on any ancestor change.</p>
+
+    <h3>Deep Dive — AI Features (Q&amp;A over Workspace)</h3>
+    <p>Every block, on write, emits a CDC event. A downstream pipeline chunks the block, embeds with OpenAI <code>text-embedding-3-large</code> or Cohere, writes to Pinecone/Weaviate. For "ask AI about my workspace," retrieve top-K chunks by cosine similarity, filter by user's ACL, pass to GPT-4o with the question. Classic RAG (Book III Ch 5).</p>
+
+    <h3>Tradeoffs</h3>
+    <table>
+      <tr><th>Choice</th><th>Pro</th><th>Con</th></tr>
+      <tr><td>Blocks as Postgres rows</td><td>Granular permissions, sync blocks, flexible</td><td>Hot pages = many row fetches → need smart batching</td></tr>
+      <tr><td>Postgres not NoSQL</td><td>Transactions, JOINs for permissions</td><td>Sharding is painful — Notion's biggest scaling challenge (famously re-sharded in 2021)</td></tr>
+    </table>
+
+    <h2>4. Slack — Real-time Messaging at Enterprise Scale</h2>
+
+    <h3>Functional Requirements</h3>
+    <ul>
+      <li>Channels, DMs, group DMs, threads, reactions, files, huddles</li>
+      <li>Presence (online / away / typing)</li>
+      <li>Message history back ~forever, full-text searchable</li>
+      <li>Notifications (desktop, mobile push, email digest)</li>
+      <li>Enterprise Grid: one customer = many workspaces under one org</li>
+      <li>Slack Connect: channels shared across two companies</li>
+    </ul>
+
+    <h3>Scale Targets</h3>
+    <pre><code>18M DAU, 200K paid orgs, 12M concurrent WebSocket connections
+Peak 500M messages/day → 5800 msg/s steady, 50K msg/s peak
+Largest org: 800K employees (Amazon, IBM)
+Largest single channel: ~1M members (announce channels)
+Search: 100B+ messages indexed</code></pre>
+
+    <h3>Core Challenge — The Fan-Out Problem</h3>
+    <p>When someone posts to a 100K-member channel, naively delivering the message requires 100K WebSocket pushes. Slack's answer:</p>
+
+    <ol>
+      <li>Client <em>subscribes</em> only to channels it currently has open (not all channels it's a member of).</li>
+      <li>For channels not open, deliver a lightweight "unread counter +1" via a separate low-priority push.</li>
+      <li>On channel open, fetch history via REST and subscribe via WebSocket.</li>
+    </ol>
+
+    <div class="callout success">
+      <strong>Key insight:</strong> the expensive fan-out isn't "deliver the message" — it's "update unread badges." Slack splits these into two paths: hot path (realtime, active subscribers only) and cold path (counter updates via batched pubsub).
+    </div>
+
+    <h3>Architecture</h3>
+
+    <div class="diagram"><pre>
+  Client ───WebSocket──► ┌──────────────────────┐
+                         │ Gateway Servers       │◄──┐
+                         │ (hold WS connections) │   │
+                         └────────┬──────────────┘   │
+                                  │ (pub/sub)        │
+                         ┌────────┴──────────┐       │
+                         │ Message Bus       │       │
+                         │ (per-channel topic│       │
+                         │  on Kafka / Redis)│       │
+                         └────────┬──────────┘       │
+     ┌────────────────────────────┼─────────────────┐│
+     ▼                            ▼                 ▼│
+  ┌─────────────┐        ┌────────────────┐   ┌──────┴──────┐
+  │ Message API │───────►│ MySQL (Vitess) │   │ Notification│
+  │ (post msg,  │        │ ─ msg storage  │   │ Service     │
+  │ edit, delete)│       │ ─ per-team DB  │   │ (push, email)│
+  └─────────────┘        └───────┬────────┘   └──────────────┘
+                                 │ CDC
+                                 ▼
+                          ┌────────────────────┐
+                          │ Elasticsearch      │
+                          │ per-team index,    │
+                          │ hot tier + cold    │
+                          └────────────────────┘</pre></div>
+
+    <h3>Deep Dive — Presence at 12M Connections</h3>
+    <p>Naive presence (every client tells the server "I'm online" every 30s) = 400K QPS just for heartbeats. Slack batches: gateway server tracks its own connected users in local memory, publishes a <em>diff</em> to a presence service every few seconds. Queries like "is Alice online?" hit a Redis cache keyed by <code>user_id → last_seen</code>. Only users with whom you share a channel trigger a presence subscription — no global presence broadcast.</p>
+
+    <h3>Deep Dive — Enterprise Grid Routing</h3>
+    <p>An Enterprise Grid is an <em>org</em> containing many <em>workspaces</em>. The data model adds <code>enterprise_id</code> above <code>team_id</code>. A user in Grid can be in N workspaces. Shared channels span teams. Sharding by <code>team_id</code> breaks shared channels — Slack's solution is to pick a "primary team" per shared channel and route all writes there, with read replicas in the other teams' shards.</p>
+
+    <h3>Tradeoffs</h3>
+    <table>
+      <tr><th>Choice</th><th>Pro</th><th>Con</th></tr>
+      <tr><td>Per-team DB shard</td><td>Tenant isolation, easy to scale linearly</td><td>Cross-team features (Connect, Grid) are hard</td></tr>
+      <tr><td>Active-subscription fan-out</td><td>Cheap even for huge channels</td><td>Complex reconnect logic</td></tr>
+    </table>
+
+    <h2>5. TikTok — Short-Video For You Page</h2>
+
+    <h3>Functional Requirements</h3>
+    <ul>
+      <li>Infinite vertical feed of 15-60 second videos, personalized</li>
+      <li>Like / comment / share / save / follow</li>
+      <li>Upload: record, edit, filters, music</li>
+      <li>Creator tools: analytics, monetization</li>
+      <li>Moderation: remove harmful content within minutes</li>
+    </ul>
+
+    <h3>Scale Targets</h3>
+    <pre><code>1.5B DAU, 100B videos watched/day (~70 per user avg)
+Uploads: 400M videos/day at peak
+Storage: each video transcoded to 5 resolutions × H.264/H.265/AV1 = 15 assets
+  avg 5 MB × 15 = 75 MB per video
+  400M/day × 75 MB = 30 PB/day new storage (hot), decays to cold
+Recommendation QPS: 100B views/day ÷ 86400s ≈ 1.2M QPS
+  but each view → 10 candidate predictions, so 12M model inferences/s
+CDN egress: 100B × 10 MB avg = 1 EB/day = ~100 Tbps sustained</code></pre>
+
+    <h3>Core Design — Two-Tower Recommender Serving Infrastructure</h3>
+
+    <div class="diagram"><pre>
+  User opens app
+     │
+     ▼
+  ┌────────────────────────────────┐
+  │ User Embedding Service         │
+  │ ─ fetch user tower output from │
+  │   feature store (precomputed)  │
+  │ ─ mix with real-time signals   │
+  │   (last 5 watches)             │
+  └──────────────┬─────────────────┘
+                 │ user_emb (256-dim)
+                 ▼
+  ┌────────────────────────────────┐
+  │ Retrieval (Candidate Gen)      │
+  │ ─ ANN search over 1B video     │
+  │   embeddings (ScaNN / HNSW)    │
+  │ ─ also: "trending near me",    │
+  │   "same creator", "music match"│
+  │ → Top 1000 candidates          │
+  └──────────────┬─────────────────┘
+                 ▼
+  ┌────────────────────────────────┐
+  │ Ranking (Heavy Model)          │
+  │ ─ DLRM / Transformer over      │
+  │   (user_feat, video_feat,      │
+  │    context_feat) pairs         │
+  │ ─ predicts P(watch, like,      │
+  │   comment, share, skip)        │
+  │ → Top 10 with utility scoring  │
+  └──────────────┬─────────────────┘
+                 ▼
+  ┌────────────────────────────────┐
+  │ Business Rules &amp; Diversity    │
+  │ ─ don't show same creator 2x   │
+  │ ─ inject ads every 4-5 videos  │
+  │ ─ safety filter                │
+  └──────────────┬─────────────────┘
+                 ▼
+            Prefetch 3 videos from CDN</pre></div>
+
+    <h3>Deep Dive — Real-time Feedback Loop</h3>
+    <p>TikTok's edge over YouTube is how <em>fast</em> signals flow back. When you skip a video at 0.5s, that event is in Kafka within 100ms, joined with video features in Flink, and updates your user embedding (at least a fast "recent activity" vector) within seconds. Your <em>next</em> pull of the feed reflects the new signal.</p>
+
+    <div class="callout info">
+      <strong>Architecture for signal velocity:</strong><br>
+      client → Kafka (ingest topic) → Flink (stateful, keyed by user_id) → feature store (Redis + parquet on S3) → next request reads the updated features. Latency from action → influence: &lt;5 seconds. Most recommenders are hours stale.
+    </div>
+
+    <h3>Deep Dive — Cold Start</h3>
+    <ul>
+      <li><strong>New user:</strong> start with location-based trending + popular templates. After ~20 watches, their embedding converges.</li>
+      <li><strong>New video:</strong> Content-based embedding (from visual + audio + caption + OCR + creator features) gives an initial position in embedding space. Traffic-shaped rollout: show to 200 random users, measure completion rate, if high → expand to 2K, then 20K, etc. This is how a creator with 0 followers can go viral in 6 hours.</li>
+    </ul>
+
+    <h3>Deep Dive — CDN Prefetching</h3>
+    <p>The user sees <em>zero</em> buffering because the client prefetches the next 3 candidate videos in the background. The API returns URLs; CDN edge POPs (400+ worldwide) serve chunks. Videos are chunked into 2-second fragments so the first fragment streams immediately while the rest downloads.</p>
+
+    <h3>Tradeoffs</h3>
+    <table>
+      <tr><th>Choice</th><th>Pro</th><th>Con</th></tr>
+      <tr><td>Two-tower retrieval + ranker</td><td>Scales to 1B candidates</td><td>Retrieval ≠ ranker objective → bias</td></tr>
+      <tr><td>Heavy client prefetch</td><td>Buttery scrolling</td><td>Wastes bandwidth on skipped videos</td></tr>
+      <tr><td>Fast signal loop</td><td>Uncanny personalization</td><td>Filter bubble / addiction concerns</td></tr>
+    </table>
+
+    <div class="callout info">
+      <strong>Who built this.</strong> ByteDance (Monolith recommender, open-sourced partially), Meta (Reels uses similar architecture on top of DLRM), YouTube Shorts (TwHIN + MLP-Mixer). See Book III Chapter 7 (Recommender Systems).
+    </div>
+
+    <h2>6. Tinder — Matching System</h2>
+
+    <h3>Functional Requirements</h3>
+    <ul>
+      <li>Show me candidate profiles nearby matching my preferences</li>
+      <li>Swipe left / right</li>
+      <li>If both swipe right → it's a match, open chat</li>
+      <li>Don't re-show a profile I've already seen</li>
+      <li>Fairness: popular people don't monopolize attention</li>
+    </ul>
+
+    <h3>Scale Targets</h3>
+    <pre><code>75M MAU, 10M DAU, 2B swipes/day, 30M matches/day
+Candidate generation QPS: 10M × 100 swipes/day / 86400 = 12K QPS
+  but each session prefetches 20 candidates → 240K candidate-fetches/s peak
+Geospatial index: ~300M active profiles</code></pre>
+
+    <h3>Core Design — Geospatial + Preference + Seen Filter</h3>
+
+    <div class="diagram"><pre>
+  Swipe session start
+       │
+       ▼
+  ┌──────────────────────┐
+  │ Geo Index (S2 cells, │  given (lat,lng,radius) → return ~5000 nearby user_ids
+  │ or Elastic geohash)  │  (2-3 level cells cover 10-50 mile radius)
+  └──────────┬───────────┘
+             ▼
+  ┌──────────────────────┐
+  │ Preference Filter    │  age ∈ [my_min, my_max], gender ∈ my_prefs,
+  │ (in-memory)          │  AND mine ∈ their prefs (mutual compatibility)
+  └──────────┬───────────┘
+             ▼
+  ┌──────────────────────┐
+  │ Seen Filter          │  subtract bloom filter of "seen in last 30 days"
+  │ (Redis bloom per user)│ plus exact hash for "matched or blocked"
+  └──────────┬───────────┘
+             ▼
+  ┌──────────────────────┐
+  │ Ranker (ML)          │  ELO-adjacent score × compatibility features
+  │ predicts P(mutual    │  → ordered queue of 20 candidates, returned to client
+  │ right-swipe)         │
+  └──────────────────────┘</pre></div>
+
+    <h3>Deep Dive — ELO-Style Desirability Without Being Evil</h3>
+    <p>Tinder famously used to compute a single "desirability score" per user, causing runaway effects. Modern systems use compatibility-based: the score is a function of <em>the pair</em>, not each individual. Features include shared interests, age proximity, distance, mutual friends on Instagram (via optional link), reciprocity history ("you tend to like people who look like X").</p>
+
+    <div class="callout warn">
+      <strong>Fairness mechanism:</strong> rate-limit how many people see any one profile per day (e.g., max 500 impressions/day for even the most popular). Forces a long-tail distribution of attention. New users get a "boost" — 100 free impressions at sign-up to bootstrap.
+    </div>
+
+    <h3>Deep Dive — Geospatial Sharding</h3>
+    <p>Partition the user table by <strong>S2 cell id</strong> at level ~10 (covers ~ a neighborhood). Users physically move, so the shard must update on location change. Secondary global index by user_id lets you find a user by ID regardless of cell. The geo query hits the S2 index, scatter-gathers across nearby cells, unions results.</p>
+
+    <h3>Tradeoffs</h3>
+    <table>
+      <tr><th>Choice</th><th>Pro</th><th>Con</th></tr>
+      <tr><td>Bloom filter for "seen"</td><td>O(1) space, very fast</td><td>False positives (rare re-appearance avoidance)</td></tr>
+      <tr><td>S2 cells</td><td>Efficient proximity queries</td><td>Rebalancing when hotspot forms (conferences)</td></tr>
+    </table>
+
+    <h2>7. Twitch — Live Streaming</h2>
+
+    <h3>Functional Requirements</h3>
+    <ul>
+      <li>Creator streams live at 1080p60; thousands of concurrent viewers</li>
+      <li>Sub-3-second latency (for chat interaction)</li>
+      <li>Live chat with emotes, subs, bits, cheers</li>
+      <li>Auto-generate VOD after stream ends</li>
+      <li>Clips, highlights, raids, mod tools</li>
+    </ul>
+
+    <h3>Scale Targets</h3>
+    <pre><code>100K concurrent streamers, 3M concurrent viewers
+Biggest single stream: 6M concurrent (world events)
+Avg viewer pulls 3 Mbps → 3M × 3 Mbps = 9 Tbps sustained egress
+Chat: 6M viewers × 1 msg/min ≈ 100K msg/s, spikes to 1M msg/s
+Ingest: 100K streams × 6 Mbps upload = 600 Gbps ingest</code></pre>
+
+    <h3>Architecture</h3>
+
+    <div class="diagram"><pre>
+  Streamer (OBS) ──RTMP/SRT──► Ingest Edge PoP ──► Origin ──► Transcoder Fleet
+                                                               (source 1080p60
+                                                                → 720p, 480p,
+                                                                  360p, 160p)
+                                                                       │
+                                                                       ▼
+                                                          ┌──────────────────────┐
+                                                          │ Packager              │
+                                                          │ (HLS / LL-HLS / CMAF) │
+                                                          └──────────┬────────────┘
+                                                                     ▼
+                                                       ┌─────────────────────────┐
+                                                       │ CDN (edge cache tier)   │
+                                                       │ 2-second CMAF segments  │
+                                                       └─────────────────────────┘
+                                                                     │
+                                                                     ▼
+                                                               Viewer client
+                                                                     │
+                                                                     ▼
+                                                            ┌───────────────┐
+                                                            │ Chat Service   │
+                                                            │ (IRC-like,     │
+                                                            │ sharded by     │
+                                                            │ channel)       │
+                                                            └───────────────┘</pre></div>
+
+    <h3>Deep Dive — Low-Latency HLS</h3>
+    <p>Traditional HLS has 20-30s latency (10s segments × 3 buffered). LL-HLS reduces to 2-4s using:</p>
+    <ul>
+      <li><strong>Partial segments</strong> — 200ms chunks within a segment, request-able before the full segment completes.</li>
+      <li><strong>Blocking playlist reloads</strong> — the server holds the HTTP request until the next part is ready, eliminating polling.</li>
+      <li><strong>HTTP/2 push</strong> or HTTP/3 to deliver the next chunk as soon as available.</li>
+    </ul>
+
+    <p>Sub-second requires WebRTC (like Meet). Twitch's 2023 "low-latency mode" is LL-HLS at ~2s; YouTube's "ultra-low latency" uses WebRTC at 700ms.</p>
+
+    <h3>Deep Dive — Chat at 1M msg/s</h3>
+    <p>Chat is sharded by channel (stream). For a stream with 6M viewers, one channel's chat can burst to 10K msg/s. Architecture:</p>
+    <ul>
+      <li>Edge WebSocket servers per region hold connections; subscribe to a Redis pub/sub channel per stream.</li>
+      <li>Publish once to Redis, Redis fans out to all subscribed servers.</li>
+      <li>For viral streams, use <strong>hierarchical pub/sub</strong>: region aggregators subscribe to origin, local servers subscribe to region → tree fan-out, not star.</li>
+      <li><strong>Slow mode</strong> and <strong>sub-only mode</strong> reduce volume by rate-limiting non-subs.</li>
+    </ul>
+
+    <h3>Deep Dive — Transcoding Ladder</h3>
+    <p>One source (6 Mbps 1080p60) is transcoded to 4 lower rungs. Cost: ~2 vCPU seconds per second of video per rung → 8 vCPU-sec per stream-second. For 100K streams: 800K vCPU sustained → giant fleet. Open-source partners (Twitch's 2022 deal with AMD) use hardware encoders (NVENC, Xilinx VCU) at ~1/10 CPU cost but limited codec flexibility.</p>
+
+    <h3>Tradeoffs</h3>
+    <table>
+      <tr><th>Choice</th><th>Pro</th><th>Con</th></tr>
+      <tr><td>LL-HLS (vs WebRTC)</td><td>Reuses CDN infrastructure</td><td>Floor ~2s latency</td></tr>
+      <tr><td>Per-channel chat shard</td><td>Scales naturally</td><td>Viral stream hotspots</td></tr>
+      <tr><td>Hardware transcoders</td><td>10× cost reduction</td><td>Locked to specific codec profiles</td></tr>
+    </table>
+
+    <h2>8. Crypto Exchange — High-Frequency Order Book</h2>
+
+    <h3>Functional Requirements</h3>
+    <ul>
+      <li>Place/cancel limit and market orders</li>
+      <li>Matching engine produces trades</li>
+      <li>Emit market data (L1 best bid/ask, L2 depth, trades) at microsecond cadence</li>
+      <li>Wallet management, deposits (on-chain confirmations), withdrawals</li>
+      <li>KYC/AML, regulatory audit trail</li>
+    </ul>
+
+    <h3>Scale Targets</h3>
+    <pre><code>Binance-scale: 100 symbols × 50K orders/s/symbol = 5M orders/s peak
+Matching latency target: &lt;100 µs p99 inside engine
+Market data out: 1M updates/s per hot symbol × 100 symbols = 100M msg/s multicast
+Trade volume: $100B/day</code></pre>
+
+    <h3>Core Design — LMAX Disruptor Pattern</h3>
+
+    <div class="callout success">
+      <strong>The defining insight.</strong> A matching engine must be deterministic (same input order → same output). Deterministic + fast = single-threaded in-memory, with everything else (persistence, risk, fan-out) happening <em>off</em> the hot path. LMAX (a UK exchange) pioneered this in 2010; Coinbase, Binance, Kraken all descend from the pattern.
+    </div>
+
+    <div class="diagram"><pre>
+  Client API ──► Risk Check ──► Ring Buffer (shared memory) ──► Matching Engine
+                                      │                           (single thread!
+                                      │                            one CPU core
+                                      │                            pinned, no locks)
+                                      ▼                                 │
+                             ┌────────────────┐                         │
+                             │ Persistence    │ ◄───────── trade output ┤
+                             │ (append log)   │                         │
+                             └────────────────┘                         │
+                                      │                                 ▼
+                                      ▼                       ┌─────────────────┐
+                             ┌────────────────┐                │ Multicast MD    │
+                             │ Replication    │                │ (UDP, FPGA-     │
+                             │ (standby w/    │                │ accelerated for │
+                             │  same log)     │                │  HFT clients)   │
+                             └────────────────┘                └─────────────────┘</pre></div>
+
+    <h3>Deep Dive — The Matching Engine Itself</h3>
+    <pre><code>// pseudo-code
+struct OrderBook {
+  bids: BTreeMap&lt;Price, Vec&lt;Order&gt;&gt;,   // highest price first
+  asks: BTreeMap&lt;Price, Vec&lt;Order&gt;&gt;,   // lowest price first
+}
+
+fn place_limit_buy(book, order):
+  loop:
+    best_ask = book.asks.first()
+    if best_ask.is_none() or order.price &lt; best_ask.price:
+      book.bids.insert(order)              // rest on book
+      return
+    trade_qty = min(order.qty, best_ask.qty)
+    emit Trade(order.id, best_ask.id, best_ask.price, trade_qty)
+    order.qty -= trade_qty
+    best_ask.qty -= trade_qty
+    if best_ask.qty == 0: book.asks.remove(best_ask)
+    if order.qty == 0: return</code></pre>
+
+    <p>Price-Time priority: at a given price level, earliest order fills first (FIFO queue). "Pro rata" matching (used in some futures) fills proportionally — different data structure.</p>
+
+    <h3>Deep Dive — Deterministic Replay</h3>
+    <p>Every order event is sequenced and appended to a log <em>before</em> matching. On crash:</p>
+    <ol>
+      <li>Start fresh engine.</li>
+      <li>Replay log from last snapshot.</li>
+      <li>Arrive at exactly the same state as before crash — because matching is deterministic.</li>
+    </ol>
+    <p>This is why regulatory audit + disaster recovery are the same mechanism. Every trade is reconstructable.</p>
+
+    <h3>Deep Dive — Market Data Multicast</h3>
+    <p>TCP's head-of-line blocking is death for market data. Exchanges use UDP multicast: publish once, all subscribers in the VLAN receive simultaneously, with sequence numbers for gap detection and a TCP "recovery" channel. Colocation customers (HFTs) plug into the same switch for single-digit microsecond latency.</p>
+
+    <h3>Tradeoffs</h3>
+    <table>
+      <tr><th>Choice</th><th>Pro</th><th>Con</th></tr>
+      <tr><td>Single-threaded engine</td><td>Deterministic, &lt;100µs</td><td>One symbol = one core max — partition by symbol for scale</td></tr>
+      <tr><td>In-memory book</td><td>Speed</td><td>Log + snapshot = recovery story</td></tr>
+      <tr><td>UDP multicast MD</td><td>Lowest latency fan-out</td><td>Requires L2 multicast network (cloud VPCs don't support → private DC)</td></tr>
+    </table>
+
+    <div class="callout info">
+      <strong>Who built this.</strong> LMAX (open-sourced the Disruptor library), NASDAQ (INET engine), Binance (proprietary C++ engine, partitioned by symbol), Coinbase (Go rewrite 2020), dYdX (StarkWare L2). See also HFT firms like Jane Street and Jump Trading whose internal architectures borrow heavily.
+    </div>
+
+    <h2>9. IoT Platform — 100 Million Devices</h2>
+
+    <h3>Functional Requirements</h3>
+    <ul>
+      <li>Device connects (MQTT over TCP/TLS, or HTTPS, or WebSocket)</li>
+      <li>Per-device authentication (X.509 cert or JWT)</li>
+      <li>Telemetry ingest: 100M devices × 1 msg/min = 1.6M msg/s</li>
+      <li>Device shadow: last-reported state + desired state, bridge for offline devices</li>
+      <li>Rules engine: run simple SQL on inbound messages, route to Kafka/Lambda/S3</li>
+      <li>OTA firmware updates with rollout staging + rollback</li>
+      <li>Edge compute: some logic runs on device (AWS Greengrass, Azure IoT Edge)</li>
+    </ul>
+
+    <h3>Scale Targets</h3>
+    <pre><code>100M devices registered, 20M concurrent MQTT connections
+Telemetry: 1.6M msg/s steady, 10M msg/s peak
+Each MQTT connection is long-lived → need connection-efficient servers
+  (Linux epoll, C10M — millions of connections per box with low idle cost)
+Ingest throughput: 1.6M × 200 bytes avg = 320 MB/s = 2.5 Gbps
+Time-series DB: retain 90 days hot, 2 years cold
+  100M devices × 1 point/min × 90 days × 200 bytes = 2.6 PB hot storage</code></pre>
+
+    <h3>Architecture</h3>
+
+    <div class="diagram"><pre>
+  Devices (100M)
+      │ MQTT/TLS (cert auth)
+      ▼
+  ┌───────────────────────────────┐
+  │ MQTT Broker Fleet (EMQX,      │
+  │ HiveMQ, or custom) — C10M     │
+  │ ─ 2000 brokers × 10K conns    │
+  │ ─ cluster-aware pub/sub bus   │
+  └───────┬───────────────────────┘
+          │ publish (telemetry)
+          ▼
+  ┌───────────────────┐  ┌─────────────────────┐
+  │ Rules Engine      │  │ Device Shadow Svc   │
+  │ (SQL-over-stream  │  │ (last state in      │
+  │  e.g., Flink SQL) │  │  DynamoDB keyed by  │
+  └────┬────┬────┬────┘  │  device_id)         │
+       │    │    │       └─────────────────────┘
+       ▼    ▼    ▼
+  ┌──────┐ ┌──────┐ ┌──────────────────┐
+  │ Lambda│ │ S3  │ │ Time-Series DB   │
+  │ (fn)  │ │     │ │ (Timestream,     │
+  └──────┘ └──────┘ │  InfluxDB,       │
+                    │  TimescaleDB)    │
+                    └──────────────────┘
+
+  ┌──────────────────────────────────────┐
+  │ OTA Update Service                   │
+  │ ─ version registry                   │
+  │ ─ cohort rollout (1% → 5% → 25%)     │
+  │ ─ rollback on error rate spike       │
+  └──────────────────────────────────────┘
+          │ target: cohort
+          ▼ (message to device via MQTT)
+       Device downloads firmware from CDN,
+       verifies signature, installs, reboots</code></pre>
+
+    <h3>Deep Dive — Device Shadow</h3>
+    <p>The shadow is a JSON document per device with three sections:</p>
+    <pre><code>{
+  "state": {
+    "reported": { "temp": 72, "fw": "1.2.3" },
+    "desired":  { "temp": 70, "fw": "1.2.4" }
+  },
+  "metadata": { ...timestamps per field... },
+  "version": 42
+}</code></pre>
+    <p>If the device is offline, the app can still write to <code>desired</code>. When the device reconnects, the broker delivers the delta between <code>reported</code> and <code>desired</code>; the device acts on it and updates <code>reported</code>. This decouples app and device lifecycles — the defining feature of IoT platforms.</p>
+
+    <h3>Deep Dive — OTA Rollout</h3>
+    <p>Firmware updates can brick millions of devices in minutes if buggy. Controls:</p>
+    <ul>
+      <li><strong>Cohort:</strong> target 1% of devices first, bucket by hash(device_id) so same device always gets same cohort.</li>
+      <li><strong>Health gate:</strong> wait N hours, query error telemetry rate; if &gt; threshold, auto-halt.</li>
+      <li><strong>Expand:</strong> 1% → 5% → 25% → 100% over days.</li>
+      <li><strong>Rollback:</strong> keep previous firmware on device (A/B partition); boot flag flip on failure detection.</li>
+      <li><strong>Signed images:</strong> device verifies RSA/ECDSA signature before flashing.</li>
+    </ul>
+
+    <h3>Deep Dive — C10M Connection Handling</h3>
+    <p>A single MQTT broker node can hold 1M+ concurrent connections if tuned: <code>epoll</code>, zero-copy, tiny per-connection state (~10KB), no per-connection thread. Tesla's fleet, for example, connects 5M cars over MQTT with ~50 broker nodes. The hard part isn't accepting connections — it's pub/sub fan-out across the cluster: use a gossip mesh or Raft-backed topic registry.</p>
+
+    <h3>Tradeoffs</h3>
+    <table>
+      <tr><th>Choice</th><th>Pro</th><th>Con</th></tr>
+      <tr><td>MQTT over HTTP</td><td>Long-lived, low overhead, QoS levels</td><td>Firewalls sometimes block port 1883/8883</td></tr>
+      <tr><td>Shadow decouples app/device</td><td>Apps work when devices are offline</td><td>Consistency headaches (who won on conflict?)</td></tr>
+      <tr><td>Cert-based auth per device</td><td>Revokable, rotatable</td><td>Cert provisioning at manufacturing time is operationally heavy</td></tr>
+    </table>
+
+    <div class="callout info">
+      <strong>Who built this.</strong> AWS IoT Core (proprietary, MQTT + AWS integrations), Azure IoT Hub, GCP IoT Core (discontinued 2023), EMQX (open source), HiveMQ, Particle.io (for makers), Tesla (custom fleet telemetry), John Deere (connected farm equipment).
+    </div>
+
+    <h2>10. Distributed Feature Flag Service (LaunchDarkly-style)</h2>
+
+    <h3>Functional Requirements</h3>
+    <ul>
+      <li>Call <code>isEnabled("new_checkout", user)</code> and get answer in &lt;1ms p99</li>
+      <li>Flag config can target users, segments, percentages, A/B test variants</li>
+      <li>Update a flag in the UI → change propagates to all SDKs in &lt;30s globally</li>
+      <li>Audit log: who changed what, when, with approval workflow</li>
+      <li>Multi-environment (dev/stage/prod), SDK in 20+ languages, identical semantics</li>
+    </ul>
+
+    <h3>Scale Targets</h3>
+    <pre><code>5000 customers, each with ~500 flags × ~1000 services running
+Flag evaluations: 50B/day globally (evaluations happen locally in SDK, so server
+  only sees subset for analytics)
+Config pushes: ~100K config changes/day, ~10 event streams × 1000 services = 10K SSE connections per customer, 50M total globally
+p99 evaluation latency: &lt;1ms (server trip would kill this — must be local)</code></pre>
+
+    <h3>Core Design — Local Evaluation with Streaming Updates</h3>
+
+    <div class="callout success">
+      <strong>The critical insight.</strong> If you call a remote API on every flag check, a page with 30 flag checks adds 30 × 5ms = 150ms. Unacceptable. So: ship the <em>rules</em> to the SDK, evaluate <em>locally</em>, stream updates when rules change.
+    </div>
+
+    <div class="diagram"><pre>
+  Dashboard UI ──► Control Plane API ──► Postgres (flag configs)
+                                              │
+                                              │ change event
+                                              ▼
+                                    ┌─────────────────────┐
+                                    │ Relay / Fan-out     │
+                                    │ (partitioned by     │
+                                    │  customer × env)    │
+                                    └──────────┬──────────┘
+                                               │ SSE / WebSocket
+                                               ▼
+                          ┌────────────────────────────────────────┐
+                          │ Edge Relay PoPs (50+ global)           │
+                          │ ─ holds SSE connections from SDKs      │
+                          │ ─ caches flag rules for customer×env   │
+                          └───────────┬────────────────────────────┘
+                                      │ SSE
+                                      ▼
+                              SDK in app process
+                              (Node/Go/Python/...)
+                              ─ keeps rules in memory
+                              ─ evaluate(flag, user) is a local
+                                function call, sub-microsecond
+                                      │
+                                      ▼
+                              Analytics events batched,
+                              flushed every 5s to server</code></pre>
+
+    <h3>Deep Dive — Deterministic Percentage Rollouts</h3>
+    <p>"Roll out to 10% of users" must mean: same 10% every time, not a fresh random 10% on each eval. Solution: <code>bucket = hash(user_id + flag_key + salt) % 100</code>. Each user falls in bucket 0-99; they're "in" the rollout if <code>bucket &lt; 10</code>. Raising to 20% adds exactly buckets 10-19 — existing users keep their result, new users get added deterministically. The salt is per-flag so different flags bucket users differently (avoid correlation).</p>
+
+    <h3>Deep Dive — Sub-millisecond SDK Evaluation</h3>
+    <p>The SDK holds a <strong>rule tree</strong> in memory. Evaluation order:</p>
+    <ol>
+      <li>Check if flag is globally off → return default.</li>
+      <li>Check explicit user targets (exact match).</li>
+      <li>Check segment memberships (user attributes match segment rules).</li>
+      <li>Check percentage rollout via hash-bucket.</li>
+    </ol>
+    <p>All steps are hash lookups and integer comparisons. No network. Modern CPU: sub-microsecond. Fires an analytics event asynchronously so the server can show "flag was evaluated 1M times today, 10% got variation A."</p>
+
+    <h3>Deep Dive — Streaming Updates with Back-pressure</h3>
+    <p>When a rule changes, you must push to 50M connected SDKs without melting your relays. Approach:</p>
+    <ul>
+      <li><strong>SSE over HTTP/2</strong> so many streams share a connection.</li>
+      <li><strong>Hierarchical relay:</strong> central hub → regional relays → SDKs. Each tier fans out by 100×.</li>
+      <li><strong>Debounce:</strong> batch updates within 100ms so a rapid UI edit session doesn't spam.</li>
+      <li><strong>Versioned snapshots:</strong> SDK tells relay "I'm at version 42"; relay sends only diffs since 42. On reconnect after outage, full snapshot.</li>
+    </ul>
+
+    <h3>Tradeoffs</h3>
+    <table>
+      <tr><th>Choice</th><th>Pro</th><th>Con</th></tr>
+      <tr><td>Local SDK evaluation</td><td>Sub-ms, works offline, survives server outage</td><td>Rule complexity limited by what's shippable</td></tr>
+      <tr><td>SSE vs polling</td><td>Seconds-fresh updates, low server CPU</td><td>Requires HTTP/2-aware load balancers, long-lived connections</td></tr>
+      <tr><td>Deterministic hash rollout</td><td>Sticky, monotonic (10% → 20% adds, never reshuffles)</td><td>Must pick salt carefully to avoid cross-flag bias</td></tr>
+    </table>
+
+    <div class="callout info">
+      <strong>Who built this.</strong> LaunchDarkly (the category definer), Split.io (acquired 2024 by Harness), Optimizely (A/B testing angle), Statsig (Meta-origin team, strong experimentation focus), Unleash (open source), GrowthBook (open source). Meta's Gatekeeper, Google's PlanOut, Netflix's Archaius — internal equivalents.
+    </div>
+
+    <h2>How to Approach ANY 2026 HLD Problem</h2>
+
+    <div class="callout">
+      <strong>The framework has evolved.</strong> In 2020, the template was "scale, read/write, consistency, latency, availability" — the five classical questions. That's still necessary but no longer sufficient. Four new questions now shape architecture choices as deeply as the original five.
+    </div>
+
+    <h3>The 5 Classical Questions (from Chapter 1)</h3>
+    <table>
+      <tr><th>Question</th><th>What it drives</th></tr>
+      <tr><td>Scale (DAU, QPS, storage)</td><td>Sharding, CDN, capacity sizing</td></tr>
+      <tr><td>Read/write ratio</td><td>Caching strategy, read replicas</td></tr>
+      <tr><td>Consistency requirement</td><td>SQL vs NoSQL, sync vs async replication</td></tr>
+      <tr><td>Latency budget</td><td>Edge vs regional, in-memory vs disk</td></tr>
+      <tr><td>Availability target</td><td>Multi-region, failover mechanism</td></tr>
+    </table>
+
+    <h3>The 4 New 2026 Questions</h3>
+
+    <h4>1. Is there AI/ML in this system?</h4>
+    <p>If yes, you need to design for:</p>
+    <ul>
+      <li><strong>Model serving infrastructure</strong> — GPU pool, batching, KV cache for LLMs, quantization</li>
+      <li><strong>Feature store</strong> — online/offline parity, low-latency lookups</li>
+      <li><strong>Training pipeline</strong> — data collection, labeling, retraining cadence</li>
+      <li><strong>Recommendation architecture</strong> — two-tower retrieval + heavy ranker (see TikTok above)</li>
+      <li><strong>RAG pipeline</strong> if it's Q&amp;A over data — vector DB, chunking strategy</li>
+      <li><strong>Cost profile shift</strong> — GPU inference is ~100× more expensive per request than CPU; batch and cache aggressively</li>
+    </ul>
+
+    <div class="callout info">
+      <strong>Diagnostic:</strong> if the problem mentions "personalized," "recommended," "relevant," "understand intent," "summarize," "generate," or "similar" — there's an ML component. Design the serving path explicitly.
+    </div>
+
+    <h4>2. Is it real-time collaborative?</h4>
+    <p>If two users can modify the same state concurrently:</p>
+    <ul>
+      <li><strong>CRDT vs OT:</strong> CRDT for offline + merge, OT for server-mediated strict ordering.</li>
+      <li><strong>Presence channel:</strong> who's online, cursors, typing indicators — separate from the edit channel.</li>
+      <li><strong>Version history:</strong> append-only op log + periodic snapshots.</li>
+      <li><strong>Conflict UX:</strong> what happens when Alice deletes a block Bob is editing? Spec this before coding.</li>
+      <li><strong>WebSocket lifecycle:</strong> reconnection, backfill missed ops, heartbeats.</li>
+    </ul>
+
+    <h4>3. What's the global latency requirement?</h4>
+    <p>Three bands, radically different architectures:</p>
+
+    <table>
+      <tr><th>Band</th><th>Examples</th><th>Architecture</th></tr>
+      <tr><td>&lt; 50ms anywhere</td><td>Game state sync, live voice, feature flags</td><td>Edge PoPs globally, config replicated to edge, compute at edge (Cloudflare Workers, CloudFront Functions)</td></tr>
+      <tr><td>50–300ms global</td><td>Web apps, e-commerce, social feeds</td><td>Multi-region active-active, DNS-based routing, per-region DB with async replication</td></tr>
+      <tr><td>&gt; 300ms okay</td><td>Analytics, batch reports, email</td><td>Single-region or single-continent, optimize for cost not latency</td></tr>
+    </table>
+
+    <div class="callout success">
+      <strong>Rule:</strong> every order of magnitude tighter on latency costs roughly 10× in infrastructure. Don't promise 50ms if the product can live with 500ms.
+    </div>
+
+    <h4>4. What's the cost profile?</h4>
+    <p>Modern cost shapes inform architecture choices cloud-natively:</p>
+
+    <table>
+      <tr><th>Traffic pattern</th><th>Right infra</th><th>Why</th></tr>
+      <tr><td>Steady 24/7 at high QPS</td><td>Reserved instances, autoscale group w/ warm capacity</td><td>Reserved pricing 40-70% off on-demand, worth commitment</td></tr>
+      <tr><td>Bursty, long idle</td><td>Serverless (Lambda, Cloudflare Workers, Fargate)</td><td>Pay per request; cold start acceptable since traffic is sparse</td></tr>
+      <tr><td>Spiky with predictable peaks</td><td>Scheduled scaling + spot for overflow</td><td>Spot 60-90% off; use for stateless workers</td></tr>
+      <tr><td>GPU/ML inference</td><td>Dedicated pool + batching middleware</td><td>GPU cold start is slow (minutes); amortize over batches</td></tr>
+    </table>
+
+    <h3>Updated Interview Framework (the 9-question checklist)</h3>
+
+    <div class="callout stat">
+      <strong>Run through these in order during your clarifying phase (first 5 minutes of the interview):</strong>
+      <ol>
+        <li><strong>Scale</strong> — DAU, QPS, storage, bandwidth</li>
+        <li><strong>Read/write ratio</strong></li>
+        <li><strong>Consistency</strong> — strong, causal, eventual?</li>
+        <li><strong>Latency budget</strong> — p50, p99</li>
+        <li><strong>Availability</strong> — 99.9, 99.99?</li>
+        <li><strong>AI/ML?</strong> If yes, what kind — recommender, search, generation, personalization?</li>
+        <li><strong>Real-time collaboration?</strong> How do concurrent edits resolve?</li>
+        <li><strong>Global latency?</strong> Which band — edge, regional, or central?</li>
+        <li><strong>Cost profile?</strong> Steady, bursty, spiky, GPU-heavy?</li>
+      </ol>
+    </div>
+
+    <h3>Example: Applying the Framework to a New Problem</h3>
+
+    <p><strong>Problem:</strong> "Design Arc Browser's new 'AI Browse' feature — the browser summarizes any page you visit and answers questions about it."</p>
+
+    <ol>
+      <li><strong>Scale:</strong> 5M DAU, each visits 50 pages → 250M page-summarizations/day = 3K QPS</li>
+      <li><strong>Read/write:</strong> 99% read (reading pages/summaries), 1% write (bookmarks)</li>
+      <li><strong>Consistency:</strong> eventual is fine — summaries don't need to be perfectly in sync</li>
+      <li><strong>Latency:</strong> summary in &lt;2s, Q&amp;A in &lt;5s</li>
+      <li><strong>Availability:</strong> 99.9 — degrading to "no summary" is acceptable</li>
+      <li><strong>AI/ML?</strong> YES — LLM for summary + Q&amp;A, embeddings for per-page RAG. Design model serving layer with batching, caching identical URLs</li>
+      <li><strong>Realtime collab?</strong> No — single-user</li>
+      <li><strong>Global latency?</strong> Regional — use nearest cloud region for LLM</li>
+      <li><strong>Cost:</strong> GPU-heavy inference → aggressive caching by URL hash, reserve GPU pool for baseline, burst to on-demand</li>
+    </ol>
+
+    <p>That clarity, in under 5 minutes, tells the interviewer you're thinking modernly. The drawing and deep-dives flow from there.</p>
+
+    <h3>Closing Thought</h3>
+
+    <div class="callout success">
+      <strong>The 2020s taught us:</strong> scale is no longer exotic — even a side project with 1M users is bread-and-butter cloud. What <em>is</em> exotic: personalization, real-time multiplayer, sub-100ms global, AI-augmented every feature. The problems in this chapter are where interview questions are going because they're where <em>product</em> is going. Internalize the defining constraint of each — SFU for video, CRDT for collab, two-tower for recs, LMAX for matching, local-eval for flags — and you'll have a lens for whatever 2027 brings.
+    </div>
+
+    <div class="chapter-nav">
+      <a href="09-modern-patterns.html"><div class="label">← Previous</div><div class="title">Chapter 9: Modern Patterns</div></a>
+      <a class="next" href="../ai/index.html"><div class="label">Next →</div><div class="title">Book III: AI System Design</div></a>
+    </div>
+  </main>
+</div>
+<script src="../assets/js/nav.js"></script>
+</body>
+</html>

@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Request Flow — Interactive HLD Visualization</title>
+<link rel="stylesheet" href="../assets/css/style.css">
+<link rel="stylesheet" href="../assets/css/viz.css">
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">System Design Books</div>
+    <div class="brand-sub">by Sanheen · Progressive Learning</div>
+    <div class="nav-section">
+      <h3>Home</h3>
+      <a href="../index.html">Overview</a>
+    </div>
+    <div class="nav-section">
+      <h3>🎬 Interactive Visualizations</h3>
+      <a href="index.html">Viz Index</a>
+      <a href="lru-cache.html">LRU Cache (LLD)</a>
+      <a href="request-flow.html">Request Flow (HLD)</a>
+      <a href="load-balancer.html">Load Balancer (HLD)</a>
+      <a href="cache-aside.html">Cache Aside Pattern (HLD)</a>
+    </div>
+    <div class="nav-section">
+      <h3>Book II — High Level Design</h3>
+      <a href="../hld/index.html">HLD Index</a>
+    </div>
+  </aside>
+
+  <main class="main">
+    <div class="breadcrumb"><a href="../index.html">Home</a> / <a href="index.html">Visualizations</a> / Request Flow</div>
+    <h1>HLD: Full Request Flow</h1>
+    <p>A user loads a profile page. Watch the request travel: <strong>Client → DNS → CDN → Load Balancer → App Server → Cache (miss!) → Database</strong> — then the response flows back. Blue dot = request. Green dot = response. Yellow dot = cached.</p>
+
+    <div class="viz-controls">
+      <button class="viz-btn primary" id="btnPlay">▶ Simulate Request</button>
+      <button class="viz-btn" id="btnLoop">⟳ Loop (cache warm)</button>
+      <button class="viz-btn" id="btnReset">Reset</button>
+      <div class="viz-speed">
+        <label>Speed</label>
+        <input type="range" id="speed" min="400" max="1500" value="800">
+        <span id="spdtxt">0.8s/hop</span>
+      </div>
+    </div>
+
+    <div class="viz-arch" id="arch" style="min-height: 460px;"></div>
+
+    <div class="viz-stats">
+      <div class="viz-stat"><div class="viz-stat-val" id="st-req">0</div><div class="viz-stat-label">Requests</div></div>
+      <div class="viz-stat"><div class="viz-stat-val" id="st-hit">0</div><div class="viz-stat-label">Cache Hits</div></div>
+      <div class="viz-stat"><div class="viz-stat-val" id="st-miss">0</div><div class="viz-stat-label">Cache Misses</div></div>
+      <div class="viz-stat"><div class="viz-stat-val" id="st-db">0</div><div class="viz-stat-label">DB Queries</div></div>
+    </div>
+
+    <div class="viz-desc" id="desc" style="margin-top:1rem;min-height:80px;">Click <strong>Simulate Request</strong> to see the flow. The first request will be a cache MISS. Use Loop to see subsequent HITs.</div>
+
+    <h2>What's happening at each hop?</h2>
+    <table>
+      <thead><tr><th>Hop</th><th>What</th><th>Latency</th></tr></thead>
+      <tbody>
+        <tr><td>Client → DNS</td><td>Resolve domain to IP</td><td>5-50ms (cached: 0ms)</td></tr>
+        <tr><td>Client → CDN</td><td>Static assets served from edge</td><td>10-50ms global</td></tr>
+        <tr><td>Client → LB</td><td>Route to healthy app server</td><td>1-5ms</td></tr>
+        <tr><td>LB → App</td><td>Request handled by one of N servers</td><td>&lt;1ms within DC</td></tr>
+        <tr><td>App → Cache</td><td>Check Redis for cached value</td><td>0.5ms (hit) or 1ms (miss)</td></tr>
+        <tr><td>App → DB</td><td>Query Postgres/MySQL (on miss)</td><td>5-50ms</td></tr>
+        <tr><td>App → Cache</td><td>Write-back result for next time</td><td>1ms</td></tr>
+      </tbody>
+    </table>
+  </main>
+</div>
+<script src="../assets/js/nav.js"></script>
+<script src="../assets/js/animator.js"></script>
+<script>
+const arch = new ArchAnimator('#arch');
+let cacheWarm = false;
+let stats = { req: 0, hit: 0, miss: 0, db: 0 };
+
+function buildArch() {
+  arch.clear();
+  //            id,     label,          x%,  y%
+  arch.addNode('user', '👤<br>User',     8,  50);
+  arch.addNode('dns',  '🌐<br>DNS',     25, 15);
+  arch.addNode('cdn',  '📡<br>CDN',     25, 85);
+  arch.addNode('lb',   '⚖️<br>Load Balancer', 45, 50);
+  arch.addNode('app',  '⚙️<br>App Server', 65, 50);
+  arch.addNode('cache','⚡<br>Redis Cache', 85, 25);
+  arch.addNode('db',   '🗄️<br>Database', 85, 75);
+
+  // Draw connecting lines
+  arch.addEdges([
+    ['user','dns'], ['user','cdn'], ['user','lb'],
+    ['lb','app'],
+    ['app','cache'], ['app','db']
+  ]);
+}
+
+function renderStats() {
+  document.getElementById('st-req').textContent = stats.req;
+  document.getElementById('st-hit').textContent = stats.hit;
+  document.getElementById('st-miss').textContent = stats.miss;
+  document.getElementById('st-db').textContent = stats.db;
+}
+
+function say(msg) {
+  document.getElementById('desc').innerHTML = msg;
+}
+
+let speed = 800;
+document.getElementById('speed').oninput = (e) => {
+  speed = parseInt(e.target.value);
+  document.getElementById('spdtxt').textContent = (speed/1000).toFixed(1) + 's/hop';
+};
+
+async function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+async function simulateRequest() {
+  stats.req++;
+  renderStats();
+  arch.setNodeStatus('cache', null);
+
+  say('<strong>Step 1:</strong> User clicks "load profile" — browser prepares HTTP request.');
+  await sleep(400);
+
+  say('<strong>Step 2:</strong> Browser asks DNS: "where is api.example.com?" (usually cached locally, skipping this step on cache hit)');
+  await arch.sendPacket('user', 'dns', { duration: speed });
+  await sleep(300);
+  await arch.sendPacket('dns', 'user', { cls: 'response', duration: speed });
+
+  say('<strong>Step 3:</strong> Static assets (JS, CSS, images) come from CDN edge — 20ms vs 200ms from origin.');
+  await arch.sendPacket('user', 'cdn', { duration: speed });
+  await arch.sendPacket('cdn', 'user', { cls: 'cached', duration: speed });
+
+  say('<strong>Step 4:</strong> API request hits the Load Balancer (public IP).');
+  await arch.sendPacket('user', 'lb', { duration: speed });
+
+  say('<strong>Step 5:</strong> LB picks a healthy app server (round-robin or least-connections) and forwards.');
+  await arch.sendPacket('lb', 'app', { duration: speed * 0.5 });
+
+  say('<strong>Step 6:</strong> App checks Redis cache for the user profile (cache-aside pattern).');
+  await arch.sendPacket('app', 'cache', { duration: speed });
+
+  if (cacheWarm) {
+    // Cache HIT
+    stats.hit++;
+    renderStats();
+    arch.setNodeStatus('cache', 'hit');
+    say('<strong>Step 7:</strong> 🟡 Cache <strong>HIT</strong>! Return cached profile to app (0.5ms).');
+    await arch.sendPacket('cache', 'app', { cls: 'cached', duration: speed * 0.5 });
+  } else {
+    // Cache MISS
+    stats.miss++;
+    renderStats();
+    arch.setNodeStatus('cache', 'miss');
+    say('<strong>Step 7:</strong> 🔴 Cache <strong>MISS</strong>! No entry. App falls through to database.');
+    await sleep(500);
+
+    say('<strong>Step 8:</strong> App queries the database (SELECT * FROM users WHERE id = 42).');
+    stats.db++;
+    renderStats();
+    await arch.sendPacket('app', 'db', { duration: speed });
+    await sleep(400);
+
+    say('<strong>Step 9:</strong> DB returns the row.');
+    await arch.sendPacket('db', 'app', { cls: 'response', duration: speed });
+
+    say('<strong>Step 10:</strong> App writes the result to Redis (with TTL, e.g. 5 min) for next time.');
+    await arch.sendPacket('app', 'cache', { cls: 'cached', duration: speed });
+    cacheWarm = true;
+    arch.setNodeStatus('cache', 'hit');
+  }
+
+  say('<strong>Step 11:</strong> App sends response back through LB...');
+  await arch.sendPacket('app', 'lb', { cls: 'response', duration: speed * 0.5 });
+
+  say('<strong>Step 12:</strong> ...and LB forwards to user. Page renders. 🎉');
+  await arch.sendPacket('lb', 'user', { cls: 'response', duration: speed });
+
+  say('<strong>Done!</strong> Click <strong>Loop</strong> to see subsequent requests (cache is now warm — should HIT and skip the DB).');
+}
+
+document.getElementById('btnPlay').onclick = async () => {
+  document.getElementById('btnPlay').disabled = true;
+  document.getElementById('btnLoop').disabled = true;
+  await simulateRequest();
+  document.getElementById('btnPlay').disabled = false;
+  document.getElementById('btnLoop').disabled = false;
+};
+
+document.getElementById('btnLoop').onclick = async () => {
+  document.getElementById('btnPlay').disabled = true;
+  document.getElementById('btnLoop').disabled = true;
+  for (let i = 0; i < 3; i++) await simulateRequest();
+  document.getElementById('btnPlay').disabled = false;
+  document.getElementById('btnLoop').disabled = false;
+};
+
+document.getElementById('btnReset').onclick = () => {
+  cacheWarm = false;
+  stats = { req: 0, hit: 0, miss: 0, db: 0 };
+  renderStats();
+  buildArch();
+  say('Reset. Click <strong>Simulate Request</strong> to start fresh.');
+};
+
+buildArch();
+renderStats();
+</script>
+</body>
+</html>

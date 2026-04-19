@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Load Balancer — Interactive Visualization</title>
+<link rel="stylesheet" href="../assets/css/style.css">
+<link rel="stylesheet" href="../assets/css/viz.css">
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">System Design Books</div>
+    <div class="brand-sub">by Sanheen · Progressive Learning</div>
+    <div class="nav-section">
+      <h3>Home</h3>
+      <a href="../index.html">Overview</a>
+    </div>
+    <div class="nav-section">
+      <h3>🎬 Interactive Visualizations</h3>
+      <a href="index.html">Viz Index</a>
+      <a href="lru-cache.html">LRU Cache (LLD)</a>
+      <a href="request-flow.html">Request Flow (HLD)</a>
+      <a href="load-balancer.html">Load Balancer (HLD)</a>
+      <a href="cache-aside.html">Cache Aside Pattern (HLD)</a>
+    </div>
+    <div class="nav-section">
+      <h3>Book II — High Level Design</h3>
+      <a href="../hld/index.html">HLD Index</a>
+    </div>
+  </aside>
+
+  <main class="main">
+    <div class="breadcrumb"><a href="../index.html">Home</a> / <a href="index.html">Visualizations</a> / Load Balancer</div>
+    <h1>HLD: Load Balancer — Round Robin with Health Checks</h1>
+    <p>Five clients fire requests. Watch the load balancer distribute them to 3 servers using round-robin. Kill a server — watch the LB route around the dead one.</p>
+
+    <div class="viz-controls">
+      <button class="viz-btn primary" id="btnBurst">💥 Burst (10 requests)</button>
+      <button class="viz-btn" id="btnSlow">🐢 Slow Steady</button>
+      <button class="viz-btn" id="btnKill">☠️ Kill Server 2</button>
+      <button class="viz-btn" id="btnRevive">💚 Revive Server 2</button>
+      <button class="viz-btn" id="btnReset">Reset</button>
+      <select class="viz-btn" id="algo">
+        <option value="rr">Round Robin</option>
+        <option value="lc">Least Connections</option>
+        <option value="rand">Random</option>
+      </select>
+    </div>
+
+    <div class="viz-arch" id="arch" style="min-height: 520px;"></div>
+
+    <div class="viz-stats">
+      <div class="viz-stat"><div class="viz-stat-val" id="st-total">0</div><div class="viz-stat-label">Total Requests</div></div>
+      <div class="viz-stat"><div class="viz-stat-val" id="st-s1">0</div><div class="viz-stat-label">Server 1 Served</div></div>
+      <div class="viz-stat"><div class="viz-stat-val" id="st-s2">0</div><div class="viz-stat-label">Server 2 Served</div></div>
+      <div class="viz-stat"><div class="viz-stat-val" id="st-s3">0</div><div class="viz-stat-label">Server 3 Served</div></div>
+      <div class="viz-stat"><div class="viz-stat-val" id="st-drop">0</div><div class="viz-stat-label">Dropped (server down)</div></div>
+    </div>
+
+    <div class="viz-desc" id="desc" style="margin-top:1rem;min-height:60px;">Fire a burst to see LB distribute load. Try killing Server 2 mid-burst and watch routing adapt.</div>
+
+    <h2>Algorithms</h2>
+    <table>
+      <thead><tr><th>Algorithm</th><th>How</th><th>Good for</th></tr></thead>
+      <tbody>
+        <tr><td>Round Robin</td><td>Each request → next server in rotation</td><td>Uniform workloads, simple</td></tr>
+        <tr><td>Least Connections</td><td>Pick server with fewest active connections</td><td>Variable request duration</td></tr>
+        <tr><td>Random</td><td>Pick any healthy server</td><td>Simple, surprisingly good</td></tr>
+        <tr><td>Consistent Hash</td><td>hash(user_id) → same server each time</td><td>Sticky sessions, cache locality</td></tr>
+        <tr><td>Weighted</td><td>Bigger boxes get more traffic</td><td>Mixed server sizes</td></tr>
+      </tbody>
+    </table>
+  </main>
+</div>
+<script src="../assets/js/nav.js"></script>
+<script src="../assets/js/animator.js"></script>
+<script>
+const arch = new ArchAnimator('#arch');
+let rrIndex = 0;
+let connCount = { s1: 0, s2: 0, s3: 0 };
+let alive = { s1: true, s2: true, s3: true };
+let stats = { total: 0, s1: 0, s2: 0, s3: 0, drop: 0 };
+
+function buildArch() {
+  arch.clear();
+  // Clients on left
+  arch.addNode('c1', '👤 C1', 5, 15);
+  arch.addNode('c2', '👤 C2', 5, 30);
+  arch.addNode('c3', '👤 C3', 5, 50);
+  arch.addNode('c4', '👤 C4', 5, 70);
+  arch.addNode('c5', '👤 C5', 5, 85);
+  // LB center
+  arch.addNode('lb', '⚖️<br>Load Balancer', 42, 50);
+  // Servers right
+  arch.addNode('s1', '⚙️ Server 1', 80, 20);
+  arch.addNode('s2', '⚙️ Server 2', 80, 50);
+  arch.addNode('s3', '⚙️ Server 3', 80, 80);
+
+  // Draw connecting lines
+  arch.addEdges([
+    ['c1','lb'], ['c2','lb'], ['c3','lb'], ['c4','lb'], ['c5','lb'],
+    ['lb','s1'], ['lb','s2'], ['lb','s3']
+  ]);
+}
+
+function renderStats() {
+  document.getElementById('st-total').textContent = stats.total;
+  document.getElementById('st-s1').textContent = stats.s1;
+  document.getElementById('st-s2').textContent = stats.s2;
+  document.getElementById('st-s3').textContent = stats.s3;
+  document.getElementById('st-drop').textContent = stats.drop;
+}
+
+function pickServer(algo) {
+  const healthy = ['s1','s2','s3'].filter(s => alive[s]);
+  if (!healthy.length) return null;
+
+  if (algo === 'rr') {
+    // advance until we hit a healthy one
+    for (let i = 0; i < 3; i++) {
+      const s = ['s1','s2','s3'][rrIndex];
+      rrIndex = (rrIndex + 1) % 3;
+      if (alive[s]) return s;
+    }
+    return null;
+  }
+  if (algo === 'lc') {
+    return healthy.sort((a,b) => connCount[a] - connCount[b])[0];
+  }
+  // random
+  return healthy[Math.floor(Math.random() * healthy.length)];
+}
+
+async function fireRequest(fromClient) {
+  const algo = document.getElementById('algo').value;
+  stats.total++;
+  renderStats();
+  document.getElementById('desc').innerHTML = `<strong>Request from ${fromClient.toUpperCase()}:</strong> → LB (${algo === 'rr' ? 'Round Robin' : algo === 'lc' ? 'Least Connections' : 'Random'})`;
+
+  await arch.sendPacket(fromClient, 'lb', { duration: 500 });
+  const target = pickServer(algo);
+
+  if (!target) {
+    stats.drop++;
+    renderStats();
+    document.getElementById('desc').innerHTML = `<strong style="color:var(--danger)">💥 ALL SERVERS DOWN — request dropped!</strong>`;
+    arch.setNodeStatus('lb', 'miss');
+    setTimeout(() => arch.setNodeStatus('lb', null), 600);
+    return;
+  }
+
+  connCount[target]++;
+  document.getElementById('desc').innerHTML = `<strong>LB routed to ${target.toUpperCase()}</strong> (${algo === 'rr' ? `rotation index ${rrIndex}` : algo === 'lc' ? `fewest connections: ${connCount[target]}` : 'random pick'})`;
+
+  await arch.sendPacket('lb', target, { duration: 600 });
+  stats[target]++;
+  renderStats();
+
+  // simulate processing
+  await new Promise(r => setTimeout(r, 200 + Math.random() * 300));
+
+  await arch.sendPacket(target, 'lb', { cls: 'response', duration: 600 });
+  await arch.sendPacket('lb', fromClient, { cls: 'response', duration: 500 });
+  connCount[target]--;
+}
+
+async function burst() {
+  const clients = ['c1','c2','c3','c4','c5'];
+  const promises = [];
+  for (let i = 0; i < 10; i++) {
+    const c = clients[i % 5];
+    promises.push(fireRequest(c));
+    await new Promise(r => setTimeout(r, 150));
+  }
+  await Promise.all(promises);
+}
+
+async function slowSteady() {
+  for (let i = 0; i < 6; i++) {
+    const c = 'c' + (1 + (i % 5));
+    await fireRequest(c);
+    await new Promise(r => setTimeout(r, 300));
+  }
+}
+
+document.getElementById('btnBurst').onclick = async () => {
+  document.querySelectorAll('.viz-btn').forEach(b => b.disabled = true);
+  await burst();
+  document.querySelectorAll('.viz-btn').forEach(b => b.disabled = false);
+};
+document.getElementById('btnSlow').onclick = async () => {
+  document.querySelectorAll('.viz-btn').forEach(b => b.disabled = true);
+  await slowSteady();
+  document.querySelectorAll('.viz-btn').forEach(b => b.disabled = false);
+};
+document.getElementById('btnKill').onclick = () => {
+  alive.s2 = false;
+  arch.setNodeStatus('s2', 'miss');
+  arch.nodes.s2.el.style.opacity = '0.3';
+  arch.nodes.s2.el.innerHTML = '☠️ Server 2<br><small>DOWN</small>';
+  document.getElementById('desc').innerHTML = '<strong style="color:var(--danger)">Server 2 killed.</strong> Watch LB stop routing there.';
+};
+document.getElementById('btnRevive').onclick = () => {
+  alive.s2 = true;
+  arch.setNodeStatus('s2', 'hit');
+  arch.nodes.s2.el.style.opacity = '1';
+  arch.nodes.s2.el.innerHTML = '⚙️ Server 2';
+  setTimeout(() => arch.setNodeStatus('s2', null), 700);
+  document.getElementById('desc').innerHTML = '<strong style="color:var(--success)">Server 2 revived.</strong> LB will resume routing there.';
+};
+document.getElementById('btnReset').onclick = () => {
+  rrIndex = 0;
+  connCount = { s1: 0, s2: 0, s3: 0 };
+  alive = { s1: true, s2: true, s3: true };
+  stats = { total: 0, s1: 0, s2: 0, s3: 0, drop: 0 };
+  renderStats();
+  buildArch();
+  document.getElementById('desc').innerHTML = 'Reset. Fire a burst.';
+};
+
+buildArch();
+renderStats();
+</script>
+</body>
+</html>

@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Building Blocks — Book II · HLD</title>
 <link rel="stylesheet" href="../assets/css/style.css">
+<link rel="stylesheet" href="../assets/css/viz.css">
 </head>
 <body>
 <div class="app">
@@ -39,6 +40,14 @@
     <p class="lead">Every large system is assembled from the same 20 components. Load balancer, API gateway, SQL, NoSQL, cache, CDN, queue, stream, blob store, search, time-series, warehouse, stream processor, service mesh, consensus, lock, rate limiter, circuit breaker, config. In this chapter we take each one and answer the same five questions: <em>what does it do, when do you need it, what problem does it solve, what breaks without it, what is the trade-off</em>. Learn this chapter and you can read any architecture diagram ever drawn.</p>
 
     <h2>1. Load Balancer (L4 vs L7)</h2>
+
+    <div class="embed-wrap">
+      <div class="embed-title">
+        <span>🎬 Interactive: Fire burst of requests, watch LB distribute. Kill a server and see rerouting.</span>
+        <a href="../viz/load-balancer.html" target="_blank">Open full viz ↗</a>
+      </div>
+      <iframe src="../viz/load-balancer.html?embed=1" style="height:780px" loading="lazy"></iframe>
+    </div>
 
     <p><strong>What it does.</strong> Spreads incoming requests across a pool of servers so no single server is overwhelmed and so failed servers can be taken out of rotation.</p>
 
@@ -191,6 +200,14 @@
     </table>
 
     <h2>6. Cache</h2>
+
+    <div class="embed-wrap">
+      <div class="embed-title">
+        <span>🎬 Interactive: Watch Cache-Aside pattern — first fetch MISSes (hits DB), next fetch HITs (skips DB). Try Random 10 to see hit rate climb.</span>
+        <a href="../viz/cache-aside.html" target="_blank">Open full viz ↗</a>
+      </div>
+      <iframe src="../viz/cache-aside.html?embed=1" style="height:760px" loading="lazy"></iframe>
+    </div>
 
     <p><strong>What it does.</strong> A small, fast store that keeps hot data in RAM so most reads skip the slow origin.</p>
 

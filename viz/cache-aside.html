@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Cache-Aside Pattern — Interactive Visualization</title>
+<link rel="stylesheet" href="../assets/css/style.css">
+<link rel="stylesheet" href="../assets/css/viz.css">
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">System Design Books</div>
+    <div class="brand-sub">by Sanheen · Progressive Learning</div>
+    <div class="nav-section">
+      <h3>Home</h3>
+      <a href="../index.html">Overview</a>
+    </div>
+    <div class="nav-section">
+      <h3>🎬 Interactive Visualizations</h3>
+      <a href="index.html">Viz Index</a>
+      <a href="lru-cache.html">LRU Cache (LLD)</a>
+      <a href="request-flow.html">Request Flow (HLD)</a>
+      <a href="load-balancer.html">Load Balancer (HLD)</a>
+      <a href="cache-aside.html">Cache Aside Pattern (HLD)</a>
+    </div>
+    <div class="nav-section">
+      <h3>Book II — High Level Design</h3>
+      <a href="../hld/index.html">HLD Index</a>
+    </div>
+  </aside>
+
+  <main class="main">
+    <div class="breadcrumb"><a href="../index.html">Home</a> / <a href="index.html">Visualizations</a> / Cache-Aside</div>
+    <h1>HLD: Cache-Aside Pattern</h1>
+    <p>Click any user ID below. First click = <strong>MISS</strong> (DB query + cache populate). Second click for same user = <strong>HIT</strong> (fast, no DB). Watch hit rate climb as the cache warms up.</p>
+
+    <div class="viz-controls">
+      <div style="display:flex;gap:0.5rem;align-items:center;">
+        <span style="color:var(--text-dim);font-size:0.85rem;">Request user:</span>
+        <button class="viz-btn" data-uid="1">User 1</button>
+        <button class="viz-btn" data-uid="2">User 2</button>
+        <button class="viz-btn" data-uid="3">User 3</button>
+        <button class="viz-btn" data-uid="4">User 4</button>
+        <button class="viz-btn" data-uid="5">User 5</button>
+      </div>
+      <button class="viz-btn primary" id="btnRandom">🎲 Random 10</button>
+      <button class="viz-btn" id="btnInvalidate">💥 Invalidate Cache</button>
+      <button class="viz-btn" id="btnReset">Reset</button>
+    </div>
+
+    <div class="viz-arch" id="arch" style="min-height: 400px;"></div>
+
+    <div class="viz-stats">
+      <div class="viz-stat"><div class="viz-stat-val" id="st-req">0</div><div class="viz-stat-label">Requests</div></div>
+      <div class="viz-stat"><div class="viz-stat-val" id="st-hit">0</div><div class="viz-stat-label">Cache Hits</div></div>
+      <div class="viz-stat"><div class="viz-stat-val" id="st-miss">0</div><div class="viz-stat-label">Cache Misses</div></div>
+      <div class="viz-stat"><div class="viz-stat-val" id="st-rate">0%</div><div class="viz-stat-label">Hit Rate</div></div>
+    </div>
+
+    <div class="viz-desc" id="desc" style="margin-top:1rem;min-height:60px;">Click a user ID to fetch their profile. First fetch = MISS. Subsequent fetches = HIT.</div>
+
+    <h3 style="margin-top:2rem;">Cache Contents</h3>
+    <div class="viz-cache" id="cachebox" style="min-height: 60px;">
+      <div style="color:var(--text-dim);padding:0.5rem;">Empty</div>
+    </div>
+
+    <h2>The 4 Cache Patterns</h2>
+    <table>
+      <thead><tr><th>Pattern</th><th>How</th><th>Tradeoff</th></tr></thead>
+      <tbody>
+        <tr><td><strong>Cache-Aside</strong> (this demo)</td><td>App reads cache first; on miss reads DB, then writes cache.</td><td>Simple. First request slow. Stale on DB writes.</td></tr>
+        <tr><td><strong>Read-Through</strong></td><td>App always reads cache; cache reads DB on miss itself.</td><td>Same pattern, abstracted into cache layer.</td></tr>
+        <tr><td><strong>Write-Through</strong></td><td>App writes to cache; cache synchronously writes DB.</td><td>Strong consistency. Slower writes.</td></tr>
+        <tr><td><strong>Write-Behind</strong></td><td>App writes cache; cache async writes DB (queued).</td><td>Fastest writes. Risk of data loss on cache failure.</td></tr>
+      </tbody>
+    </table>
+  </main>
+</div>
+<script src="../assets/js/nav.js"></script>
+<script src="../assets/js/animator.js"></script>
+<script>
+const arch = new ArchAnimator('#arch');
+const cache = new Map();  // uid -> profile name
+const db = {
+  '1': { name: 'Alice Kumar',   age: 29 },
+  '2': { name: 'Bob Singh',     age: 35 },
+  '3': { name: 'Carol Patel',   age: 42 },
+  '4': { name: 'David Sharma',  age: 28 },
+  '5': { name: 'Emma Das',      age: 31 },
+};
+let stats = { req: 0, hit: 0, miss: 0 };
+
+function buildArch() {
+  arch.clear();
+  arch.addNode('user',  '👤<br>Client',  8,  50);
+  arch.addNode('app',   '⚙️<br>App Server', 35, 50);
+  arch.addNode('cache', '⚡<br>Redis<br>Cache', 65, 30);
+  arch.addNode('db',    '🗄️<br>Postgres<br>DB', 65, 75);
+
+  // Draw connecting lines
+  arch.addEdges([
+    ['user','app'],
+    ['app','cache'], ['app','db']
+  ]);
+}
+
+function renderStats() {
+  document.getElementById('st-req').textContent = stats.req;
+  document.getElementById('st-hit').textContent = stats.hit;
+  document.getElementById('st-miss').textContent = stats.miss;
+  const rate = stats.req ? Math.round(100 * stats.hit / stats.req) : 0;
+  document.getElementById('st-rate').textContent = rate + '%';
+}
+
+function renderCache() {
+  const el = document.getElementById('cachebox');
+  if (!cache.size) { el.innerHTML = '<div style="color:var(--text-dim);padding:0.5rem;">Empty</div>'; return; }
+  el.innerHTML = [...cache.entries()].map(([k, v]) =>
+    `<div class="viz-slot">user:${k} → ${v.name}</div>`
+  ).join('');
+}
+
+function say(msg) { document.getElementById('desc').innerHTML = msg; }
+
+async function request(uid) {
+  stats.req++;
+  renderStats();
+  say(`<strong>GET /users/${uid}</strong> — client sends request.`);
+  await arch.sendPacket('user', 'app', { duration: 500 });
+
+  say(`<strong>App: "let me check Redis for user:${uid}..."</strong>`);
+  await arch.sendPacket('app', 'cache', { duration: 600 });
+
+  if (cache.has(uid)) {
+    // HIT
+    stats.hit++;
+    renderStats();
+    arch.setNodeStatus('cache', 'hit');
+    const profile = cache.get(uid);
+    say(`<strong style="color:var(--success)">🟢 Cache HIT!</strong> Redis returns ${profile.name} in ~0.5ms. Skip DB entirely.`);
+    await arch.sendPacket('cache', 'app', { cls: 'cached', duration: 600 });
+    await arch.sendPacket('app', 'user', { cls: 'cached', duration: 500 });
+  } else {
+    // MISS
+    stats.miss++;
+    renderStats();
+    arch.setNodeStatus('cache', 'miss');
+    say(`<strong style="color:var(--danger)">🔴 Cache MISS!</strong> user:${uid} not in Redis. Falling through to DB.`);
+    await new Promise(r => setTimeout(r, 600));
+
+    say(`<strong>App queries DB:</strong> SELECT * FROM users WHERE id = ${uid}`);
+    await arch.sendPacket('app', 'db', { duration: 700 });
+    await new Promise(r => setTimeout(r, 400));
+
+    const profile = db[uid];
+    say(`<strong>DB returns row:</strong> ${profile.name}, age ${profile.age}. (5-20ms)`);
+    await arch.sendPacket('db', 'app', { cls: 'response', duration: 700 });
+
+    say(`<strong>App writes back to cache</strong> (so next time is a HIT). TTL = 5 min.`);
+    cache.set(uid, profile);
+    renderCache();
+    await arch.sendPacket('app', 'cache', { cls: 'cached', duration: 600 });
+    arch.setNodeStatus('cache', 'hit');
+
+    say(`<strong>Response sent to client.</strong> Next GET /users/${uid} will be a HIT!`);
+    await arch.sendPacket('app', 'user', { cls: 'response', duration: 500 });
+  }
+  setTimeout(() => arch.setNodeStatus('cache', null), 600);
+}
+
+document.querySelectorAll('[data-uid]').forEach(btn => {
+  btn.onclick = async () => {
+    document.querySelectorAll('.viz-btn').forEach(b => b.disabled = true);
+    await request(btn.dataset.uid);
+    document.querySelectorAll('.viz-btn').forEach(b => b.disabled = false);
+  };
+});
+
+document.getElementById('btnRandom').onclick = async () => {
+  document.querySelectorAll('.viz-btn').forEach(b => b.disabled = true);
+  // Zipf-ish: user 1 most popular
+  const weighted = ['1','1','1','1','2','2','2','3','3','4','5'];
+  for (let i = 0; i < 10; i++) {
+    const uid = weighted[Math.floor(Math.random() * weighted.length)];
+    await request(uid);
+    await new Promise(r => setTimeout(r, 200));
+  }
+  document.querySelectorAll('.viz-btn').forEach(b => b.disabled = false);
+};
+
+document.getElementById('btnInvalidate').onclick = () => {
+  cache.clear();
+  renderCache();
+  arch.setNodeStatus('cache', null);
+  say('<strong>Cache invalidated!</strong> (e.g., after a DB write, mass-evict, or Redis restart). Next requests will MISS.');
+};
+
+document.getElementById('btnReset').onclick = () => {
+  cache.clear();
+  stats = { req: 0, hit: 0, miss: 0 };
+  renderStats();
+  renderCache();
+  buildArch();
+  say('Reset. Click a user button to start.');
+};
+
+buildArch();
+renderStats();
+renderCache();
+</script>
+</body>
+</html>

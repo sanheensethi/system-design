@@ -1,0 +1,535 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RAG Pipeline — Query to Answer</title>
+<link rel="stylesheet" href="../assets/css/style.css">
+<link rel="stylesheet" href="../assets/css/viz.css">
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">System Design Books</div>
+    <div class="brand-sub">by Sanheen · Progressive Learning</div>
+    <div class="nav-section">
+      <h3>Home</h3>
+      <a href="../index.html">Overview</a>
+    </div>
+    <div class="nav-section">
+      <h3>🎬 Interactive Visualizations</h3>
+      <a href="index.html">Viz Index</a>
+      <a href="lru-cache.html">LRU Cache (LLD)</a>
+      <a href="request-flow.html">Request Flow (HLD)</a>
+      <a href="load-balancer.html">Load Balancer (HLD)</a>
+      <a href="cache-aside.html">Cache Aside Pattern (HLD)</a>
+      <a href="rag-pipeline.html">RAG Pipeline (AI)</a>
+    </div>
+    <div class="nav-section">
+      <h3>Book II — High Level Design</h3>
+      <a href="../hld/index.html">HLD Index</a>
+    </div>
+  </aside>
+
+  <main class="main">
+    <div class="breadcrumb"><a href="../index.html">Home</a> / <a href="index.html">Visualizations</a> / RAG Pipeline</div>
+    <h1>RAG Pipeline — Query to Answer</h1>
+    <p>Retrieval-Augmented Generation: a user question flows through <strong>Embedder → Vector DB + BM25 → Reranker → LLM</strong>. Semantic and lexical search run in parallel, get fused, reranked by a cross-encoder, and finally fed to the LLM as grounded context. Watch packets flow; toggle rerank on/off to see quality vs latency trade-offs.</p>
+
+    <div class="viz-controls">
+      <button class="viz-btn primary" id="btnAsk">❓ Ask Question</button>
+      <button class="viz-btn" id="btnFast">🚀 Fast Path (no rerank)</button>
+      <button class="viz-btn" id="btnRerank">🎯 With Rerank</button>
+      <button class="viz-btn" id="btnCost">💰 Show Cost</button>
+      <button class="viz-btn" id="btnLat">⏰ Show Latency</button>
+      <button class="viz-btn" id="btnReset">Reset</button>
+    </div>
+
+    <div class="viz-arch" id="arch" style="min-height: 520px;"></div>
+
+    <div class="viz-stats">
+      <div class="viz-stat"><div class="viz-stat-val" id="st-q">0</div><div class="viz-stat-label">Queries</div></div>
+      <div class="viz-stat"><div class="viz-stat-val" id="st-lat">0</div><div class="viz-stat-label">Avg Latency (ms)</div></div>
+      <div class="viz-stat"><div class="viz-stat-val" id="st-cost">$0.0000</div><div class="viz-stat-label">Total Cost ($)</div></div>
+      <div class="viz-stat"><div class="viz-stat-val" id="st-rr">yes</div><div class="viz-stat-label">Reranked?</div></div>
+    </div>
+
+    <div class="viz-desc" id="desc" style="margin-top:1rem;min-height:80px;">Click <strong>Ask Question</strong> to watch a full RAG query flow through the pipeline. Toggle <strong>Fast Path</strong> to see what happens when you skip the reranker.</div>
+
+    <div id="chunksBox" style="margin-top:1rem;padding:1rem;border:1px solid var(--border,#2a2a3a);border-radius:8px;background:var(--panel,#141421);">
+      <div style="font-weight:700;margin-bottom:0.5rem;">📄 Retrieved Chunks (Top 5 after rerank):</div>
+      <div id="chunks" style="font-family:ui-monospace,Menlo,monospace;font-size:0.85rem;line-height:1.5;">
+        <div>— (empty) Run a query to populate —</div>
+      </div>
+    </div>
+
+    <h2>What's happening at each stage?</h2>
+    <table>
+      <thead><tr><th>Stage</th><th>What</th><th>Latency</th><th>Cost / 1k queries</th></tr></thead>
+      <tbody>
+        <tr><td>Embed query</td><td>Text → 1536-dim vector (OpenAI text-embedding-3-small)</td><td>~50ms</td><td>$0.02</td></tr>
+        <tr><td>Vector search</td><td>ANN over 1M+ vectors in Pinecone (HNSW)</td><td>~30ms</td><td>$0.40</td></tr>
+        <tr><td>BM25 search</td><td>Sparse keyword lookup in parallel (Elasticsearch / OpenSearch)</td><td>~20ms</td><td>$0.10</td></tr>
+        <tr><td>RRF fusion</td><td>Merge both result sets via Reciprocal Rank Fusion</td><td>~2ms</td><td>~$0</td></tr>
+        <tr><td>Rerank</td><td>Cross-encoder (Cohere rerank-v3) scores 100 pairs</td><td>~80ms</td><td>$0.40</td></tr>
+        <tr><td>LLM generation</td><td>Claude Sonnet w/ top-5 chunks + question, streaming</td><td>~1200ms</td><td>$8.00</td></tr>
+        <tr><td><strong>Total</strong></td><td>Full RAG query end-to-end</td><td><strong>~1380ms</strong></td><td><strong>~$8.92 / 1k</strong></td></tr>
+      </tbody>
+    </table>
+
+    <h2>The two phases of RAG</h2>
+    <p>RAG has two distinct lifecycles — <strong>offline indexing</strong> (once per document, or on document changes) and <strong>online query</strong> (every time a user asks something). Confusing the two is the #1 mistake in first RAG implementations.</p>
+
+    <h3>Phase 1: Indexing (offline, batch)</h3>
+    <ol>
+      <li><strong>Load</strong> — pull documents from the source of truth (Notion, Confluence, S3, Google Drive, a git repo, a database, Slack exports). Strip formatting but preserve structure (headings, tables, code blocks) because it matters for retrieval quality.</li>
+      <li><strong>Chunk</strong> — split long documents into retrievable units (typically 200–800 tokens). Too small and you lose context; too large and you dilute the embedding signal and blow past the LLM context budget.</li>
+      <li><strong>Embed</strong> — send each chunk to an embedding model; store the resulting vector alongside the chunk text, metadata, and a chunk ID.</li>
+      <li><strong>Upsert</strong> — write vectors to the vector DB (Pinecone, Weaviate, Qdrant, pgvector, Milvus) and the raw text to a keyword index (BM25 via Elasticsearch/OpenSearch/Tantivy) and an object store keyed by chunk ID.</li>
+      <li><strong>Metadata</strong> — attach filters you'll want at query time: tenant_id, permissions, created_at, doc_type, language, source_url. Cheap to add now, painful to backfill later.</li>
+    </ol>
+
+    <h3>Phase 2: Query (online, per-request)</h3>
+    <ol>
+      <li>User submits a question.</li>
+      <li>Embed the query with the <em>same</em> model used at index time. (Mismatched models = garbage retrieval.)</li>
+      <li>Run semantic search (dense) and BM25 (sparse) in parallel.</li>
+      <li>Merge candidates via RRF.</li>
+      <li>Rerank with a cross-encoder.</li>
+      <li>Build a prompt stuffing top-k chunks into the context window.</li>
+      <li>Call the LLM; stream the response back.</li>
+      <li>Post-process: extract citations, log for evaluation.</li>
+    </ol>
+
+    <h2>Chunking strategies</h2>
+    <p>Chunking is the most underrated variable in RAG quality. Common strategies, in rough order of sophistication:</p>
+    <table>
+      <thead><tr><th>Strategy</th><th>How it splits</th><th>When to use</th></tr></thead>
+      <tbody>
+        <tr><td>Fixed-size</td><td>Every N tokens (e.g., 512), optional overlap (e.g., 64)</td><td>Baseline, homogeneous corpora</td></tr>
+        <tr><td>Recursive character</td><td>Try paragraph → sentence → word, respecting boundaries</td><td>Default for prose (LangChain's RecursiveCharacterTextSplitter)</td></tr>
+        <tr><td>Semantic</td><td>Embed sentences, cut where consecutive similarity drops</td><td>Long narrative docs; expensive</td></tr>
+        <tr><td>Document-aware</td><td>Split on Markdown headings, HTML sections, code blocks</td><td>Structured docs: API reference, runbooks</td></tr>
+        <tr><td>Parent-child</td><td>Embed small chunks but retrieve their larger parent sections</td><td>When precision matters but context is needed</td></tr>
+        <tr><td>Proposition</td><td>LLM rewrites each chunk as self-contained statements</td><td>Knowledge bases where pronouns ("it", "this") hurt retrieval</td></tr>
+        <tr><td>Contextual</td><td>Prepend an LLM-generated summary of the source doc to each chunk (Anthropic's 2024 "Contextual Retrieval")</td><td>Corpora with lots of duplicated boilerplate or shared vocabulary across docs</td></tr>
+      </tbody>
+    </table>
+
+    <h2>Embedding model choice</h2>
+    <p>Three knobs to turn: <strong>dimensionality</strong>, <strong>MTEB score</strong>, and <strong>cost per million tokens</strong>. As of 2025, common picks:</p>
+    <ul>
+      <li><strong>OpenAI text-embedding-3-small</strong> — 1536 dims, ~$0.02/M tokens. Strong general baseline. Supports "Matryoshka" truncation (you can use first 512 or 256 dims to save vector DB cost at small quality loss).</li>
+      <li><strong>OpenAI text-embedding-3-large</strong> — 3072 dims, ~$0.13/M tokens. 3–5% higher MTEB, often not worth 6.5× cost.</li>
+      <li><strong>Cohere embed-v3</strong> — 1024 dims, strong multilingual, supports separate query vs document encoding (asymmetric).</li>
+      <li><strong>Voyage voyage-3</strong> — high MTEB, specialized variants for code/law/finance.</li>
+      <li><strong>BGE / E5 / GTE (open-weight)</strong> — free to self-host, competitive on MTEB. Good for privacy-sensitive corpora.</li>
+    </ul>
+    <p>Rule of thumb: start with <code>text-embedding-3-small</code>, instrument retrieval precision, swap only if your eval shows a ceiling.</p>
+
+    <h2>Vector DB internals: HNSW vs IVF</h2>
+    <p>Exhaustive <em>k</em>-NN over 1M vectors costs seconds. Production uses approximate nearest-neighbour (ANN) indexes. Two dominant families:</p>
+    <h3>HNSW (Hierarchical Navigable Small World)</h3>
+    <ul>
+      <li>Multi-layer graph; each node connects to M neighbours.</li>
+      <li>Search starts at the top (sparse) layer, greedily descends.</li>
+      <li>Tuning: <code>M</code> (graph degree, typically 16–64), <code>efConstruction</code> (build quality), <code>efSearch</code> (recall/latency trade at query time).</li>
+      <li>Pros: best recall at low latency, no training step.</li>
+      <li>Cons: memory-heavy (the graph stays in RAM), slower to build, insert/delete is non-trivial.</li>
+    </ul>
+
+    <h3>IVF (Inverted File Index)</h3>
+    <ul>
+      <li>k-means clusters vectors into <code>nlist</code> Voronoi cells (e.g., 4096 cells for 1M vectors).</li>
+      <li>Query: find the <code>nprobe</code> nearest cells, exhaustively search those only.</li>
+      <li>Often combined with <strong>PQ</strong> (Product Quantization) for 8–32× memory compression.</li>
+      <li>Pros: cheap memory, fast to build, scales to billions.</li>
+      <li>Cons: recall drops at high compression; need to retrain when data distribution shifts.</li>
+    </ul>
+
+    <p>Managed services hide this: Pinecone/Qdrant/Weaviate pick reasonable defaults. Self-hosted (Faiss, pgvector, Milvus) expose every knob. If unsure — HNSW with <code>M=16, efSearch=100</code> is a solid starting point.</p>
+
+    <h2>Hybrid search: semantic + keyword</h2>
+    <p>Dense embeddings are semantic (they capture meaning) but <strong>bad at exact matches</strong>: SKU codes, error numbers, acronyms, person names, rare legal terms. BM25 is the opposite — it nails exact tokens but has no notion of synonymy.</p>
+    <p>Production RAG almost always runs both and fuses. The canonical fusion algorithm is <strong>Reciprocal Rank Fusion (RRF)</strong>, invented in 2009 but still unbeaten for its simplicity:</p>
+
+<pre><code>score(doc) = sum over each ranking of  1 / (k + rank_in_that_ranking)
+
+# k is a constant, typically 60
+# Only the rank matters, not the raw scores — robust to scale differences
+# between dense cosine and BM25 TF-IDF</code></pre>
+
+    <p>Empirically hybrid beats either alone by 5–15% on recall@10 across most corpora. Anthropic's Contextual Retrieval paper showed hybrid + contextual chunking + reranking drops retrieval failure rate by 67% vs naive embedding-only RAG.</p>
+
+    <h2>The reranker: the #1 underrated RAG upgrade</h2>
+    <p>An embedding model produces one vector per document <em>independent of the query</em>. It has to be compressed enough to support ANN, which means it's a lossy summary. A <strong>cross-encoder reranker</strong> takes a (query, doc) pair jointly and scores relevance directly. It's slow (can't pre-compute), so you only run it on the top ~100 candidates from the first-stage retriever.</p>
+
+    <p>Typical uplift: adding a reranker to a vector-only pipeline improves nDCG@10 by 10–30%. It almost always beats switching to a more expensive embedding model. Cohere rerank-v3, Jina reranker-v2, or a fine-tuned BGE-reranker are standard choices.</p>
+
+    <p>Mental model: <em>recall is the retriever's job, precision is the reranker's job</em>. Cast a wide net (50–100 candidates), then let the reranker spend its compute budget ranking them carefully.</p>
+
+    <h2>Prompt construction: how to stuff context</h2>
+    <p>Once you have top-k chunks, you need to build the prompt. Key decisions:</p>
+    <ul>
+      <li><strong>Order.</strong> Claude and GPT-4 exhibit "lost in the middle" — information in the middle of a long context is recalled worse. Put the most relevant chunks at the start <em>and</em> at the end, least relevant in the middle.</li>
+      <li><strong>Delimiters.</strong> Wrap each chunk in XML-like tags (<code>&lt;document id="..."&gt;...&lt;/document&gt;</code>) so the model can cite them cleanly.</li>
+      <li><strong>Budget.</strong> Set a hard context budget (e.g., 8k tokens for retrieved context) and truncate chunks if needed. Don't silently overflow.</li>
+      <li><strong>Instruction placement.</strong> With Claude, system prompt at top, then context, then the question. With OpenAI, put the question both before and after the context if the corpus is large.</li>
+      <li><strong>Abstention.</strong> Tell the model "If the answer is not in the documents, say 'I don't know' and do not guess." This one line reduces hallucinations dramatically.</li>
+    </ul>
+
+    <h2>Citations and grounding</h2>
+    <p>A RAG system that doesn't cite sources is indistinguishable from a hallucinating chatbot from the user's perspective. Citations do two things: build trust, and give the user a way to verify. Two implementation paths:</p>
+    <ul>
+      <li><strong>Model-emitted citations.</strong> Ask the LLM to output <code>[chunk_3]</code> tokens inline. Post-process to hyperlinks. Works with any model but occasionally the model fabricates chunk IDs.</li>
+      <li><strong>Native citations.</strong> Anthropic's Claude API has a <code>citations</code> parameter that returns exact character spans in source documents. Zero hallucination risk on the citation itself.</li>
+    </ul>
+
+    <h2>Evaluation: Ragas and friends</h2>
+    <p>You can't improve what you don't measure. The standard RAG eval framework (Ragas) decomposes quality into four axes:</p>
+    <ul>
+      <li><strong>Context precision</strong> — of the chunks you retrieved, how many are actually relevant? (Did the retriever bring noise?)</li>
+      <li><strong>Context recall</strong> — of the chunks that <em>would have been</em> useful, how many did you retrieve? (Did the retriever miss gold?)</li>
+      <li><strong>Faithfulness</strong> — does the generated answer only make claims supported by the retrieved chunks? (Hallucination detector.)</li>
+      <li><strong>Answer relevance</strong> — does the answer actually address the question? (End-to-end quality.)</li>
+    </ul>
+    <p>Build a golden set of ~100 (question, ideal-chunks, ideal-answer) triples by hand. Re-run on every retrieval-layer change. CI-gate your RAG just like you'd CI-gate latency regressions.</p>
+
+    <h2>Cost breakdown per query (rough, 2025 prices)</h2>
+    <table>
+      <thead><tr><th>Stage</th><th>Cost per query</th><th>Note</th></tr></thead>
+      <tbody>
+        <tr><td>Embed query</td><td>$0.00002</td><td>~20 tokens × $0.02/M</td></tr>
+        <tr><td>Vector search</td><td>$0.0004</td><td>Pinecone serverless per-query read</td></tr>
+        <tr><td>BM25 search</td><td>$0.0001</td><td>Elasticsearch self-host, amortized</td></tr>
+        <tr><td>Rerank 100 candidates</td><td>$0.0004</td><td>Cohere rerank-v3, $2/1k searches</td></tr>
+        <tr><td>LLM generation (Claude Sonnet)</td><td>$0.008</td><td>~2k input + 300 output tokens</td></tr>
+        <tr><td><strong>Total</strong></td><td><strong>~$0.009 / query</strong></td><td>Generation dominates by 20×</td></tr>
+      </tbody>
+    </table>
+    <p>Conclusion: spending engineering effort to trim embedding or vector DB cost is almost always premature. LLM inference is where the bill lives — cache aggressively, use smaller models for easy questions, and route to Sonnet/Opus only when Haiku's confidence is low.</p>
+
+    <h2>Real-world references</h2>
+    <ul>
+      <li><strong>Anthropic: Contextual Retrieval (2024)</strong> — prepend LLM-generated context to each chunk before embedding. 49% reduction in retrieval failure, 67% with reranker. <em>Still the most cost-effective RAG upgrade published.</em></li>
+      <li><strong>Perplexity's search stack</strong> — hybrid retrieval with heavy reranking, aggressive query rewriting, and citation-first prompt design.</li>
+      <li><strong>Vectara / LlamaIndex / Haystack</strong> — open orchestration frameworks that bundle all these stages.</li>
+      <li><strong>ColBERT / ColBERTv2</strong> — late-interaction dense retrieval, middle ground between bi-encoder and cross-encoder. Becoming the default replacement for BM25 in research RAG.</li>
+    </ul>
+
+    <h2>A minimal RAG loop in Python</h2>
+<pre><code>import anthropic
+from openai import OpenAI
+from pinecone import Pinecone
+
+openai = OpenAI()
+pc = Pinecone()
+index = pc.Index("docs")
+claude = anthropic.Anthropic()
+
+def embed(text: str) -> list[float]:
+    resp = openai.embeddings.create(
+        model="text-embedding-3-small",
+        input=text,
+    )
+    return resp.data[0].embedding
+
+def retrieve(query: str, top_k: int = 50) -> list[dict]:
+    qvec = embed(query)
+    # semantic
+    dense = index.query(vector=qvec, top_k=top_k, include_metadata=True)
+    # lexical (pseudo-code; real impl hits Elasticsearch)
+    sparse = bm25_search(query, top_k=top_k)
+    # RRF fusion
+    return rrf_merge(dense.matches, sparse, k=60)[:100]
+
+def rerank(query: str, candidates: list[dict], top_n: int = 5) -> list[dict]:
+    import cohere
+    co = cohere.Client()
+    docs = [c["metadata"]["text"] for c in candidates]
+    resp = co.rerank(model="rerank-v3.0", query=query, documents=docs, top_n=top_n)
+    return [candidates[r.index] for r in resp.results]
+
+def answer(query: str) -> str:
+    candidates = retrieve(query, top_k=50)
+    top5 = rerank(query, candidates, top_n=5)
+
+    context = "\n\n".join(
+        f'&lt;document id="{c["id"]}"&gt;{c["metadata"]["text"]}&lt;/document&gt;'
+        for c in top5
+    )
+
+    msg = claude.messages.create(
+        model="claude-sonnet-4-5",
+        max_tokens=1024,
+        system=(
+            "Answer the user's question using only the provided documents. "
+            "Cite sources with [doc_id]. If the answer is not in the documents, "
+            "say 'I don't know based on the available sources.'"
+        ),
+        messages=[{
+            "role": "user",
+            "content": f"&lt;documents&gt;{context}&lt;/documents&gt;\n\nQuestion: {query}",
+        }],
+    )
+    return msg.content[0].text
+
+print(answer("How do I reset my password?"))
+</code></pre>
+
+    <h2>Common failure modes &amp; fixes</h2>
+    <table>
+      <thead><tr><th>Symptom</th><th>Root cause</th><th>Fix</th></tr></thead>
+      <tbody>
+        <tr><td>LLM hallucinates facts</td><td>Retriever missed the right chunk; model improvised</td><td>Add reranker; add "say I don't know" instruction; eval context recall</td></tr>
+        <tr><td>Retrieves wrong product / wrong customer</td><td>No metadata filter at query time</td><td>Filter by tenant_id / product_id before ANN</td></tr>
+        <tr><td>Answer cites real chunk ID but wrong quote</td><td>Model paraphrased inaccurately</td><td>Use native Claude citations; or post-verify quotes against source</td></tr>
+        <tr><td>Great on eval, bad in prod</td><td>Eval set doesn't match prod query distribution</td><td>Sample real prod queries weekly; grow golden set</td></tr>
+        <tr><td>Slow (&gt;3s p95)</td><td>LLM generation; sequential embed→search→rerank</td><td>Stream response; parallelize dense+sparse; cache embeddings of frequent queries</td></tr>
+        <tr><td>Exact-match queries fail (error codes, SKUs)</td><td>Dense-only retrieval</td><td>Add BM25 hybrid with RRF</td></tr>
+        <tr><td>New docs take days to show up</td><td>Batch-only reindexing</td><td>Dual-write indexing: write doc + enqueue embed job, index incrementally</td></tr>
+      </tbody>
+    </table>
+
+    <h2>Takeaways</h2>
+    <ul>
+      <li>RAG is a <strong>pipeline</strong>, not a model. Most wins come from retrieval-side engineering, not prompt tweaks.</li>
+      <li>Hybrid search (dense + BM25 + RRF) beats either alone. Do this on day one.</li>
+      <li>A reranker gives you more lift than a better embedding model for less money. Add it on day two.</li>
+      <li>Contextual chunking (Anthropic 2024) is the highest-ROI trick published so far.</li>
+      <li>Measure with Ragas. Treat retrieval quality like latency — regression-gate it in CI.</li>
+      <li>LLM inference dominates cost by 10–20×. Optimize there first.</li>
+    </ul>
+  </main>
+</div>
+<script src="../assets/js/nav.js"></script>
+<script src="../assets/js/animator.js"></script>
+<script>
+const arch = new ArchAnimator('#arch');
+let useRerank = true;
+let overlayMode = null; // 'cost' | 'latency' | null
+let stats = { q: 0, totalLat: 0, totalCost: 0 };
+
+const SAMPLE_CHUNKS = [
+  { id: 'chunk_47', score: 0.89, text: 'To reset your password, go to Settings → Security → "Change password". Enter your current password, then your new one (min 12 chars).' },
+  { id: 'chunk_12', score: 0.82, text: 'Account recovery options include: email recovery link (sent to primary email), SMS code, or backup codes generated at 2FA setup.' },
+  { id: 'chunk_91', score: 0.77, text: 'If you cannot access your email, contact support with your account email and last 4 digits of a payment method on file.' },
+  { id: 'chunk_23', score: 0.71, text: 'Password requirements: minimum 12 characters, must include 1 uppercase, 1 number, 1 symbol. Last 5 passwords cannot be reused.' },
+  { id: 'chunk_08', score: 0.68, text: 'Session tokens are invalidated on password change. You will be signed out of all other devices automatically.' },
+];
+
+const SAMPLE_CHUNKS_NORERANK = [
+  { id: 'chunk_47', score: 0.71, text: 'To reset your password, go to Settings → Security → "Change password". Enter your current password, then your new one (min 12 chars).' },
+  { id: 'chunk_56', score: 0.69, text: 'FAQ: My account is locked — this is unrelated to password reset. See the lockout article instead.' },
+  { id: 'chunk_12', score: 0.66, text: 'Account recovery options include: email recovery link, SMS code, or backup codes.' },
+  { id: 'chunk_34', score: 0.64, text: 'Billing: to update the password on your payment method, contact your card issuer directly.' },
+  { id: 'chunk_77', score: 0.61, text: 'Deleted users: once a user is deleted, password recovery is no longer available.' },
+];
+
+function buildArch() {
+  arch.clear();
+  //            id,           label,                              x%,  y%
+  arch.addNode('user',       '👤<br>User',                         5, 50);
+  arch.addNode('embedder',   '🧠<br>Embedder<br><small>text-embedding-3</small>', 22, 50);
+  arch.addNode('vector_db',  '📊<br>Vector DB<br><small>Pinecone</small>',       40, 30);
+  arch.addNode('bm25',       '🔍<br>BM25<br><small>keyword</small>',              40, 70);
+  arch.addNode('reranker',   '🎯<br>Reranker<br><small>cross-encoder</small>',   60, 50);
+  arch.addNode('llm',        '🤖<br>LLM<br><small>Claude</small>',                80, 50);
+
+  arch.addEdges([
+    ['user','embedder'],
+    ['embedder','vector_db'],
+    ['user','bm25'],
+    ['vector_db','reranker'],
+    ['bm25','reranker'],
+    ['reranker','llm'],
+    ['llm','user'],
+  ]);
+
+  applyOverlay();
+}
+
+function applyOverlay() {
+  const labelMap = {
+    cost: {
+      embedder:  '🧠<br>Embedder<br><small>$0.00002</small>',
+      vector_db: '📊<br>Vector DB<br><small>$0.0004</small>',
+      bm25:      '🔍<br>BM25<br><small>$0.0001</small>',
+      reranker:  '🎯<br>Reranker<br><small>$0.0004</small>',
+      llm:       '🤖<br>LLM<br><small>$0.008</small>',
+    },
+    latency: {
+      embedder:  '🧠<br>Embedder<br><small>50ms</small>',
+      vector_db: '📊<br>Vector DB<br><small>30ms</small>',
+      bm25:      '🔍<br>BM25<br><small>20ms</small>',
+      reranker:  '🎯<br>Reranker<br><small>80ms</small>',
+      llm:       '🤖<br>LLM<br><small>1200ms</small>',
+    },
+    default: {
+      embedder:  '🧠<br>Embedder<br><small>text-embedding-3</small>',
+      vector_db: '📊<br>Vector DB<br><small>Pinecone</small>',
+      bm25:      '🔍<br>BM25<br><small>keyword</small>',
+      reranker:  '🎯<br>Reranker<br><small>cross-encoder</small>',
+      llm:       '🤖<br>LLM<br><small>Claude</small>',
+    },
+  };
+  const m = labelMap[overlayMode] || labelMap.default;
+  for (const id in m) {
+    if (arch.setNodeLabel) arch.setNodeLabel(id, m[id]);
+    else {
+      // fallback: find the node DOM element and rewrite innerHTML
+      const el = document.querySelector(`#arch [data-id="${id}"] .node-label, #arch [data-node="${id}"] .node-label, #arch #node-${id} .label`);
+      if (el) el.innerHTML = m[id];
+    }
+  }
+}
+
+function renderStats() {
+  document.getElementById('st-q').textContent = stats.q;
+  document.getElementById('st-lat').textContent = stats.q ? Math.round(stats.totalLat / stats.q) : 0;
+  document.getElementById('st-cost').textContent = '$' + stats.totalCost.toFixed(4);
+  document.getElementById('st-rr').textContent = useRerank ? 'yes' : 'no';
+}
+
+function say(msg) {
+  document.getElementById('desc').innerHTML = msg;
+}
+
+function renderChunks(chunks, badge='') {
+  const html = chunks.map((c, i) =>
+    `<div style="padding:0.3rem 0;border-bottom:1px dashed rgba(255,255,255,0.08);">` +
+    `<strong>#${i+1}</strong> <code style="color:#8ab4ff;">${c.id}</code> ` +
+    `<span style="color:#9f9;">(score: ${c.score.toFixed(2)})</span><br>` +
+    `<span style="color:#bbb;">${c.text}</span>` +
+    `</div>`
+  ).join('');
+  document.getElementById('chunks').innerHTML = badge + html;
+}
+
+async function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+async function runQuery() {
+  stats.q++;
+  renderStats();
+
+  say('<strong>User asks:</strong> "How do I reset my password?"');
+  await sleep(600);
+
+  // Step 1: embed
+  say('<strong>Step 1:</strong> Embed query → 1536-dim vector (~50ms, $0.00002)');
+  await arch.sendPacket('user', 'embedder', { duration: 700 });
+  await sleep(300);
+
+  // Step 2a + 2b run in parallel
+  say('<strong>Step 2a:</strong> Vector search over 1M+ embeddings — top 50 semantic matches (~30ms)<br>' +
+      '<strong>Step 2b:</strong> BM25 keyword search runs in parallel — top 50 lexical matches (~20ms)');
+  await Promise.all([
+    arch.sendPacket('embedder', 'vector_db', { duration: 700 }),
+    arch.sendPacket('user', 'bm25', { duration: 700 }),
+  ]);
+  await sleep(400);
+
+  // Step 3: RRF
+  say('<strong>Step 3:</strong> Merge 50+50 candidates via Reciprocal Rank Fusion (RRF) → 100 unique chunks');
+  await sleep(500);
+
+  if (useRerank) {
+    // Step 4: rerank
+    say('<strong>Step 4:</strong> Rerank 100 candidates with cross-encoder → top 5 (~80ms, $0.0004). ' +
+        '<em>This is where the quality wins come from.</em>');
+    await Promise.all([
+      arch.sendPacket('vector_db', 'reranker', { duration: 700 }),
+      arch.sendPacket('bm25', 'reranker', { duration: 700 }),
+    ]);
+    await sleep(500);
+    renderChunks(SAMPLE_CHUNKS, '<div style="color:#9f9;margin-bottom:0.5rem;">✓ Reranked by cross-encoder</div>');
+
+    // Step 5: prompt
+    say('<strong>Step 5:</strong> Build prompt: &lt;documents&gt;top-5 chunks&lt;/documents&gt; + question + "cite sources / say I don\'t know"');
+    await arch.sendPacket('reranker', 'llm', { duration: 700 });
+  } else {
+    // skip reranker
+    say('<strong>Step 4 (SKIPPED):</strong> No reranker — the LLM gets the top 5 from raw RRF. ' +
+        '<em style="color:#f99;">Expect more noise; chunks 2, 4, 5 are off-topic.</em>');
+    await Promise.all([
+      arch.sendPacket('vector_db', 'llm', { duration: 900 }),
+      arch.sendPacket('bm25', 'llm', { duration: 900 }),
+    ]);
+    renderChunks(SAMPLE_CHUNKS_NORERANK, '<div style="color:#f99;margin-bottom:0.5rem;">⚠ No rerank — noisy top-5</div>');
+  }
+  await sleep(500);
+
+  // Step 6: LLM
+  say('<strong>Step 6:</strong> Call Claude → streaming response (~1200ms, $0.008). Tokens flow back to the user.');
+  await sleep(900);
+
+  // Step 7: response
+  say('<strong>Step 7:</strong> Return answer with source citations: ' +
+      (useRerank
+        ? '"To reset your password, go to Settings → Security [chunk_47]. Recovery options are also available [chunk_12]."'
+        : '"To reset your password, go to Settings → Security [chunk_47]. <em style="color:#f99;">(Answer may be less grounded — noisy context.)</em>"'));
+  await arch.sendPacket('llm', 'user', { cls: 'response', duration: 900 });
+
+  // Tally stats
+  const latency = useRerank ? 1380 : 1280; // skip 80ms rerank + 20ms fusion
+  const cost = useRerank ? 0.00902 : 0.00862;
+  stats.totalLat += latency;
+  stats.totalCost += cost;
+  renderStats();
+
+  say('<strong>Done!</strong> This query: ' + latency + 'ms, $' + cost.toFixed(5) + '. ' +
+      (useRerank
+        ? 'With rerank, top-5 are all on-topic.'
+        : 'Without rerank, the LLM had to filter noise itself — answer quality degrades.'));
+}
+
+document.getElementById('btnAsk').onclick = async () => {
+  const btns = document.querySelectorAll('.viz-btn');
+  btns.forEach(b => b.disabled = true);
+  await runQuery();
+  btns.forEach(b => b.disabled = false);
+};
+
+document.getElementById('btnFast').onclick = () => {
+  useRerank = false;
+  renderStats();
+  say('<strong>Fast path selected.</strong> Reranker will be skipped on the next query. Click <strong>Ask Question</strong>.');
+};
+
+document.getElementById('btnRerank').onclick = () => {
+  useRerank = true;
+  renderStats();
+  say('<strong>Rerank enabled.</strong> Full pipeline on the next query. Click <strong>Ask Question</strong>.');
+};
+
+document.getElementById('btnCost').onclick = () => {
+  overlayMode = overlayMode === 'cost' ? null : 'cost';
+  buildArch();
+  say(overlayMode === 'cost'
+    ? '<strong>Cost overlay ON.</strong> Each node shows per-query cost. LLM generation ($0.008) is ~20× everything else combined.'
+    : 'Overlay cleared.');
+};
+
+document.getElementById('btnLat').onclick = () => {
+  overlayMode = overlayMode === 'latency' ? null : 'latency';
+  buildArch();
+  say(overlayMode === 'latency'
+    ? '<strong>Latency overlay ON.</strong> Each node shows typical per-stage latency. LLM (1200ms) dominates; streaming is how you hide it.'
+    : 'Overlay cleared.');
+};
+
+document.getElementById('btnReset').onclick = () => {
+  useRerank = true;
+  overlayMode = null;
+  stats = { q: 0, totalLat: 0, totalCost: 0 };
+  renderStats();
+  buildArch();
+  document.getElementById('chunks').innerHTML = '<div>— (empty) Run a query to populate —</div>';
+  say('Reset. Click <strong>Ask Question</strong> to start fresh.');
+};
+
+buildArch();
+renderStats();
+</script>
+</body>
+</html>

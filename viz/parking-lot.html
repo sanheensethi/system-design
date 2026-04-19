@@ -1,0 +1,445 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Parking Lot LLD — Interactive Visualization</title>
+<link rel="stylesheet" href="../assets/css/style.css">
+<link rel="stylesheet" href="../assets/css/viz.css">
+<style>
+.lot-floor { background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; padding: 1rem; margin-bottom: 1rem; }
+.lot-floor-title { color: var(--text-dim); font-size: 0.85rem; margin-bottom: 0.75rem; }
+.lot-spots { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+.lot-spot { width: 90px; height: 70px; border-radius: 6px; border: 2px solid var(--border); background: var(--code-bg); display: flex; flex-direction: column; align-items: center; justify-content: center; font-size: 0.75rem; font-family: Monaco, monospace; transition: all 0.3s; position: relative; }
+.lot-spot.COMPACT { border-top: 3px solid #60a5fa; }
+.lot-spot.REGULAR { border-top: 3px solid #a78bfa; }
+.lot-spot.LARGE   { border-top: 3px solid #fbbf24; }
+.lot-spot.occupied { background: rgba(248,113,113,0.15); }
+.lot-spot.parking { background: rgba(52,211,153,0.25); transform: scale(1.1); }
+.lot-spot.exiting { opacity: 0.3; }
+.lot-spot.collision { background: rgba(239,68,68,0.4); border-color: #ef4444; animation: shake 0.4s; }
+@keyframes shake { 0%,100%{transform:translateX(0);} 25%{transform:translateX(-4px);} 75%{transform:translateX(4px);} }
+.plate { font-weight: bold; color: var(--warn); font-size: 0.85rem; }
+.spot-id { color: var(--text-dim); }
+.type-label { font-size: 0.65rem; color: var(--text-dim); letter-spacing: 0.5px; }
+.legend { display: flex; gap: 1rem; font-size: 0.8rem; color: var(--text-dim); margin-bottom: 1rem; flex-wrap: wrap; }
+.legend-item { display: flex; align-items: center; gap: 0.4rem; }
+.legend-swatch { width: 16px; height: 8px; border-radius: 2px; }
+.lock-badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 0.75rem; font-weight: bold; }
+.lock-badge.on  { background: rgba(52,211,153,0.2); color: #34d399; }
+.lock-badge.off { background: rgba(248,113,113,0.2); color: #f87171; }
+</style>
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">System Design Books</div>
+    <div class="brand-sub">by Sanheen · Progressive Learning</div>
+    <div class="nav-section">
+      <h3>Home</h3>
+      <a href="../index.html">Overview</a>
+    </div>
+    <div class="nav-section">
+      <h3>🎬 Interactive Visualizations</h3>
+      <a href="index.html">Viz Index</a>
+      <a href="lru-cache.html">LRU Cache (LLD)</a>
+      <a href="request-flow.html">Request Flow (HLD)</a>
+      <a href="load-balancer.html">Load Balancer (HLD)</a>
+      <a href="cache-aside.html">Cache Aside Pattern (HLD)</a>
+      <a href="parking-lot.html">Parking Lot (LLD)</a>
+    </div>
+    <div class="nav-section">
+      <h3>Book II — High Level Design</h3>
+      <a href="../hld/index.html">HLD Index</a>
+    </div>
+  </aside>
+
+  <main class="main">
+    <div class="breadcrumb"><a href="../index.html">Home</a> / <a href="index.html">Visualizations</a> / Parking Lot LLD</div>
+    <h1>Parking Lot LLD — Park, Exit, and the Race Condition</h1>
+    <p>A 3-floor parking lot with typed spots (COMPACT / REGULAR / LARGE). Park cars, trigger exits, and watch what happens when <strong>two cars race for the last spot</strong> — with and without per-spot locks.</p>
+
+    <div class="legend">
+      <div class="legend-item"><div class="legend-swatch" style="background:#60a5fa"></div>COMPACT · $10/hr</div>
+      <div class="legend-item"><div class="legend-swatch" style="background:#a78bfa"></div>REGULAR · $20/hr</div>
+      <div class="legend-item"><div class="legend-swatch" style="background:#fbbf24"></div>LARGE · $40/hr</div>
+      <div class="legend-item"><div class="legend-swatch" style="background:rgba(248,113,113,0.5)"></div>Occupied</div>
+      <div class="legend-item"><div class="legend-swatch" style="background:rgba(52,211,153,0.5)"></div>Parking now</div>
+    </div>
+
+    <div class="viz-controls">
+      <button class="viz-btn primary" id="btnPark">🚗 Park Car</button>
+      <button class="viz-btn" id="btnBike">🏍️ Park Bike</button>
+      <button class="viz-btn" id="btnTruck">🚛 Park Truck</button>
+      <button class="viz-btn" id="btnExit">🚪 Exit First Car</button>
+      <button class="viz-btn" id="btnRace">💥 Race Condition Demo</button>
+      <button class="viz-btn" id="btnLock">📊 Toggle Lock Mode</button>
+      <button class="viz-btn" id="btnReset">Reset</button>
+    </div>
+
+    <div id="lot"></div>
+
+    <div class="viz-stats">
+      <div class="viz-stat"><div class="viz-stat-val" id="st-parked">0</div><div class="viz-stat-label">Cars Parked</div></div>
+      <div class="viz-stat"><div class="viz-stat-val" id="st-exits">0</div><div class="viz-stat-label">Exits</div></div>
+      <div class="viz-stat"><div class="viz-stat-val" id="st-rev">$0</div><div class="viz-stat-label">Revenue</div></div>
+      <div class="viz-stat"><div class="viz-stat-val"><span id="st-lock" class="lock-badge on">ON</span></div><div class="viz-stat-label">Lock Mode</div></div>
+      <div class="viz-stat"><div class="viz-stat-val" id="st-coll">0</div><div class="viz-stat-label">Race Collisions</div></div>
+    </div>
+
+    <div class="viz-desc" id="desc" style="margin-top:1rem;min-height:60px;">Click <strong>🚗 Park Car</strong> to assign a random vehicle to its nearest fitting spot. Toggle lock mode OFF, then hit <strong>💥 Race Condition Demo</strong> to see the double-occupy bug.</div>
+
+    <h2>Class Design</h2>
+<pre><code>ParkingLot
+ ├── floors: List[Floor]
+ ├── tickets: Dict[plate, Ticket]
+ ├── pricing_strategy: PricingStrategy   ← swappable (Strategy pattern)
+ └── park(vehicle) / exit(plate)
+
+Floor
+ ├── floor_id: int
+ └── spots: List[Spot]
+
+Spot
+ ├── spot_id: str          (e.g. "F2-R5")
+ ├── type: SpotType        (COMPACT | REGULAR | LARGE)
+ ├── lock: threading.Lock  ← per-spot, NOT global
+ ├── occupied: bool
+ └── vehicle: Vehicle | None
+
+Vehicle  (abstract)
+ ├── Bike    → fits COMPACT
+ ├── Car     → fits REGULAR or LARGE
+ └── Truck   → fits LARGE only
+
+PricingStrategy  (abstract)
+ ├── HourlyPricing     → $10 / $20 / $40 per hour by type
+ ├── FlatDailyPricing  → $50 / $80 / $150 per day
+ └── DynamicPricing    → surge multiplier during peak hours
+</code></pre>
+
+    <h2>The Strategy Pattern for Pricing</h2>
+    <p>Swap pricing rules without touching the <code>ParkingLot</code> class. Ops can A/B test flat vs. hourly vs. surge pricing by injecting a different strategy at startup.</p>
+<pre><code>class PricingStrategy(ABC):
+    @abstractmethod
+    def compute(self, spot_type: SpotType, duration_s: int) -&gt; float: ...
+
+class HourlyPricing(PricingStrategy):
+    RATES = {COMPACT: 10, REGULAR: 20, LARGE: 40}
+    def compute(self, spot_type, duration_s):
+        hours = max(1, math.ceil(duration_s / 3600))
+        return hours * self.RATES[spot_type]
+
+# Injection — one-line swap
+lot = ParkingLot(pricing=HourlyPricing())
+# lot = ParkingLot(pricing=DynamicPricing())</code></pre>
+
+    <h2>Why Per-Spot Lock (Not Global Lock)</h2>
+    <table>
+      <thead><tr><th>Strategy</th><th>Correctness</th><th>Throughput</th><th>Verdict</th></tr></thead>
+      <tbody>
+        <tr><td>No lock</td><td>❌ Double-occupy possible</td><td>Fastest</td><td>Broken</td></tr>
+        <tr><td>Global <code>lot.lock</code></td><td>✅ Safe</td><td>1 park op at a time across 1000s of spots</td><td>Correct but bottleneck</td></tr>
+        <tr><td><strong>Per-spot lock</strong></td><td>✅ Safe</td><td>N concurrent parks on N different spots</td><td>Winner</td></tr>
+        <tr><td>Optimistic CAS</td><td>✅ Safe</td><td>Highest; retries on conflict</td><td>Best under very high contention</td></tr>
+      </tbody>
+    </table>
+
+    <h2>The <code>park()</code> Method — With Proper Locking</h2>
+<pre><code>def park(self, vehicle: Vehicle) -&gt; Ticket:
+    required = vehicle.required_spot_type()
+    for floor in self.floors:                       # nearest-first: floor 1, then 2...
+        for spot in floor.spots:
+            if spot.type != required and not _compatible(spot.type, required):
+                continue
+            # Fast check (dirty read) — skip obvious no-go spots without locking
+            if spot.occupied:
+                continue
+            # Contended check — acquire the spot's OWN lock
+            with spot.lock:
+                if spot.occupied:          # double-check AFTER acquiring
+                    continue               # someone beat us to it → keep searching
+                spot.occupied = True
+                spot.vehicle  = vehicle
+                ticket = Ticket(
+                    plate=vehicle.plate,
+                    spot_id=spot.spot_id,
+                    entry_time=time.time(),
+                )
+                self.tickets[vehicle.plate] = ticket
+                return ticket              # lock auto-released on exit
+    raise LotFullError(f"No {required.name} spot available")</code></pre>
+
+    <h2>Edge Cases</h2>
+    <ul>
+      <li><strong>Vehicle type mismatch:</strong> Truck into COMPACT → skipped during iteration; only LARGE spots considered.</li>
+      <li><strong>All spots full:</strong> raise <code>LotFullError</code>; API returns HTTP 409. Don't silently block.</li>
+      <li><strong>Malformed plate:</strong> validate regex at entry gate (<code>^[A-Z]{2}-\d{2}-\d{4}$</code>); reject with 400 before hitting <code>park()</code>.</li>
+      <li><strong>Simultaneous exit:</strong> exit grabs the same per-spot lock, sets <code>occupied=False</code>. A parallel <code>park()</code> that was mid-iteration simply re-reads the spot on its next lap.</li>
+      <li><strong>Ticket lost:</strong> license-plate lookup fallback; operator manual-override flow with audit log.</li>
+      <li><strong>Clock skew on pricing:</strong> always bill using <code>server</code> time, not client-provided timestamps.</li>
+    </ul>
+  </main>
+</div>
+<script src="../assets/js/nav.js"></script>
+<script src="../assets/js/animator.js"></script>
+<script>
+// ---------- Data model ----------
+const TYPES = { COMPACT: 'COMPACT', REGULAR: 'REGULAR', LARGE: 'LARGE' };
+const RATES = { COMPACT: 10, REGULAR: 20, LARGE: 40 };
+const FLOOR_LAYOUT = [
+  // Floor 1: 2 COMPACT, 4 REGULAR, 2 LARGE
+  ['COMPACT','COMPACT','REGULAR','REGULAR','REGULAR','REGULAR','LARGE','LARGE'],
+  // Floor 2: 3 COMPACT, 4 REGULAR, 1 LARGE
+  ['COMPACT','COMPACT','COMPACT','REGULAR','REGULAR','REGULAR','REGULAR','LARGE'],
+  // Floor 3: 2 COMPACT, 5 REGULAR, 1 LARGE
+  ['COMPACT','COMPACT','REGULAR','REGULAR','REGULAR','REGULAR','REGULAR','LARGE'],
+];
+
+let spots = [];      // flat list with floor metadata
+let tickets = [];    // active tickets
+let lockMode = true; // per-spot locking enabled by default
+let stats = { parked: 0, exits: 0, revenue: 0, collisions: 0 };
+let plateCounter = 1000;
+
+function buildLot() {
+  spots = [];
+  FLOOR_LAYOUT.forEach((floorTypes, fIdx) => {
+    const floor = fIdx + 1;
+    floorTypes.forEach((type, sIdx) => {
+      const shortCode = type === 'COMPACT' ? 'C' : type === 'REGULAR' ? 'R' : 'L';
+      spots.push({
+        id: `F${floor}-${shortCode}${sIdx+1}`,
+        floor, type,
+        occupied: false,
+        locked: false, // simulated lock held flag
+        vehicle: null,
+        entryTime: null,
+      });
+    });
+  });
+}
+
+function renderLot() {
+  const el = document.getElementById('lot');
+  el.innerHTML = '';
+  for (let f = 1; f <= 3; f++) {
+    const floorDiv = document.createElement('div');
+    floorDiv.className = 'lot-floor';
+    floorDiv.innerHTML = `<div class="lot-floor-title">Floor ${f}</div>`;
+    const spotsDiv = document.createElement('div');
+    spotsDiv.className = 'lot-spots';
+    spots.filter(s => s.floor === f).forEach(s => {
+      const d = document.createElement('div');
+      d.className = `lot-spot ${s.type}` + (s.occupied ? ' occupied' : '');
+      d.id = `spot-${s.id}`;
+      d.innerHTML = `
+        <div class="type-label">${s.type}</div>
+        <div class="spot-id">${s.id}</div>
+        <div class="plate">${s.vehicle ? s.vehicle.plate : '&nbsp;'}</div>
+      `;
+      spotsDiv.appendChild(d);
+    });
+    floorDiv.appendChild(spotsDiv);
+    el.appendChild(floorDiv);
+  }
+}
+
+function renderStats() {
+  document.getElementById('st-parked').textContent = stats.parked;
+  document.getElementById('st-exits').textContent  = stats.exits;
+  document.getElementById('st-rev').textContent    = '$' + stats.revenue.toFixed(0);
+  document.getElementById('st-coll').textContent   = stats.collisions;
+  const badge = document.getElementById('st-lock');
+  badge.textContent = lockMode ? 'ON' : 'OFF';
+  badge.className = 'lock-badge ' + (lockMode ? 'on' : 'off');
+}
+
+function say(msg) { document.getElementById('desc').innerHTML = msg; }
+function delay(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+function makePlate() {
+  const s1 = ['KA','MH','DL','TN','UP'][Math.floor(Math.random()*5)];
+  const s2 = String(10 + Math.floor(Math.random()*89));
+  const s3 = String(plateCounter++);
+  return `${s1}-${s2}-${s3}`;
+}
+
+function compatible(spotType, required) {
+  // A car needing REGULAR can also fit in LARGE.
+  if (spotType === required) return true;
+  if (required === 'REGULAR' && spotType === 'LARGE') return true;
+  return false;
+}
+
+function findSpot(requiredType) {
+  // Nearest-first: floor 1 top-to-bottom, then floor 2, then 3.
+  for (const s of spots) {
+    if (!s.occupied && compatible(s.type, requiredType)) return s;
+  }
+  return null;
+}
+
+async function highlight(spotId, cls, ms = 700) {
+  const el = document.getElementById('spot-' + spotId);
+  if (!el) return;
+  el.classList.add(cls);
+  await delay(ms);
+  el.classList.remove(cls);
+}
+
+async function parkVehicle(kind) {
+  const plate = makePlate();
+  let required;
+  if (kind === 'bike')       required = 'COMPACT';
+  else if (kind === 'truck') required = 'LARGE';
+  else                       required = 'REGULAR';
+
+  say(`🚗 Car <strong>${plate}</strong> requests <strong>${required}</strong> spot → searching floors...`);
+  await delay(500);
+
+  const spot = findSpot(required);
+  if (!spot) {
+    say(`🚫 <strong style="color:var(--danger)">LotFullError:</strong> no ${required} spot available. HTTP 409 returned.`);
+    return;
+  }
+
+  say(`Found <strong>${spot.id}</strong> (Floor ${spot.floor}) → attempting to occupy...`);
+  await highlight(spot.id, 'parking', 500);
+
+  if (lockMode) {
+    say(`🔒 <strong>with spot.lock:</strong> acquired <code>${spot.id}.lock</code>, checking occupied=False, setting occupied=True, releasing lock. ✓`);
+  } else {
+    say(`⚠️ <strong>Lock OFF:</strong> writing spot.occupied=True without mutex. Works for single-threaded, dangerous under concurrency.`);
+  }
+  await delay(600);
+
+  spot.occupied = true;
+  spot.vehicle = { plate, kind };
+  spot.entryTime = Date.now();
+  tickets.push({ plate, spotId: spot.id, entry: spot.entryTime, type: spot.type });
+  stats.parked++;
+
+  const ts = new Date().toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit' });
+  say(`✅ Assigned <strong>${spot.id}</strong> to <strong>${plate}</strong>. Ticket issued. Entry time: ${ts}. Rate: $${RATES[spot.type]}/hr.`);
+  renderLot(); renderStats();
+}
+
+async function exitFirst() {
+  if (tickets.length === 0) { say('No cars to exit.'); return; }
+  const t = tickets.shift();
+  const spot = spots.find(s => s.id === t.spotId);
+
+  const elapsedMs = Date.now() - t.entry;
+  // Speed up for demo: treat every real second as 5 minutes elapsed.
+  const simulatedSeconds = (elapsedMs / 1000) * 300;
+  const hours = Math.max(1, Math.ceil(simulatedSeconds / 3600));
+  const fee = hours * RATES[t.type];
+
+  say(`🚪 <strong>${t.plate}</strong> exiting <strong>${spot.id}</strong>. Acquiring spot.lock → occupied=False → release.`);
+  await highlight(spot.id, 'exiting', 600);
+
+  spot.occupied = false;
+  spot.vehicle = null;
+  spot.entryTime = null;
+  stats.exits++;
+  stats.revenue += fee;
+  say(`💰 Fee = ${hours}h × $${RATES[t.type]}/hr (${t.type}) = <strong>$${fee}</strong>. Gate opens. Have a great day!`);
+  renderLot(); renderStats();
+}
+
+async function raceDemo() {
+  // Fill everything except ONE REGULAR spot.
+  say('⚙️ Setting up scenario: filling lot until exactly ONE REGULAR spot remains...');
+  await delay(400);
+
+  // Reset and pre-fill
+  spots.forEach(s => { s.occupied = false; s.vehicle = null; s.entryTime = null; });
+  tickets = [];
+  let target = null;
+  let count = 0;
+  for (const s of spots) {
+    if (s.type === 'REGULAR' && !target) { target = s; continue; } // leave first REGULAR empty
+    s.occupied = true;
+    s.vehicle = { plate: makePlate(), kind: 'car' };
+    s.entryTime = Date.now() - 1000*60*30;
+    tickets.push({ plate: s.vehicle.plate, spotId: s.id, entry: s.entryTime, type: s.type });
+    count++;
+  }
+  stats.parked += count;
+  renderLot(); renderStats();
+  await delay(500);
+
+  const carA = 'KA-99-' + (plateCounter++);
+  const carB = 'MH-88-' + (plateCounter++);
+  say(`Two cars arrive simultaneously: <strong>${carA}</strong> and <strong>${carB}</strong>. Both ask for a REGULAR spot. Only <strong>${target.id}</strong> remains.`);
+  await delay(900);
+
+  if (lockMode) {
+    say(`🔒 <strong>Lock ON:</strong> Both threads race to <code>${target.id}.lock</code>. Thread A wins the mutex first.`);
+    await highlight(target.id, 'parking', 600);
+    target.occupied = true;
+    target.vehicle = { plate: carA, kind: 'car' };
+    target.entryTime = Date.now();
+    tickets.push({ plate: carA, spotId: target.id, entry: target.entryTime, type: target.type });
+    stats.parked++;
+    renderLot(); renderStats();
+
+    say(`Thread A: occupied=True, releases lock. ✓ <strong>${carA}</strong> parked at <strong>${target.id}</strong>.`);
+    await delay(900);
+    say(`Thread B: acquires lock, re-checks occupied → <strong>True</strong>! Releases lock, keeps searching. → <strong>LotFullError</strong> for ${carB}. Retries at next gate.`);
+  } else {
+    say(`⚠️ <strong>Lock OFF:</strong> Both threads read <code>${target.id}.occupied = False</code> simultaneously...`);
+    await delay(700);
+    await highlight(target.id, 'collision', 900);
+
+    // Collision: both "succeed"
+    target.occupied = true;
+    target.vehicle = { plate: `${carA} + ${carB}`, kind: 'car' };
+    target.entryTime = Date.now();
+    tickets.push({ plate: carA, spotId: target.id, entry: target.entryTime, type: target.type });
+    tickets.push({ plate: carB, spotId: target.id, entry: target.entryTime, type: target.type });
+    stats.parked += 2;
+    stats.collisions++;
+    renderLot(); renderStats();
+    say(`💥 <strong style="color:var(--danger)">COLLISION:</strong> Car A and Car B both see ${target.id} empty. Both write occupied=True. ${target.id} now has <strong>2 cars on 1 spot</strong>! Physical collision, angry customers, litigation.`);
+  }
+}
+
+// ---------- Wiring ----------
+async function withDisabled(fn) {
+  document.querySelectorAll('.viz-btn').forEach(b => b.disabled = true);
+  try { await fn(); } finally {
+    document.querySelectorAll('.viz-btn').forEach(b => b.disabled = false);
+  }
+}
+
+document.getElementById('btnPark').onclick  = () => withDisabled(() => parkVehicle('car'));
+document.getElementById('btnBike').onclick  = () => withDisabled(() => parkVehicle('bike'));
+document.getElementById('btnTruck').onclick = () => withDisabled(() => parkVehicle('truck'));
+document.getElementById('btnExit').onclick  = () => withDisabled(() => exitFirst());
+document.getElementById('btnRace').onclick  = () => withDisabled(() => raceDemo());
+
+document.getElementById('btnLock').onclick = () => {
+  lockMode = !lockMode;
+  renderStats();
+  say(lockMode
+    ? '🔒 <strong>Lock mode ON.</strong> Per-spot mutex guards every state write. Safe under any concurrency.'
+    : '🔓 <strong>Lock mode OFF.</strong> Running without mutex. Safe only if you promise there is exactly one thread (narrator voice: there never is).');
+};
+
+document.getElementById('btnReset').onclick = () => {
+  buildLot();
+  tickets = [];
+  plateCounter = 1000;
+  stats = { parked: 0, exits: 0, revenue: 0, collisions: 0 };
+  renderLot(); renderStats();
+  say('Lot reset. 24 spots empty across 3 floors. Try parking something.');
+};
+
+buildLot();
+renderLot();
+renderStats();
+</script>
+</body>
+</html>

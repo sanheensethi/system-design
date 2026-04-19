@@ -1,0 +1,560 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>BFS vs DFS — Graph Traversal Visualization</title>
+<link rel="stylesheet" href="../assets/css/style.css">
+<link rel="stylesheet" href="../assets/css/viz.css">
+<style>
+.bfs-layout { display: grid; grid-template-columns: 1fr 280px; gap: 1.5rem; margin-top: 1rem; }
+@media (max-width: 900px) { .bfs-layout { grid-template-columns: 1fr; } }
+.graph-svg { width: 100%; height: 480px; background: #0b1220; border: 1px solid var(--border); border-radius: 8px; }
+.gr-node circle { stroke-width: 3; transition: fill 0.35s ease, stroke 0.35s ease; }
+.gr-node.unvisited circle { fill: #161f2e; stroke: var(--border); }
+.gr-node.frontier circle { fill: #1f2937; stroke: var(--warn); }
+.gr-node.current circle { fill: var(--accent); stroke: var(--accent); }
+.gr-node.visited circle { fill: var(--success); stroke: var(--success); }
+.gr-node text { font-size: 15px; font-weight: 700; fill: var(--text); font-family: Monaco, monospace; text-anchor: middle; dominant-baseline: central; pointer-events: none; }
+.gr-edge { stroke: var(--border); stroke-width: 2; }
+.gr-edge.active { stroke: var(--accent); stroke-width: 3; }
+.gr-edge.traversed { stroke: var(--success); stroke-width: 2.5; }
+.gr-disc { font-size: 10px; fill: var(--warn); font-family: Monaco, monospace; text-anchor: middle; }
+
+.ds-panel { background: #0b1220; border: 1px solid var(--border); border-radius: 8px; padding: 1rem; min-height: 480px; }
+.ds-title { font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-dim); margin-bottom: 0.5rem; font-weight: 600; }
+.ds-label { font-family: Monaco, monospace; color: var(--text-dim); font-size: 0.75rem; margin-bottom: 0.4rem; }
+.ds-container { display: flex; flex-direction: column; gap: 4px; padding: 8px; background: #161f2e; border: 1px dashed var(--border); border-radius: 4px; min-height: 140px; margin-bottom: 0.8rem; }
+.ds-item { background: var(--accent); color: #0b1220; padding: 8px 10px; font-weight: 700; font-family: Monaco, monospace; border-radius: 4px; text-align: center; font-size: 0.95rem; animation: slideIn 0.3s ease; display: flex; justify-content: space-between; align-items: center; }
+.ds-item.head { background: var(--warn); }
+.ds-item .pos { font-size: 0.7rem; opacity: 0.75; font-weight: 500; }
+@keyframes slideIn { from { transform: translateY(-8px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+.ds-empty { color: var(--text-dim); font-style: italic; text-align: center; padding: 1.5rem 0; font-size: 0.85rem; }
+
+.visited-list { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 0.4rem; }
+.visited-chip { background: var(--success); color: #0b1220; padding: 3px 8px; font-family: Monaco, monospace; font-weight: 700; font-size: 0.8rem; border-radius: 3px; }
+
+.algo-toggle { display: inline-flex; background: #161f2e; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; margin-right: 0.4rem; }
+.algo-toggle button { background: transparent; border: none; color: var(--text-dim); padding: 0.5rem 1rem; font-weight: 700; cursor: pointer; font-family: inherit; font-size: 0.9rem; }
+.algo-toggle button.active { background: var(--accent); color: #0b1220; }
+
+.narration { background: #0b1220; border-left: 3px solid var(--accent); padding: 0.85rem 1rem; margin-top: 1rem; font-family: Monaco, monospace; font-size: 0.88rem; line-height: 1.5; min-height: 55px; color: var(--text); }
+
+.legend { display: flex; gap: 1rem; flex-wrap: wrap; margin-top: 0.75rem; font-size: 0.8rem; color: var(--text-dim); }
+.lg-dot { display: inline-block; width: 12px; height: 12px; border-radius: 50%; margin-right: 4px; vertical-align: middle; border: 2px solid; }
+.lg-unvisited { background: #161f2e; border-color: var(--border); }
+.lg-frontier { background: #1f2937; border-color: var(--warn); }
+.lg-current { background: var(--accent); border-color: var(--accent); }
+.lg-visited { background: var(--success); border-color: var(--success); }
+
+table.cmp { width: 100%; border-collapse: collapse; margin: 1rem 0; }
+table.cmp th, table.cmp td { border: 1px solid var(--border); padding: 0.55rem 0.8rem; text-align: left; font-size: 0.92rem; }
+table.cmp th { background: #161f2e; color: var(--accent); font-weight: 700; }
+table.cmp td:first-child { font-weight: 600; color: var(--text-dim); }
+</style>
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">System Design Books</div>
+    <div class="brand-sub">by Sanheen · Progressive Learning</div>
+    <div class="nav-section">
+      <h3>Home</h3>
+      <a href="../index.html">Overview</a>
+    </div>
+    <div class="nav-section">
+      <h3>🎬 Interactive Viz</h3>
+      <a href="index.html">Viz Index</a>
+      <a href="lru-cache.html">LRU Cache (LLD)</a>
+      <a href="bfs-dfs.html">BFS / DFS (LLD)</a>
+      <a href="request-flow.html">Request Flow (HLD)</a>
+      <a href="load-balancer.html">Load Balancer (HLD)</a>
+      <a href="cache-aside.html">Cache Aside Pattern (HLD)</a>
+    </div>
+    <div class="nav-section">
+      <h3>Book I — Low Level Design</h3>
+      <a href="../lld/index.html">LLD Index</a>
+    </div>
+    <div class="nav-section">
+      <h3>Book II — High Level Design</h3>
+      <a href="../hld/index.html">HLD Index</a>
+    </div>
+    <div class="nav-section">
+      <h3>Book III — AI System Design</h3>
+      <a href="../ai/index.html">AI Index</a>
+    </div>
+  </aside>
+
+  <main class="main">
+    <div class="breadcrumb"><a href="../index.html">Home</a> / <a href="index.html">Viz</a> / BFS vs DFS</div>
+    <h1>BFS vs DFS — Graph Traversal Visualization</h1>
+    <p>Same graph, two strategies. <strong>BFS</strong> uses a <em>queue</em> and fans out level-by-level (shortest path in unweighted graphs). <strong>DFS</strong> uses a <em>stack</em> (or recursion) and goes deep along one branch before backtracking. Pick a start node, pick an algorithm, hit Play, and watch the difference.</p>
+
+    <div class="viz-controls">
+      <span class="algo-toggle">
+        <button id="btnBfs" class="active">BFS</button>
+        <button id="btnDfs">DFS</button>
+      </span>
+      <label style="font-size:0.85rem;color:var(--text-dim);margin-right:0.3rem;">Start:</label>
+      <select id="startSel" class="viz-btn" style="padding:0.4rem 0.6rem;">
+        <option>A</option><option>B</option><option>C</option><option>D</option>
+        <option>E</option><option>F</option><option>G</option><option>H</option>
+      </select>
+      <button class="viz-btn primary" id="btnPlay">▶ Play</button>
+      <button class="viz-btn" id="btnStep">Step ▶</button>
+      <button class="viz-btn" id="btnReset">⟲ Reset</button>
+      <label style="font-size:0.85rem;color:var(--text-dim);margin-left:0.5rem;">Speed:</label>
+      <input type="range" id="speed" min="200" max="1600" step="100" value="700" style="vertical-align:middle;">
+    </div>
+
+    <div class="bfs-layout">
+      <div>
+        <svg class="graph-svg" id="graph" viewBox="0 0 600 480"></svg>
+        <div class="legend">
+          <span><span class="lg-dot lg-unvisited"></span>Unvisited</span>
+          <span><span class="lg-dot lg-frontier"></span>In queue / stack</span>
+          <span><span class="lg-dot lg-current"></span>Current</span>
+          <span><span class="lg-dot lg-visited"></span>Visited</span>
+        </div>
+      </div>
+      <div class="ds-panel">
+        <div class="ds-title" id="dsTitle">Queue (FIFO)</div>
+        <div class="ds-label" id="dsHeadLabel">← head (dequeue)</div>
+        <div class="ds-container" id="dsContainer">
+          <div class="ds-empty">empty</div>
+        </div>
+        <div class="ds-label" id="dsTailLabel">tail (enqueue) ←</div>
+        <div class="ds-title" style="margin-top:1rem;">Visited (in order)</div>
+        <div class="visited-list" id="visitedList"></div>
+      </div>
+    </div>
+
+    <div class="narration" id="narration">Pick an algorithm and start node, then press <strong>Play</strong> or <strong>Step ▶</strong>.</div>
+
+    <div class="viz-stats" style="margin-top:1rem;">
+      <div class="viz-stat"><div class="viz-stat-val" id="stVisited">0</div><div class="viz-stat-label">Visited</div></div>
+      <div class="viz-stat"><div class="viz-stat-val" id="stDs">0</div><div class="viz-stat-label" id="stDsLabel">Queue size</div></div>
+      <div class="viz-stat"><div class="viz-stat-val" id="stStep">0</div><div class="viz-stat-label">Step</div></div>
+      <div class="viz-stat"><div class="viz-stat-val" id="stCurrent">—</div><div class="viz-stat-label">Current node</div></div>
+    </div>
+
+    <h2>BFS vs DFS — At a Glance</h2>
+    <table class="cmp">
+      <thead><tr><th>Property</th><th>BFS</th><th>DFS</th></tr></thead>
+      <tbody>
+        <tr><td>Data structure</td><td>Queue (FIFO)</td><td>Stack (LIFO) or recursion</td></tr>
+        <tr><td>Visits nodes</td><td>Level by level (broad)</td><td>Deep first, then backtrack</td></tr>
+        <tr><td>Shortest path (unweighted)</td><td><strong>YES</strong> — first time you reach a node is via fewest edges</td><td>NO — may reach a node via a long detour</td></tr>
+        <tr><td>Typical use case</td><td>Shortest path, level-order traversal, finding all nodes within k hops</td><td>Cycle detection, topological sort, connected components, maze solving</td></tr>
+        <tr><td>Space complexity</td><td>O(width) — the widest level</td><td>O(depth) — the deepest branch</td></tr>
+        <tr><td>Time complexity</td><td>O(V + E)</td><td>O(V + E)</td></tr>
+        <tr><td>Implementation pitfall</td><td>Forgetting to mark as visited <em>when enqueuing</em> → duplicates in queue</td><td>Recursion stack overflow on deep graphs → use iterative stack</td></tr>
+      </tbody>
+    </table>
+
+    <h2>Python — Both Algorithms</h2>
+    <pre><code>from collections import deque
+
+def bfs(graph, start):
+    visited = {start}
+    queue = deque([start])
+    order = []
+    while queue:
+        node = queue.popleft()          # FIFO
+        order.append(node)
+        for nbr in graph[node]:
+            if nbr not in visited:
+                visited.add(nbr)        # mark on enqueue, not on dequeue
+                queue.append(nbr)
+    return order
+
+def dfs(graph, start, visited=None, order=None):
+    if visited is None:
+        visited, order = set(), []
+    visited.add(start)
+    order.append(start)
+    for nbr in graph[start]:
+        if nbr not in visited:
+            dfs(graph, nbr, visited, order)
+    return order
+
+# Iterative DFS (no recursion limit):
+def dfs_iter(graph, start):
+    visited = set()
+    stack = [start]
+    order = []
+    while stack:
+        node = stack.pop()              # LIFO
+        if node in visited:
+            continue
+        visited.add(node)
+        order.append(node)
+        # Push neighbors in reverse so first one is popped first
+        for nbr in reversed(graph[node]):
+            if nbr not in visited:
+                stack.append(nbr)
+    return order</code></pre>
+
+    <h2>When to Pick Which</h2>
+    <h3>Reach for BFS when…</h3>
+    <ul>
+      <li><strong>Shortest path in an unweighted graph</strong> — BFS guarantees the first time you reach a node is via the fewest edges.</li>
+      <li><strong>Level-order / nearest-first</strong> — "find all friends within 2 hops", web crawler bounded by depth, social feed expansion.</li>
+      <li><strong>Small-diameter graphs</strong> — social networks where the graph is wide but shallow.</li>
+      <li><strong>Finding the nearest anything</strong> — nearest exit in a maze, nearest gas station in a grid.</li>
+    </ul>
+
+    <h3>Reach for DFS when…</h3>
+    <ul>
+      <li><strong>Cycle detection</strong> — track nodes in the current recursion stack (gray/black coloring).</li>
+      <li><strong>Topological sort</strong> — post-order DFS on a DAG gives you reverse topological order.</li>
+      <li><strong>Connected components</strong> — DFS from each unvisited node, count starts.</li>
+      <li><strong>Backtracking / search</strong> — Sudoku, N-queens, generating permutations — DFS is your exploration skeleton.</li>
+      <li><strong>Maze solving when ANY path will do</strong> — DFS finds <em>a</em> path quickly; BFS finds <em>the shortest</em>.</li>
+    </ul>
+
+    <div class="callout">
+      <div class="callout-title">The one-line mental model</div>
+      BFS is a <strong>ripple</strong> spreading out from the start node across the pond. DFS is a <strong>thread</strong> you unspool down one corridor until it dead-ends, then you pull it back and try the next corridor.
+    </div>
+  </main>
+</div>
+<script src="../assets/js/nav.js"></script>
+<script>
+// ---------- Graph definition ----------
+const NODES = {
+  A: { x: 300, y: 60  },
+  B: { x: 160, y: 160 },
+  C: { x: 440, y: 160 },
+  D: { x: 80,  y: 290 },
+  E: { x: 240, y: 290 },
+  F: { x: 360, y: 290 },
+  G: { x: 520, y: 290 },
+  H: { x: 300, y: 420 },
+};
+// Adjacency: A-B, A-C, B-D, B-E, C-F, C-G, E-H, F-H
+const ADJ = {
+  A: ['B','C'],
+  B: ['A','D','E'],
+  C: ['A','F','G'],
+  D: ['B'],
+  E: ['B','H'],
+  F: ['C','H'],
+  G: ['C'],
+  H: ['E','F'],
+};
+const EDGES = [
+  ['A','B'],['A','C'],
+  ['B','D'],['B','E'],
+  ['C','F'],['C','G'],
+  ['E','H'],['F','H'],
+];
+
+// ---------- State ----------
+let algo = 'BFS';
+let start = 'A';
+let steps = [];     // pre-computed trace
+let cursor = 0;     // current step index
+let playing = false;
+let timer = null;
+let speed = 700;
+let edgesActive = new Set();    // "A-B" strings
+let edgesTraversed = new Set();
+
+const svg = document.getElementById('graph');
+
+// ---------- Build trace ----------
+function buildBFS(s) {
+  const trace = [];
+  const visited = new Set([s]);
+  const queue = [s];
+  const disc = { [s]: 0 };
+  let t = 1;
+  trace.push({
+    narr: `Start at <b>${s}</b>. Enqueue ${s}. visited={${s}}.`,
+    current: null, queue: [...queue], visited: new Set(visited),
+    disc: {...disc}, activeEdge: null, traversedEdges: new Set()
+  });
+  const traversed = new Set();
+  while (queue.length) {
+    const node = queue.shift();
+    trace.push({
+      narr: `Dequeue <b>${node}</b>. Mark as current.`,
+      current: node, queue: [...queue], visited: new Set(visited),
+      disc: {...disc}, activeEdge: null, traversedEdges: new Set(traversed)
+    });
+    const newNbrs = [];
+    for (const nbr of ADJ[node]) {
+      const edgeKey = [node,nbr].sort().join('-');
+      traversed.add(edgeKey);
+      if (!visited.has(nbr)) {
+        visited.add(nbr);
+        queue.push(nbr);
+        disc[nbr] = t++;
+        newNbrs.push(nbr);
+        trace.push({
+          narr: `&nbsp;&nbsp;${nbr} not visited → enqueue. queue=[${queue.join(', ')}].`,
+          current: node, queue: [...queue], visited: new Set(visited),
+          disc: {...disc}, activeEdge: edgeKey, traversedEdges: new Set(traversed),
+          justAdded: nbr
+        });
+      } else {
+        trace.push({
+          narr: `&nbsp;&nbsp;${nbr} already visited → skip.`,
+          current: node, queue: [...queue], visited: new Set(visited),
+          disc: {...disc}, activeEdge: edgeKey, traversedEdges: new Set(traversed)
+        });
+      }
+    }
+    if (newNbrs.length === 0 && ADJ[node].length > 0) {
+      // already covered above
+    }
+  }
+  trace.push({
+    narr: `Queue empty. BFS complete. Visit order: <b>${Object.keys(disc).sort((a,b)=>disc[a]-disc[b]).join(' → ')}</b>.`,
+    current: null, queue: [], visited: new Set(visited),
+    disc: {...disc}, activeEdge: null, traversedEdges: new Set(traversed),
+    done: true
+  });
+  return trace;
+}
+
+function buildDFS(s) {
+  const trace = [];
+  const visited = new Set();
+  const stack = [s];      // iterative stack for visualization
+  const disc = {};
+  let t = 0;
+  const traversed = new Set();
+  trace.push({
+    narr: `Start at <b>${s}</b>. Push ${s} onto stack.`,
+    current: null, stack: [...stack], visited: new Set(visited),
+    disc: {...disc}, activeEdge: null, traversedEdges: new Set(traversed)
+  });
+  while (stack.length) {
+    const node = stack.pop();
+    if (visited.has(node)) {
+      trace.push({
+        narr: `Pop <b>${node}</b> — already visited, skip.`,
+        current: null, stack: [...stack], visited: new Set(visited),
+        disc: {...disc}, activeEdge: null, traversedEdges: new Set(traversed)
+      });
+      continue;
+    }
+    visited.add(node);
+    disc[node] = t++;
+    trace.push({
+      narr: `Pop <b>${node}</b>. Visit it. visited={${[...visited].join(', ')}}.`,
+      current: node, stack: [...stack], visited: new Set(visited),
+      disc: {...disc}, activeEdge: null, traversedEdges: new Set(traversed)
+    });
+    // Push neighbors in reverse so first listed pops first
+    const nbrs = [...ADJ[node]].reverse();
+    for (const nbr of nbrs) {
+      const edgeKey = [node,nbr].sort().join('-');
+      traversed.add(edgeKey);
+      if (!visited.has(nbr)) {
+        stack.push(nbr);
+        trace.push({
+          narr: `&nbsp;&nbsp;Push <b>${nbr}</b> onto stack. stack=[${stack.join(', ')}].`,
+          current: node, stack: [...stack], visited: new Set(visited),
+          disc: {...disc}, activeEdge: edgeKey, traversedEdges: new Set(traversed)
+        });
+      } else {
+        trace.push({
+          narr: `&nbsp;&nbsp;${nbr} already visited → don't push.`,
+          current: node, stack: [...stack], visited: new Set(visited),
+          disc: {...disc}, activeEdge: edgeKey, traversedEdges: new Set(traversed)
+        });
+      }
+    }
+  }
+  trace.push({
+    narr: `Stack empty. DFS complete. Visit order: <b>${Object.keys(disc).sort((a,b)=>disc[a]-disc[b]).join(' → ')}</b>.`,
+    current: null, stack: [], visited: new Set(visited),
+    disc: {...disc}, activeEdge: null, traversedEdges: new Set(traversed), done: true
+  });
+  return trace;
+}
+
+// ---------- Rendering ----------
+function renderGraph(state) {
+  svg.innerHTML = '';
+  const inDS = new Set((state?.queue || state?.stack || []));
+
+  // Edges
+  for (const [u,v] of EDGES) {
+    const key = [u,v].sort().join('-');
+    const line = document.createElementNS('http://www.w3.org/2000/svg','line');
+    line.setAttribute('x1', NODES[u].x); line.setAttribute('y1', NODES[u].y);
+    line.setAttribute('x2', NODES[v].x); line.setAttribute('y2', NODES[v].y);
+    let cls = 'gr-edge';
+    if (state?.traversedEdges?.has(key)) cls += ' traversed';
+    if (state?.activeEdge === key) cls = 'gr-edge active';
+    line.setAttribute('class', cls);
+    svg.appendChild(line);
+  }
+
+  // Nodes
+  for (const [id, pos] of Object.entries(NODES)) {
+    const g = document.createElementNS('http://www.w3.org/2000/svg','g');
+    let cls = 'gr-node unvisited';
+    if (state) {
+      if (state.current === id) cls = 'gr-node current';
+      else if (state.visited?.has(id)) cls = 'gr-node visited';
+      else if (inDS.has(id)) cls = 'gr-node frontier';
+    }
+    g.setAttribute('class', cls);
+
+    const c = document.createElementNS('http://www.w3.org/2000/svg','circle');
+    c.setAttribute('cx', pos.x); c.setAttribute('cy', pos.y); c.setAttribute('r', 26);
+    g.appendChild(c);
+
+    const tx = document.createElementNS('http://www.w3.org/2000/svg','text');
+    tx.setAttribute('x', pos.x); tx.setAttribute('y', pos.y);
+    tx.textContent = id;
+    g.appendChild(tx);
+
+    // Discovery time label
+    if (state?.disc && state.disc[id] !== undefined) {
+      const d = document.createElementNS('http://www.w3.org/2000/svg','text');
+      d.setAttribute('x', pos.x); d.setAttribute('y', pos.y + 44);
+      d.setAttribute('class','gr-disc');
+      d.textContent = 'd=' + state.disc[id];
+      svg.appendChild(d);
+    }
+    svg.appendChild(g);
+  }
+}
+
+function renderDS(state) {
+  const cont = document.getElementById('dsContainer');
+  cont.innerHTML = '';
+  const arr = algo === 'BFS' ? (state?.queue || []) : (state?.stack || []);
+  if (!arr.length) {
+    cont.innerHTML = '<div class="ds-empty">empty</div>';
+  } else {
+    // BFS queue: show head at top (dequeue from top). DFS stack: show top (most recent push) at top.
+    const display = algo === 'BFS' ? arr : [...arr].reverse();
+    display.forEach((item, i) => {
+      const div = document.createElement('div');
+      div.className = 'ds-item' + (i === 0 ? ' head' : '');
+      const pos = algo === 'BFS'
+        ? (i === 0 ? 'head' : (i === display.length - 1 ? 'tail' : `#${i}`))
+        : (i === 0 ? 'top' : `#${i}`);
+      div.innerHTML = `<span>${item}</span><span class="pos">${pos}</span>`;
+      cont.appendChild(div);
+    });
+  }
+
+  // Visited list
+  const visitedList = document.getElementById('visitedList');
+  visitedList.innerHTML = '';
+  if (state?.disc) {
+    const ordered = Object.keys(state.disc).sort((a,b)=>state.disc[a]-state.disc[b]);
+    for (const v of ordered) {
+      const chip = document.createElement('span');
+      chip.className = 'visited-chip';
+      chip.textContent = v;
+      visitedList.appendChild(chip);
+    }
+  }
+}
+
+function renderStats(state) {
+  const dsSize = algo === 'BFS' ? (state?.queue?.length ?? 0) : (state?.stack?.length ?? 0);
+  document.getElementById('stVisited').textContent = state?.visited?.size ?? 0;
+  document.getElementById('stDs').textContent = dsSize;
+  document.getElementById('stStep').textContent = cursor;
+  document.getElementById('stCurrent').textContent = state?.current || '—';
+}
+
+function renderAll() {
+  const state = steps[cursor] || null;
+  renderGraph(state);
+  renderDS(state);
+  renderStats(state);
+  document.getElementById('narration').innerHTML = state?.narr || 'Ready.';
+}
+
+// ---------- Controls ----------
+function rebuild() {
+  steps = algo === 'BFS' ? buildBFS(start) : buildDFS(start);
+  cursor = 0;
+  renderAll();
+}
+
+function step() {
+  if (cursor < steps.length - 1) {
+    cursor++;
+    renderAll();
+  } else {
+    stopPlay();
+  }
+}
+
+function startPlay() {
+  if (playing) return;
+  playing = true;
+  document.getElementById('btnPlay').textContent = '⏸ Pause';
+  timer = setInterval(() => {
+    if (cursor >= steps.length - 1) { stopPlay(); return; }
+    step();
+  }, speed);
+}
+function stopPlay() {
+  playing = false;
+  document.getElementById('btnPlay').textContent = '▶ Play';
+  if (timer) { clearInterval(timer); timer = null; }
+}
+
+document.getElementById('btnBfs').onclick = () => {
+  algo = 'BFS';
+  document.getElementById('btnBfs').classList.add('active');
+  document.getElementById('btnDfs').classList.remove('active');
+  document.getElementById('dsTitle').textContent = 'Queue (FIFO)';
+  document.getElementById('dsHeadLabel').textContent = '← head (dequeue)';
+  document.getElementById('dsTailLabel').textContent = 'tail (enqueue) ←';
+  document.getElementById('stDsLabel').textContent = 'Queue size';
+  stopPlay();
+  rebuild();
+};
+document.getElementById('btnDfs').onclick = () => {
+  algo = 'DFS';
+  document.getElementById('btnDfs').classList.add('active');
+  document.getElementById('btnBfs').classList.remove('active');
+  document.getElementById('dsTitle').textContent = 'Stack (LIFO)';
+  document.getElementById('dsHeadLabel').textContent = '← top (pop)';
+  document.getElementById('dsTailLabel').textContent = 'bottom';
+  document.getElementById('stDsLabel').textContent = 'Stack size';
+  stopPlay();
+  rebuild();
+};
+document.getElementById('startSel').onchange = (e) => {
+  start = e.target.value;
+  stopPlay();
+  rebuild();
+};
+document.getElementById('btnPlay').onclick = () => {
+  if (playing) stopPlay();
+  else {
+    if (cursor >= steps.length - 1) { cursor = 0; }
+    startPlay();
+  }
+};
+document.getElementById('btnStep').onclick = () => { stopPlay(); step(); };
+document.getElementById('btnReset').onclick = () => {
+  stopPlay();
+  cursor = 0;
+  renderAll();
+};
+document.getElementById('speed').oninput = (e) => {
+  speed = 1800 - parseInt(e.target.value, 10);  // invert so right = faster
+  if (playing) { stopPlay(); startPlay(); }
+};
+
+// Initial
+rebuild();
+</script>
+</body>
+</html>

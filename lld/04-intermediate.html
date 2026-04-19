@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Intermediate Problems — Book I · LLD</title>
 <link rel="stylesheet" href="../assets/css/style.css">
+<link rel="stylesheet" href="../assets/css/viz.css">
 </head>
 <body>
 <div class="app">
@@ -43,6 +44,14 @@
 
     <h2>4.1 LRU Cache</h2>
     <p>A cache with fixed capacity that evicts the least-recently-used entry. The archetypal Google interview question.</p>
+
+    <div class="embed-wrap">
+      <div class="embed-title">
+        <span>🎬 Interactive: Watch put/get operations with live state</span>
+        <a href="../viz/lru-cache.html" target="_blank">Open full viz ↗</a>
+      </div>
+      <iframe src="../viz/lru-cache.html?embed=1" style="height:780px" loading="lazy"></iframe>
+    </div>
 
     <h3>v1 — List scan O(n)</h3>
 <pre><code>class LRU:

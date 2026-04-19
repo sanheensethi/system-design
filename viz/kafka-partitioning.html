@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Kafka Partitioning — Interactive Visualization</title>
+<link rel="stylesheet" href="../assets/css/style.css">
+<link rel="stylesheet" href="../assets/css/viz.css">
+<style>
+  .partition-queue {
+    display: flex;
+    gap: 3px;
+    justify-content: center;
+    margin-top: 6px;
+    min-height: 14px;
+  }
+  .part-msg {
+    width: 12px;
+    height: 12px;
+    border-radius: 2px;
+    background: var(--accent, #4a9eff);
+    box-shadow: 0 0 4px rgba(74, 158, 255, 0.6);
+  }
+  .part-msg.k0 { background: #4a9eff; }
+  .part-msg.k1 { background: #ffb347; }
+  .part-msg.k2 { background: #66d9a6; }
+  .part-msg.k3 { background: #e066d9; }
+  .part-msg.k4 { background: #ff6b6b; }
+  .consumer-dead {
+    opacity: 0.35;
+    filter: grayscale(0.8);
+  }
+  .assignment-label {
+    font-size: 0.7rem;
+    color: var(--text-dim);
+    margin-top: 4px;
+  }
+</style>
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">System Design Books</div>
+    <div class="brand-sub">by Sanheen · Progressive Learning</div>
+    <div class="nav-section">
+      <h3>Home</h3>
+      <a href="../index.html">Overview</a>
+    </div>
+    <div class="nav-section">
+      <h3>🎬 Interactive Visualizations</h3>
+      <a href="index.html">Viz Index</a>
+      <a href="lru-cache.html">LRU Cache (LLD)</a>
+      <a href="request-flow.html">Request Flow (HLD)</a>
+      <a href="load-balancer.html">Load Balancer (HLD)</a>
+      <a href="cache-aside.html">Cache Aside Pattern (HLD)</a>
+      <a href="kafka-partitioning.html">Kafka Partitioning (HLD)</a>
+    </div>
+    <div class="nav-section">
+      <h3>Book II — High Level Design</h3>
+      <a href="../hld/index.html">HLD Index</a>
+    </div>
+  </aside>
+
+  <main class="main">
+    <div class="breadcrumb"><a href="../index.html">Home</a> / <a href="index.html">Visualizations</a> / Kafka Partitioning</div>
+    <h1>HLD: Kafka Topic Partitioning + Consumer Groups</h1>
+    <p>Topic <strong>orders</strong> split across multiple partitions. Producers route messages by <code>hash(key) % N</code>. Each partition is assigned to exactly one consumer in a consumer group — so scaling out consumers = more parallelism (up to partition count).</p>
+
+    <div class="viz-controls">
+      <button class="viz-btn primary" id="btnSend">📤 Send Message</button>
+      <button class="viz-btn" id="btnBurst">📦 Burst 10</button>
+      <button class="viz-btn" id="btnKill">💥 Kill C2</button>
+      <button class="viz-btn" id="btnRevive">💚 Revive C2</button>
+      <button class="viz-btn" id="btnRebalance">🔄 Rebalance</button>
+      <button class="viz-btn" id="btnAddPartition">➕ Add Partition</button>
+      <button class="viz-btn" id="btnReset">Reset</button>
+    </div>
+
+    <div class="viz-arch" id="arch" style="min-height: 520px;"></div>
+
+    <div class="viz-stats">
+      <div class="viz-stat"><div class="viz-stat-val" id="st-total">0</div><div class="viz-stat-label">Total Messages</div></div>
+      <div class="viz-stat"><div class="viz-stat-val" id="st-p0">0</div><div class="viz-stat-label">Partition 0</div></div>
+      <div class="viz-stat"><div class="viz-stat-val" id="st-p1">0</div><div class="viz-stat-label">Partition 1</div></div>
+      <div class="viz-stat"><div class="viz-stat-val" id="st-p2">0</div><div class="viz-stat-label">Partition 2</div></div>
+      <div class="viz-stat"><div class="viz-stat-val" id="st-parts">3</div><div class="viz-stat-label">Partition Count</div></div>
+    </div>
+
+    <div class="viz-stats" style="margin-top:0.5rem;">
+      <div class="viz-stat"><div class="viz-stat-val" id="st-lag-c1">0</div><div class="viz-stat-label">C1 Lag</div></div>
+      <div class="viz-stat"><div class="viz-stat-val" id="st-lag-c2">0</div><div class="viz-stat-label">C2 Lag</div></div>
+      <div class="viz-stat"><div class="viz-stat-val" id="st-lag-c3">0</div><div class="viz-stat-label">C3 Lag</div></div>
+    </div>
+
+    <div class="viz-desc" id="desc" style="margin-top:1rem;min-height:60px;">Click <strong>Send Message</strong> to produce a message with a random key. The key hash determines which partition it lands in. The partition → consumer mapping determines which consumer processes it.</div>
+
+    <h2>Why Partition?</h2>
+    <table>
+      <thead><tr><th>Goal</th><th>Mechanism</th><th>Tradeoff</th></tr></thead>
+      <tbody>
+        <tr><td><strong>Parallelism</strong></td><td>N partitions = N consumers can work in parallel. Throughput scales linearly (per partition).</td><td>Ordering guarantees weaken: only per-partition order, not per-topic.</td></tr>
+        <tr><td><strong>Key-based ordering</strong></td><td><code>hash(key) % N</code> — all messages with the same key go to the same partition, processed in order.</td><td>Hot keys = skewed load. One partition can bottleneck the whole consumer group.</td></tr>
+        <tr><td><strong>Horizontal scaling</strong></td><td>Spread partitions across brokers. Consumers in a group split partitions between them.</td><td>Can never have more active consumers in a group than partitions — extras sit idle.</td></tr>
+        <tr><td><strong>Fault tolerance</strong></td><td>Each partition is replicated (factor 3 typical). Leader election on broker failure.</td><td>Replication = storage cost 3x. Write throughput limited by slowest follower.</td></tr>
+      </tbody>
+    </table>
+
+    <h2>Consumer Groups &amp; Rebalancing</h2>
+    <p>A <strong>consumer group</strong> is a set of consumers sharing a group ID. Kafka guarantees:</p>
+    <ul>
+      <li><strong>Each partition → exactly one consumer in the group.</strong> No double-processing within a group.</li>
+      <li><strong>Multiple groups read independently.</strong> Group A (analytics) and Group B (billing) each get full copy of the stream.</li>
+      <li><strong>Rebalance triggers:</strong> consumer joins, consumer leaves (crash, deploy, timeout), partition count changes, subscription changes.</li>
+      <li><strong>Rebalance cost:</strong> "stop the world" for the group — all consumers pause, reassign, resume. New protocol (KIP-429, cooperative rebalance) reduces pause.</li>
+    </ul>
+
+    <h2>Offset Management</h2>
+    <ul>
+      <li><strong>Offset</strong> = position of a consumer within a partition (monotonic int64). Stored in internal topic <code>__consumer_offsets</code>.</li>
+      <li><strong>Commit</strong> = "I've processed up to offset N." On restart, consumer resumes from last committed offset.</li>
+      <li><strong>At-least-once</strong>: commit AFTER processing. On crash, replay from last commit → duplicates possible. Make consumers idempotent.</li>
+      <li><strong>At-most-once</strong>: commit BEFORE processing. On crash, message lost. Rarely acceptable.</li>
+      <li><strong>Exactly-once</strong>: Kafka transactions + idempotent producer + <code>read_committed</code> isolation. Works within Kafka-to-Kafka pipelines.</li>
+    </ul>
+
+    <h2>Why You Can't Easily Shrink Partitions</h2>
+    <ul>
+      <li>Kafka routes by <code>hash(key) % N</code>. If you go 4 → 3, every key with a non-trivial hash lands on a different partition — <strong>ordering for that key breaks</strong> across the split point.</li>
+      <li>Existing partitions can't be merged in-place; you'd need a new topic + replay, which disrupts consumer offsets.</li>
+      <li><strong>Rule of thumb:</strong> over-provision partitions on day 1 (e.g., 30-50 for a busy topic). You can add consumers freely; you can't cheaply un-partition.</li>
+      <li>Adding partitions also re-shuffles new messages (old keys still route to their old partition, but future hash mod changes).</li>
+    </ul>
+  </main>
+</div>
+<script src="../assets/js/nav.js"></script>
+<script src="../assets/js/animator.js"></script>
+<script>
+const arch = new ArchAnimator('#arch');
+
+// --- State ---
+let partitionCount = 3;
+let partitions = [[], [], []];                // partition idx -> array of msg objects
+let committedOffsets = [0, 0, 0];             // per partition
+let assignments = { 0: 'c1', 1: 'c2', 2: 'c3' }; // partition idx -> consumer id
+let consumerAlive = { c1: true, c2: true, c3: true };
+let stats = { total: 0, counts: [0, 0, 0, 0] };
+let msgSeq = 0;
+
+const KEYS = [
+  'user:42', 'user:17', 'order:99', 'user:8', 'cart:123',
+  'user:42', 'payment:55', 'order:11', 'user:7', 'cart:88'
+];
+const KEY_COLOR = {}; // key -> class
+const COLOR_CLASSES = ['k0', 'k1', 'k2', 'k3', 'k4'];
+
+function hashKey(key) {
+  // simple deterministic hash
+  let h = 0;
+  for (let i = 0; i < key.length; i++) h = ((h << 5) - h + key.charCodeAt(i)) | 0;
+  return Math.abs(h);
+}
+
+function colorForKey(key) {
+  if (!KEY_COLOR[key]) {
+    KEY_COLOR[key] = COLOR_CLASSES[Object.keys(KEY_COLOR).length % COLOR_CLASSES.length];
+  }
+  return KEY_COLOR[key];
+}
+
+// --- Arch build ---
+function buildArch() {
+  arch.clear();
+
+  // Producers (left column)
+  arch.addNode('p1', '📤<br>Producer 1', 8, 20);
+  arch.addNode('p2', '📤<br>Producer 2', 8, 50);
+  arch.addNode('p3', '📤<br>Producer 3', 8, 80);
+
+  // Topic label center-top
+  arch.addNode('topic', `🗂️<br>Topic: <b>orders</b><br><span style="font-size:0.75rem;color:var(--text-dim)">(${partitionCount} partitions)</span>`, 45, 8);
+
+  // Partitions (middle column)
+  const partY = partitionCount === 3 ? [20, 50, 80]
+              : partitionCount === 4 ? [15, 38, 62, 85]
+              : [50];
+  for (let i = 0; i < partitionCount; i++) {
+    arch.addNode(`part${i}`, `📦 Partition ${i}<div class="partition-queue" id="q${i}"></div><div class="assignment-label" id="a${i}">→ ${assignments[i]?.toUpperCase() || '—'}</div>`, 45, partY[i]);
+  }
+
+  // Consumers (right column)
+  arch.addNode('c1', '🧑‍💻<br>Consumer 1<br><span style="font-size:0.7rem;color:var(--text-dim)">group-1</span>', 85, 20);
+  arch.addNode('c2', '🧑‍💻<br>Consumer 2<br><span style="font-size:0.7rem;color:var(--text-dim)">group-1</span>', 85, 50);
+  arch.addNode('c3', '🧑‍💻<br>Consumer 3<br><span style="font-size:0.7rem;color:var(--text-dim)">group-1</span>', 85, 80);
+
+  // Edges: producers -> every partition
+  const edges = [];
+  for (const prod of ['p1', 'p2', 'p3']) {
+    for (let i = 0; i < partitionCount; i++) edges.push([prod, `part${i}`]);
+  }
+  // Partition -> assigned consumer
+  for (let i = 0; i < partitionCount; i++) {
+    if (assignments[i]) edges.push([`part${i}`, assignments[i]]);
+  }
+  arch.addEdges(edges);
+
+  // Apply dead styles
+  applyConsumerStyles();
+  renderQueues();
+}
+
+function applyConsumerStyles() {
+  for (const c of ['c1', 'c2', 'c3']) {
+    const el = document.querySelector(`[data-node="${c}"]`);
+    if (!el) continue;
+    el.classList.toggle('consumer-dead', !consumerAlive[c]);
+  }
+}
+
+function renderQueues() {
+  for (let i = 0; i < partitionCount; i++) {
+    const box = document.getElementById(`q${i}`);
+    if (!box) continue;
+    const last5 = (partitions[i] || []).slice(-5);
+    box.innerHTML = last5.map(m => `<div class="part-msg ${colorForKey(m.key)}" title="${m.key} @offset ${m.offset}"></div>`).join('');
+    const lbl = document.getElementById(`a${i}`);
+    if (lbl) lbl.textContent = '→ ' + (assignments[i] ? assignments[i].toUpperCase() : 'UNASSIGNED');
+  }
+}
+
+function renderStats() {
+  document.getElementById('st-total').textContent = stats.total;
+  document.getElementById('st-p0').textContent = stats.counts[0];
+  document.getElementById('st-p1').textContent = stats.counts[1];
+  document.getElementById('st-p2').textContent = stats.counts[2];
+  document.getElementById('st-parts').textContent = partitionCount;
+  // Lag = uncommitted messages assigned to each consumer
+  const lag = { c1: 0, c2: 0, c3: 0 };
+  for (let i = 0; i < partitionCount; i++) {
+    const uncommitted = partitions[i].length - committedOffsets[i];
+    const c = assignments[i];
+    if (c && lag[c] !== undefined) lag[c] += uncommitted;
+  }
+  document.getElementById('st-lag-c1').textContent = lag.c1;
+  document.getElementById('st-lag-c2').textContent = lag.c2;
+  document.getElementById('st-lag-c3').textContent = lag.c3;
+}
+
+function say(msg) { document.getElementById('desc').innerHTML = msg; }
+
+// --- Rebalance logic (range assignor, simplified) ---
+function rebalance() {
+  const alive = ['c1', 'c2', 'c3'].filter(c => consumerAlive[c]);
+  const newAssign = {};
+  if (alive.length === 0) {
+    // no consumers - all partitions unassigned
+    for (let i = 0; i < partitionCount; i++) newAssign[i] = null;
+  } else {
+    // Round-robin assignment
+    for (let i = 0; i < partitionCount; i++) {
+      newAssign[i] = alive[i % alive.length];
+    }
+  }
+  assignments = newAssign;
+  buildArch();
+  renderStats();
+}
+
+// --- Produce ---
+async function produceOne(key) {
+  if (!key) key = KEYS[Math.floor(Math.random() * KEYS.length)];
+  const partIdx = hashKey(key) % partitionCount;
+  const prod = ['p1', 'p2', 'p3'][Math.floor(Math.random() * 3)];
+
+  stats.total++;
+  stats.counts[partIdx]++;
+
+  say(`<strong>Producer: key=<code>${key}</code></strong> → hash('${key}') % ${partitionCount} = <strong>${partIdx}</strong> → Partition ${partIdx}`);
+
+  await arch.sendPacket(prod, `part${partIdx}`, { duration: 600 });
+
+  const msg = { key, offset: partitions[partIdx].length, seq: ++msgSeq };
+  partitions[partIdx].push(msg);
+  renderQueues();
+  renderStats();
+
+  const consumer = assignments[partIdx];
+  if (!consumer) {
+    say(`<strong style="color:var(--danger)">Partition ${partIdx} has no consumer!</strong> Message queued — lag grows until rebalance.`);
+    return;
+  }
+
+  say(`<strong>Partition ${partIdx} → ${consumer.toUpperCase()}</strong> — consumer pulls message (key=${key}, offset=${msg.offset}).`);
+  await arch.sendPacket(`part${partIdx}`, consumer, { cls: 'cached', duration: 700 });
+
+  // Commit offset
+  committedOffsets[partIdx] = partitions[partIdx].length;
+  renderStats();
+  say(`<strong style="color:var(--success)">✓ ${consumer.toUpperCase()} processed &amp; committed offset ${msg.offset}</strong>. At-least-once: commit AFTER processing.`);
+}
+
+// --- Buttons ---
+function lockBtns(lock) {
+  document.querySelectorAll('.viz-btn').forEach(b => b.disabled = lock);
+}
+
+document.getElementById('btnSend').onclick = async () => {
+  lockBtns(true);
+  await produceOne();
+  lockBtns(false);
+};
+
+document.getElementById('btnBurst').onclick = async () => {
+  lockBtns(true);
+  say('<strong>Bursting 10 messages</strong> — watch them fan out across partitions based on key hash.');
+  for (let i = 0; i < 10; i++) {
+    await produceOne();
+    await new Promise(r => setTimeout(r, 150));
+  }
+  lockBtns(false);
+};
+
+document.getElementById('btnKill').onclick = () => {
+  if (!consumerAlive.c2) { say('C2 is already dead.'); return; }
+  consumerAlive.c2 = false;
+  say('<strong style="color:var(--danger)">💥 C2 died!</strong> Heartbeat timeout → group coordinator triggers <strong>rebalance</strong>. C2\'s partition gets reassigned.');
+  rebalance();
+  const newOwner = Object.entries(assignments).find(([k, v]) => {
+    // find which partition was previously c2's
+    return v !== 'c2' && Object.keys(assignments).filter(p => assignments[p] === v).length > 1;
+  });
+  setTimeout(() => {
+    say(`<strong>Rebalance complete.</strong> Remaining consumers (C1, C3) now each handle ~${Math.ceil(partitionCount / 2)} partition(s). Throughput halved, but no data loss.`);
+  }, 400);
+};
+
+document.getElementById('btnRevive').onclick = () => {
+  if (consumerAlive.c2) { say('C2 is already alive.'); return; }
+  consumerAlive.c2 = true;
+  say('<strong style="color:var(--success)">💚 C2 joins the group!</strong> Triggers rebalance → partitions redistributed evenly across all 3 consumers again.');
+  rebalance();
+};
+
+document.getElementById('btnRebalance').onclick = () => {
+  say('<strong>🔄 Manual rebalance</strong> — partitions reassigned round-robin across live consumers. In real Kafka this is triggered by group coordinator heartbeat changes.');
+  rebalance();
+};
+
+document.getElementById('btnAddPartition').onclick = () => {
+  if (partitionCount >= 4) {
+    say('Already at max (4) for this demo. Real Kafka supports thousands of partitions per topic.');
+    return;
+  }
+  partitionCount++;
+  partitions.push([]);
+  committedOffsets.push(0);
+  stats.counts.push(0);
+  say(`<strong>➕ Added partition ${partitionCount - 1}!</strong> New partition starts empty. Future messages will hash across ${partitionCount} partitions. <em>Note: old messages stay on their original partitions — ordering for existing keys is preserved from this point forward only.</em>`);
+  rebalance();
+};
+
+document.getElementById('btnReset').onclick = () => {
+  partitionCount = 3;
+  partitions = [[], [], []];
+  committedOffsets = [0, 0, 0];
+  assignments = { 0: 'c1', 1: 'c2', 2: 'c3' };
+  consumerAlive = { c1: true, c2: true, c3: true };
+  stats = { total: 0, counts: [0, 0, 0, 0] };
+  msgSeq = 0;
+  buildArch();
+  renderStats();
+  say('Reset. 3 partitions, 3 consumers, clean slate. Click <strong>Send Message</strong> to begin.');
+};
+
+// --- Init ---
+buildArch();
+renderStats();
+</script>
+</body>
+</html>

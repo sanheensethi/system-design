@@ -1,0 +1,534 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DB Replication — Primary/Replica with Failover</title>
+<link rel="stylesheet" href="../assets/css/style.css">
+<link rel="stylesheet" href="../assets/css/viz.css">
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">System Design Books</div>
+    <div class="brand-sub">by Sanheen · Progressive Learning</div>
+    <div class="nav-section">
+      <h3>Home</h3>
+      <a href="../index.html">Overview</a>
+    </div>
+    <div class="nav-section">
+      <h3>🎬 Interactive Visualizations</h3>
+      <a href="index.html">Viz Index</a>
+      <a href="lru-cache.html">LRU Cache (LLD)</a>
+      <a href="request-flow.html">Request Flow (HLD)</a>
+      <a href="load-balancer.html">Load Balancer (HLD)</a>
+      <a href="cache-aside.html">Cache Aside Pattern (HLD)</a>
+      <a href="db-replication.html">DB Replication (HLD)</a>
+    </div>
+    <div class="nav-section">
+      <h3>Book II — High Level Design</h3>
+      <a href="../hld/index.html">HLD Index</a>
+    </div>
+  </aside>
+
+  <main class="main">
+    <div class="breadcrumb"><a href="../index.html">Home</a> / <a href="index.html">Visualizations</a> / DB Replication</div>
+    <h1>HLD: DB Replication — Primary/Replica with Failover</h1>
+    <p>Writes go to the <strong>primary</strong>. The primary asynchronously streams its changes to <strong>replicas</strong>. Reads can be served by any replica (cheap, eventually consistent) or the primary (fresh). Kill the primary, promote a replica, and watch the classic <em>replication lag</em> problem in action.</p>
+
+    <div class="viz-controls">
+      <button class="viz-btn primary" id="btnWrite">📝 Write (INSERT)</button>
+      <button class="viz-btn" id="btnRead">📖 Read (SELECT)</button>
+      <button class="viz-btn" id="btnLag">⏰ Show Replication Lag</button>
+      <button class="viz-btn" id="btnKill">💥 Kill Primary</button>
+      <button class="viz-btn" id="btnPromote">💚 Promote Replica 1</button>
+      <button class="viz-btn" id="btnReset">Reset</button>
+    </div>
+
+    <div class="viz-arch" id="arch" style="min-height:440px;"></div>
+
+    <div class="viz-stats">
+      <div class="viz-stat"><div class="viz-stat-val" id="st-writes">0</div><div class="viz-stat-label">Total Writes</div></div>
+      <div class="viz-stat"><div class="viz-stat-val" id="st-reads">0</div><div class="viz-stat-label">Total Reads</div></div>
+      <div class="viz-stat"><div class="viz-stat-val" id="st-lag">0ms</div><div class="viz-stat-label">Avg Replication Lag</div></div>
+      <div class="viz-stat"><div class="viz-stat-val" id="st-stale">0</div><div class="viz-stat-label">Stale Reads Observed</div></div>
+      <div class="viz-stat"><div class="viz-stat-val" id="st-failover">0</div><div class="viz-stat-label">Failovers</div></div>
+    </div>
+
+    <div class="viz-desc" id="desc" style="margin-top:1rem;min-height:60px;">Click <strong>Write</strong> to insert a row. It flows App → Primary, then Primary replicates asynchronously to both replicas (with small lag). Click <strong>Read</strong> to query a random replica.</div>
+
+    <h3 style="margin-top:2rem;">Data State</h3>
+    <div id="statebox" style="display:grid;grid-template-columns:repeat(3,1fr);gap:1rem;margin-top:0.5rem;">
+      <div class="viz-state-panel"><div class="viz-state-title">🗄️ Primary DB</div><div id="state-primary" style="font-family:monospace;font-size:0.85rem;color:var(--text-dim);">empty</div></div>
+      <div class="viz-state-panel"><div class="viz-state-title">📘 Replica 1</div><div id="state-r1" style="font-family:monospace;font-size:0.85rem;color:var(--text-dim);">empty</div></div>
+      <div class="viz-state-panel"><div class="viz-state-title">📘 Replica 2</div><div id="state-r2" style="font-family:monospace;font-size:0.85rem;color:var(--text-dim);">empty</div></div>
+    </div>
+
+    <h2 style="margin-top:2.5rem;">Why Primary-Replica Exists</h2>
+    <p>A single database box eventually hits a wall. You either run out of CPU serving reads, or you have zero redundancy and one disk failure kills the company. Primary-replica replication solves both — but it introduces a new set of problems (lag, failover, split-brain) that dominate the rest of this page.</p>
+
+    <h3>Problem 1: Read Scaling</h3>
+    <p>Most workloads are <strong>read-heavy</strong>. A typical web app reads 10–100× more than it writes. Scrolling a feed, loading a profile, fetching product details — all reads. Clicking "post" or "buy" — writes, but far fewer.</p>
+    <p>If your primary can handle 10k QPS and you're pushing 8k of reads + 500 writes, you're near the ceiling. Add three replicas and now you have:</p>
+    <ul>
+      <li><strong>1 primary</strong> handling ~500 write QPS (plus replication overhead to replicas)</li>
+      <li><strong>3 replicas</strong> each handling ~3k reads</li>
+      <li>Total read capacity: <strong>9k QPS from replicas + whatever primary has left</strong></li>
+    </ul>
+    <p>You just 3× your read capacity without touching the primary. This is why every production OLTP system you've ever used has read replicas.</p>
+
+    <h3>Problem 2: High Availability (HA)</h3>
+    <p>Disks die. Kernels panic. AZs go dark. A single-box database means your product goes dark with it. With replication, if the primary dies at 3am, your on-call promotes a replica, updates the DNS/VIP, and you're back in minutes instead of hours.</p>
+    <p>You still lose a few seconds of writes (whatever was in flight and not yet replicated to the promoted replica) — unless you ran synchronous replication, which has its own tax. More on that below.</p>
+
+    <h2>Sync vs Async Replication</h2>
+    <p>This is the fundamental tradeoff. When the primary commits a transaction, does it wait for the replicas to confirm, or does it ack the client and send the change to replicas in the background?</p>
+
+    <table>
+      <thead><tr><th>Mode</th><th>Primary commits when...</th><th>Pros</th><th>Cons</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><strong>Async</strong> (default for most MySQL/Postgres setups)</td>
+          <td>Local WAL is flushed. Replicas catch up later.</td>
+          <td>Fast writes. Primary throughput unaffected by replica speed/distance.</td>
+          <td>If primary dies before replicating, those writes are lost.</td>
+        </tr>
+        <tr>
+          <td><strong>Semi-sync</strong> (MySQL semi-sync, Postgres <code>synchronous_commit = remote_write</code>)</td>
+          <td>At least one replica has received (but not yet applied) the change.</td>
+          <td>Durable on two boxes. Modest latency hit.</td>
+          <td>Still possible for a stale read immediately after commit. Still loses data if both boxes die.</td>
+        </tr>
+        <tr>
+          <td><strong>Sync</strong> (Postgres <code>synchronous_commit = on</code> with <code>synchronous_standby_names</code>)</td>
+          <td>Replica has fsync'd the change to its own WAL.</td>
+          <td>Zero data loss on single-node failure. Replicas always current.</td>
+          <td>Every write = 1 extra network round-trip. If the sync replica dies, writes block.</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <p>The way I think about it: <strong>sync replication trades write latency for durability</strong>. You pay a real cost on every write — usually 1–5ms per sync replica across an AZ — to guarantee no writes are lost. Most shops start with async, realize they lost 30 seconds of orders once, and escalate to semi-sync. Only the paranoid (banks, inventory, billing systems) run full sync and accept that their writes block when a standby goes down.</p>
+
+    <h3>A concrete mental model</h3>
+<pre><code class="language-python"># Async: fire and forget
+def write_async(row):
+    primary.wal_append(row)
+    primary.fsync()
+    ack_client()                    # <-- client happy here
+    for r in replicas:
+        background_send(r, row)     # replicas catch up whenever
+
+# Sync: block until replicas have it
+def write_sync(row):
+    primary.wal_append(row)
+    primary.fsync()
+    futures = [send_and_wait_fsync(r, row) for r in sync_replicas]
+    wait_all(futures)               # adds a network RTT + replica fsync
+    ack_client()                    # <-- client waited
+</code></pre>
+
+    <h2>The Read-Your-Writes Problem</h2>
+    <p>This is the bug that ships to production most often, usually from a junior engineer, almost always caught by a customer.</p>
+    <p>The scenario: user updates their profile picture. The request hits the primary, which commits. The app returns success and redirects them to <code>/me</code>. The <code>/me</code> page reads from a replica (because reads scale). But the write hasn't replicated yet (5ms lag, whatever). User sees the <em>old</em> profile picture. User files a bug. User posts on Twitter.</p>
+    <p>This is called "read-your-writes" inconsistency — the system fails to show a user their own recent write. Hit <strong>⏰ Show Replication Lag</strong> above to see exactly this scenario animated.</p>
+
+    <h3>Three standard fixes</h3>
+    <p><strong>1. Route the user's reads to the primary for N seconds after any write.</strong> Cheap, effective, slightly reduces read-scaling gains. Usually implemented via a session cookie or a "last write timestamp" in Redis keyed by user_id.</p>
+
+<pre><code class="language-python"># After a write, force read-your-writes by routing to primary
+RECENT_WRITE_WINDOW = 10  # seconds
+
+def write(user_id, row):
+    primary.insert(row)
+    redis.set(f"wrote:{user_id}", time.time(), ex=RECENT_WRITE_WINDOW)
+
+def read(user_id, force_primary=False):
+    if force_primary or recently_wrote(user_id):
+        return primary.query(...)
+    return random.choice(replicas).query(...)
+
+def recently_wrote(user_id):
+    return redis.exists(f"wrote:{user_id}")
+</code></pre>
+
+    <p><strong>2. Track the write LSN and wait for the replica to catch up.</strong> More robust but more moving parts. After a write, the primary returns the transaction's log sequence number (LSN). Subsequent reads pass that LSN; the replica blocks until it has applied up to that point before responding. Postgres 10+ supports this via <code>pg_wait_for_replay_lsn</code>.</p>
+
+    <p><strong>3. Monotonic reads per session, relaxed consistency elsewhere.</strong> Use sticky sessions at the load balancer keyed by user_id, route that user to the same replica every time. If that replica is X ms behind, at least they'll never see time go backward. Doesn't solve the immediate-write-immediate-read case, but fixes the "my feed jumps between stale and fresh" problem.</p>
+
+    <h2>Failover: Who Decides the Primary Is Dead?</h2>
+    <p>Automatic failover is one of the scariest features in a database. A wrong decision — declaring a healthy primary dead and promoting a replica that's behind — corrupts your data. A delayed decision — declaring a dead primary alive for too long — extends your outage. This is fundamentally a consensus problem, which is why every serious production system uses <strong>Paxos</strong>, <strong>Raft</strong>, or <strong>ZooKeeper/etcd-style leader election</strong>.</p>
+
+    <h3>Who makes the call?</h3>
+    <ul>
+      <li><strong>Manual failover (old school).</strong> A human on-call gets paged, SSHes in, verifies primary is dead, promotes replica, updates DNS. Takes 5–30 minutes. No risk of false positives. High MTTR.</li>
+      <li><strong>A single observer process.</strong> Something like MHA (MySQL), Repmgr, or Patroni's monitor. Risk: the observer itself might be partitioned from the primary but not the replicas, causing a split-brain (see below).</li>
+      <li><strong>A consensus cluster.</strong> Patroni + etcd, CockroachDB/YugabyteDB's built-in Raft, Google Spanner's Paxos groups. The DB nodes vote; a majority is required to declare the primary dead. No single point of failure in the failover path itself.</li>
+    </ul>
+
+    <h3>How does the app find the new primary?</h3>
+    <p>Three common strategies:</p>
+    <ol>
+      <li><strong>Virtual IP (VIP).</strong> The primary owns a floating IP. On failover, the new primary grabs the IP via ARP/gratuitous-ARP (within a subnet) or via the cloud provider's API (across AZs). Apps always connect to the same IP.</li>
+      <li><strong>DNS update.</strong> <code>db-primary.internal</code> resolves to whichever host is primary. Cache-unfriendly (TTLs matter), but simple and cross-region-friendly.</li>
+      <li><strong>Service discovery / smart client.</strong> The app library queries Consul/etcd/ZooKeeper for "current primary" on each connection. Most modern approach — e.g., CockroachDB clients, MongoDB drivers, Cassandra drivers all do their own topology discovery.</li>
+    </ol>
+
+    <h3>What gets lost?</h3>
+    <p>In async replication, the last N writes — whatever was in the primary's WAL but not yet shipped to the promoted replica. Usually measured in milliseconds of lag, but under load this can stretch to seconds. This is why financial systems use sync replication: they'd rather block on a slow replica than lose an order.</p>
+
+    <h2>Split-Brain: The Nightmare Scenario</h2>
+    <p>Network partition splits your cluster. Primary is in AZ-A with 1 replica. Your observer cluster is in AZ-B with 2 replicas. AZ-B decides primary is dead (because it can't reach AZ-A) and promotes Replica-2. But the original primary is still alive, still accepting writes from clients that are in AZ-A. Now you have <strong>two primaries</strong>.</p>
+    <p>Both accept writes. Both diverge. When the partition heals, you have a data-reconciliation nightmare: conflicting primary keys, foreign key references to rows that don't exist on the other side, lost updates where both sides modified the same row. This is the <em>split-brain problem</em>, and it's why quorum-based systems exist.</p>
+
+    <h3>How to prevent split-brain</h3>
+    <ul>
+      <li><strong>Quorum.</strong> Require a majority of nodes to agree before any failover. With 3 nodes, you need 2 votes. If a 1-node minority gets partitioned, it can't promote anything — it can't reach quorum. This is what Raft/Paxos guarantee.</li>
+      <li><strong>Fencing (STONITH).</strong> "Shoot The Other Node In The Head." Before promoting a replica, the new primary actively kills the old one — via IPMI, PDU API, cloud instance-stop, or revoking its DB cluster lease. If you can't kill it, you don't promote.</li>
+      <li><strong>Lease-based leadership.</strong> The primary holds a time-bound lease in etcd/ZooKeeper (e.g., 10 seconds). It must renew. If it's partitioned and can't renew, it stops accepting writes after the lease expires. Meanwhile the cluster elects a new primary. The old primary auto-demotes itself before damage spreads.</li>
+    </ul>
+
+    <p>Do not build automatic failover without one of these. Ever. The cost of a few minutes of downtime during a partition is always smaller than the cost of split-brain corruption.</p>
+
+    <h2>Multi-Primary (Active-Active)</h2>
+    <p>What if you want writes on both coasts, each local, each fast? You give up the single-primary constraint and accept <strong>multi-primary replication</strong>. Every node can accept writes; changes replicate to every other node.</p>
+    <p>This is where you move from the comforting world of linearizability into <strong>eventual consistency with conflict resolution</strong>:</p>
+    <ul>
+      <li><strong>Last-Write-Wins (LWW).</strong> Each write has a timestamp; on conflict, newer timestamp wins. Simple, sometimes silently loses data. Cassandra's default.</li>
+      <li><strong>CRDTs (Conflict-free Replicated Data Types).</strong> Data structures that mathematically guarantee deterministic merges — counters, sets, registers, JSON documents. Used by Riak, Redis Enterprise, and increasingly in collaborative apps (Figma, Linear).</li>
+      <li><strong>Application-level conflict resolution.</strong> Store all conflicting versions; present to the user or let the app decide. Expensive but correct for high-value data (shopping carts, medical records).</li>
+      <li><strong>Quorum-based (Dynamo-style).</strong> Read/write quorums where R + W &gt; N ensures consistency. Cassandra, DynamoDB, Riak all use this.</li>
+    </ul>
+
+    <p>The default advice: <strong>do not run multi-primary if you can avoid it</strong>. The operational complexity is at least 10× a single-primary setup, and conflicts always happen eventually. Use it when you truly have multi-region writes where cross-region latency would kill you otherwise (global apps with strong regional affinity).</p>
+
+    <h2>Operational Reality Check</h2>
+    <p>Things you'll actually deal with in production:</p>
+    <ul>
+      <li><strong>Replication lag spikes during large writes.</strong> A <code>DELETE FROM orders WHERE created_at &lt; '2020-01-01'</code> on the primary is a single statement there, but replays row-by-row on the replica. Lag can grow to minutes. Watch your <code>Seconds_Behind_Master</code> or <code>pg_stat_replication</code>.</li>
+      <li><strong>Schema migrations.</strong> Adding a column on a huge table locks both primary and replicas. Tools like gh-ost, pt-online-schema-change, or Postgres's <code>ALTER ... NOT VALID</code> dance are not optional at scale.</li>
+      <li><strong>Long-running analytics queries on replicas.</strong> Someone runs a <code>SELECT ... GROUP BY</code> on 100M rows on a read replica, holding a snapshot that blocks the replica's replay thread. Lag grows. Set <code>statement_timeout</code> on your replicas and separate OLAP workloads to a dedicated replica.</li>
+      <li><strong>Cold replicas after promotion.</strong> The new primary has cold OS page cache, cold buffer pool. First 60 seconds of post-failover traffic is painful. Warm your replicas — run representative queries against them regularly.</li>
+      <li><strong>Replica lag monitoring is the single most important DB metric you can set up today.</strong> Alert if lag &gt; 10 seconds for &gt; 1 minute. Your app is silently serving stale data otherwise.</li>
+    </ul>
+
+    <h2>When You Outgrow Primary-Replica</h2>
+    <p>Primary-replica scales reads indefinitely but writes are capped at what one machine can do. At some point — usually 50k–500k writes/sec depending on workload — you need <strong>sharding</strong>: split the data across multiple primary-replica units, each owning a subset. That's a different beast entirely (hash-based, range-based, directory-based), and it unlocks horizontal write scale at the cost of cross-shard queries and transactions becoming much harder.</p>
+    <p>But start here. Master primary-replica first. Most companies never need sharding; they just need disciplined replica usage and good lag monitoring.</p>
+
+  </main>
+</div>
+<script src="../assets/js/nav.js"></script>
+<script src="../assets/js/animator.js"></script>
+<script>
+const arch = new ArchAnimator('#arch');
+
+let state = {
+  writes: 0,
+  reads: 0,
+  lagSamples: [],
+  staleReads: 0,
+  failovers: 0,
+  primaryAlive: true,
+  primaryId: 'primary',         // which node is currently primary
+  rowCounter: 0,
+  // simulated DB contents; each entry is {id, value, ts}
+  data: {
+    primary: [],
+    replica1: [],
+    replica2: []
+  },
+  // how far behind each replica is in terms of committed rows (conceptual)
+  lag: { replica1: 0, replica2: 0 }
+};
+
+function buildArch() {
+  arch.clear();
+  arch.addNode('app',      '⚙️<br>App Server',  10, 50);
+  arch.addNode('primary',  '🗄️<br>Primary DB',   45, 50);
+  arch.addNode('replica1', '📘<br>Replica 1',    80, 20);
+  arch.addNode('replica2', '📘<br>Replica 2',    80, 80);
+
+  arch.addEdges([
+    ['app','primary'],
+    ['primary','replica1'],
+    ['primary','replica2'],
+    ['app','replica1'],
+    ['app','replica2']
+  ]);
+}
+
+function say(msg) {
+  document.getElementById('desc').innerHTML = msg;
+}
+
+function renderStats() {
+  document.getElementById('st-writes').textContent   = state.writes;
+  document.getElementById('st-reads').textContent    = state.reads;
+  document.getElementById('st-stale').textContent    = state.staleReads;
+  document.getElementById('st-failover').textContent = state.failovers;
+  const avgLag = state.lagSamples.length
+    ? Math.round(state.lagSamples.reduce((a,b)=>a+b,0) / state.lagSamples.length)
+    : 0;
+  document.getElementById('st-lag').textContent = avgLag + 'ms';
+}
+
+function fmtRows(rows) {
+  if (!rows.length) return '<span style="opacity:0.5">empty</span>';
+  return rows.map(r => `row#${r.id}: "${r.value}"`).join('<br>');
+}
+
+function renderState() {
+  document.getElementById('state-primary').innerHTML = fmtRows(state.data[state.primaryId] || []);
+  // Replicas always rendered by the physical box names regardless of promotion
+  const r1rows = state.data.replica1 || [];
+  const r2rows = state.data.replica2 || [];
+  document.getElementById('state-r1').innerHTML = fmtRows(r1rows);
+  document.getElementById('state-r2').innerHTML = fmtRows(r2rows);
+
+  // highlight primary box visually
+  if (state.primaryId === 'replica1') {
+    document.getElementById('state-r1').innerHTML =
+      '<span style="color:var(--success);font-weight:bold">★ NOW PRIMARY</span><br>' + fmtRows(r1rows);
+  }
+}
+
+function disableButtons(v) {
+  document.querySelectorAll('.viz-btn').forEach(b => b.disabled = v);
+}
+
+// ------------------------------------------------------------------
+// WRITE flow: app -> primary -> (async) -> replicas
+// ------------------------------------------------------------------
+async function doWrite() {
+  if (!state.primaryAlive) {
+    say('<strong style="color:var(--danger)">💥 Primary is DEAD!</strong> Write rejected. Promote a replica first.');
+    return;
+  }
+
+  state.rowCounter++;
+  const row = {
+    id: state.rowCounter,
+    value: 'v' + state.rowCounter,
+    ts: Date.now()
+  };
+
+  state.writes++;
+  renderStats();
+
+  say(`<strong>📝 INSERT row#${row.id}</strong> — client sends write to app server.`);
+  await arch.sendPacket('app', state.primaryId, { duration: 500 });
+
+  // Primary commits locally
+  state.data[state.primaryId].push(row);
+  arch.setNodeStatus(state.primaryId, 'hit');
+  say(`<strong>Primary committed row#${row.id}.</strong> Ack goes back to client. Replication is async.`);
+  await arch.sendPacket(state.primaryId, 'app', { cls: 'response', duration: 500 });
+  setTimeout(() => arch.setNodeStatus(state.primaryId, null), 400);
+
+  // Async replication to both replicas, with varying lag
+  const lag1 = 4 + Math.floor(Math.random() * 8);   // 4-11ms
+  const lag2 = 8 + Math.floor(Math.random() * 10);  // 8-17ms
+  state.lagSamples.push(lag1);
+  state.lagSamples.push(lag2);
+  if (state.lagSamples.length > 50) state.lagSamples.splice(0, state.lagSamples.length - 50);
+  renderStats();
+
+  // kick off both in parallel (don't await)
+  replicateTo('replica1', row, lag1);
+  replicateTo('replica2', row, lag2);
+}
+
+async function replicateTo(replicaName, row, lagMs) {
+  if (state.primaryId === replicaName) return; // skip self-replication
+  if (!state.data[replicaName]) return;
+  say(prev => prev); // no-op; narration stays
+  document.getElementById('desc').innerHTML +=
+    `<br><span style="color:var(--text-dim)">↳ replicating row#${row.id} to ${replicaName} (lag ~${lagMs}ms)...</span>`;
+  await arch.sendPacket(state.primaryId, replicaName, { duration: 800 + lagMs * 20 });
+  state.data[replicaName].push(row);
+  arch.setNodeStatus(replicaName, 'hit');
+  setTimeout(() => arch.setNodeStatus(replicaName, null), 400);
+  renderState();
+}
+
+// ------------------------------------------------------------------
+// READ flow: app -> random replica -> back
+// ------------------------------------------------------------------
+async function doRead() {
+  state.reads++;
+  renderStats();
+
+  // Pick a healthy replica at random. If primary died and no promotion happened,
+  // we still can read from replicas.
+  const candidates = ['replica1','replica2'].filter(r => r !== state.primaryId);
+  // If primary got promoted to replica1, candidates will be just replica2 etc.
+  if (!candidates.length) {
+    say('<strong style="color:var(--danger)">No replicas available!</strong> (All boxes are either dead or the primary.)');
+    return;
+  }
+  const target = candidates[Math.floor(Math.random() * candidates.length)];
+
+  say(`<strong>📖 SELECT *</strong> — client issues read, routed to ${target} (eventual consistency).`);
+  await arch.sendPacket('app', target, { duration: 600 });
+  const rows = state.data[target];
+  const primaryRows = state.data[state.primaryId];
+  const isStale = rows.length < primaryRows.length;
+  if (isStale) state.staleReads++;
+  renderStats();
+
+  arch.setNodeStatus(target, isStale ? 'miss' : 'hit');
+  if (isStale) {
+    say(`<strong style="color:var(--danger)">⚠️ STALE READ</strong> — ${target} returned ${rows.length} rows, but primary has ${primaryRows.length}. Classic replication lag.`);
+  } else {
+    say(`<strong style="color:var(--success)">✓ Fresh read</strong> — ${target} returned ${rows.length} rows (in sync with primary).`);
+  }
+  await arch.sendPacket(target, 'app', { cls: 'response', duration: 600 });
+  setTimeout(() => arch.setNodeStatus(target, null), 500);
+}
+
+// ------------------------------------------------------------------
+// Replication-lag demo: write at t=0, immediately read the same replica
+// BEFORE replication arrives. Guarantees a stale read.
+// ------------------------------------------------------------------
+async function doLagDemo() {
+  if (!state.primaryAlive) {
+    say('<strong style="color:var(--danger)">Primary is dead.</strong> Promote a replica first.');
+    return;
+  }
+  state.rowCounter++;
+  const row = { id: state.rowCounter, value: 'v' + state.rowCounter + '*', ts: Date.now() };
+  state.writes++;
+  renderStats();
+
+  say(`<strong>⏰ LAG DEMO:</strong> Writing row#${row.id} at t=0...`);
+  await arch.sendPacket('app', state.primaryId, { duration: 500 });
+  state.data[state.primaryId].push(row);
+  arch.setNodeStatus(state.primaryId, 'hit');
+  renderState();
+  await arch.sendPacket(state.primaryId, 'app', { cls: 'response', duration: 400 });
+  setTimeout(() => arch.setNodeStatus(state.primaryId, null), 400);
+
+  // Kick off replication but with a deliberate delay before it completes.
+  // Meanwhile immediately do a read from a replica.
+  const targetReplica = (state.primaryId === 'replica1') ? 'replica2' : 'replica1';
+
+  // Schedule the replication to arrive later
+  const replicationDelayMs = 1400;
+  setTimeout(() => {
+    state.data[targetReplica].push(row);
+    arch.setNodeStatus(targetReplica, 'hit');
+    renderState();
+    setTimeout(() => arch.setNodeStatus(targetReplica, null), 400);
+  }, replicationDelayMs);
+
+  // Immediately (at ~t+100ms) the user does a read
+  say(`<strong>⏰ t+100ms:</strong> App reads from ${targetReplica} — BEFORE replication arrives.`);
+  await arch.sendPacket('app', targetReplica, { duration: 600 });
+  state.reads++;
+  state.staleReads++;
+  renderStats();
+  arch.setNodeStatus(targetReplica, 'miss');
+  const rowsNow = state.data[targetReplica].length;
+  const primaryRows = state.data[state.primaryId].length;
+  say(`<strong style="color:var(--danger)">🔴 STALE:</strong> Read saw ${rowsNow} rows but primary has ${primaryRows}. <br>This is the "read-your-writes" bug. User writes, immediately reads, sees old value.`);
+  await arch.sendPacket(targetReplica, 'app', { cls: 'response', duration: 600 });
+  setTimeout(() => arch.setNodeStatus(targetReplica, null), 600);
+
+  // After replication arrives, optionally narrate
+  setTimeout(() => {
+    say(`<strong style="color:var(--success)">✓ t+${replicationDelayMs}ms: replication caught up.</strong> Future reads from ${targetReplica} will be fresh. But the damage (user saw stale data) is done.`);
+  }, replicationDelayMs + 100);
+}
+
+// ------------------------------------------------------------------
+// Kill primary
+// ------------------------------------------------------------------
+function killPrimary() {
+  if (!state.primaryAlive) {
+    say('Primary already dead.');
+    return;
+  }
+  state.primaryAlive = false;
+  arch.setNodeStatus(state.primaryId, 'miss');
+  arch.nodes[state.primaryId].el.style.opacity = '0.3';
+  arch.nodes[state.primaryId].el.innerHTML = '💀<br>Primary<br><small>DEAD</small>';
+  say('<strong style="color:var(--danger)">💥 Primary DEAD!</strong> New writes will fail until we promote a replica. Reads from replicas still work (but can be stale).');
+}
+
+// ------------------------------------------------------------------
+// Promote replica1 -> new primary
+// ------------------------------------------------------------------
+function promoteReplica1() {
+  if (state.primaryAlive && state.primaryId === 'primary') {
+    say('<strong>Primary is still alive.</strong> You need to kill it first (or this would cause split-brain).');
+    return;
+  }
+  if (state.primaryId === 'replica1') {
+    say('Replica 1 is already the primary.');
+    return;
+  }
+
+  state.failovers++;
+  state.primaryAlive = true;
+  state.primaryId = 'replica1';
+  renderStats();
+
+  // Swap visual styling
+  const r1 = arch.nodes.replica1.el;
+  r1.innerHTML = '🗄️<br>Primary<br><small>(promoted)</small>';
+  r1.style.border = '2px solid var(--success)';
+  arch.setNodeStatus('replica1', 'hit');
+  setTimeout(() => arch.setNodeStatus('replica1', null), 800);
+
+  say('<strong style="color:var(--success)">💚 Replica 1 promoted to PRIMARY.</strong> Writes resume. Note: any writes that were in-flight on the old primary but hadn\'t replicated yet are LOST (classic async-replication failover cost).');
+  renderState();
+}
+
+// ------------------------------------------------------------------
+// Reset
+// ------------------------------------------------------------------
+function resetAll() {
+  state = {
+    writes: 0, reads: 0, lagSamples: [], staleReads: 0, failovers: 0,
+    primaryAlive: true,
+    primaryId: 'primary',
+    rowCounter: 0,
+    data: { primary: [], replica1: [], replica2: [] },
+    lag: { replica1: 0, replica2: 0 }
+  };
+  buildArch();
+  renderStats();
+  renderState();
+  say('Reset. Click <strong>📝 Write</strong> to insert a row, or <strong>⏰ Show Lag</strong> for the read-your-writes demo.');
+}
+
+// ------------------------------------------------------------------
+// Wire up buttons
+// ------------------------------------------------------------------
+document.getElementById('btnWrite').onclick = async () => {
+  disableButtons(true);
+  await doWrite();
+  setTimeout(() => disableButtons(false), 800);
+};
+document.getElementById('btnRead').onclick = async () => {
+  disableButtons(true);
+  await doRead();
+  disableButtons(false);
+};
+document.getElementById('btnLag').onclick = async () => {
+  disableButtons(true);
+  await doLagDemo();
+  setTimeout(() => disableButtons(false), 1600);
+};
+document.getElementById('btnKill').onclick = () => killPrimary();
+document.getElementById('btnPromote').onclick = () => promoteReplica1();
+document.getElementById('btnReset').onclick = () => resetAll();
+
+// Boot
+buildArch();
+renderStats();
+renderState();
+</script>
+</body>
+</html>

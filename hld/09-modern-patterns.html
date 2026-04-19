@@ -1,0 +1,1100 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Modern Architecture Patterns (2026) — Book II · HLD</title>
+<link rel="stylesheet" href="../assets/css/style.css">
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">System Design Books</div>
+    <div class="brand-sub">by Sanheen · Progressive Learning</div>
+    <div class="nav-section">
+      <h3>Home</h3>
+      <a href="../index.html">Overview</a>
+    </div>
+    <div class="nav-section">
+      <h3>Book I — Low Level Design</h3>
+      <a href="../lld/index.html">LLD Index</a>
+    </div>
+    <div class="nav-section">
+      <h3>Book II — High Level Design</h3>
+      <a href="index.html">HLD Index</a>
+      <a href="01-foundations.html">1. Foundations & Capacity</a>
+      <a href="02-building-blocks.html">2. Building Blocks</a>
+      <a href="03-basic-systems.html">3. Basic Systems</a>
+      <a href="04-intermediate.html">4. Intermediate Systems</a>
+      <a href="05-advanced.html">5. Advanced Systems</a>
+      <a href="06-very-high-scale.html">6. Very High Scale</a>
+      <a href="07-war-room.html">7. War Room Scenarios</a>
+      <a href="07b-war-room-extra.html">7b. War Room Extras</a>
+      <a href="08-real-architectures.html">8. Real Architectures</a>
+      <a href="09-modern-patterns.html">9. Modern Architecture Patterns (2026)</a>
+      <a href="10-modern-problems.html">10. Modern 2026 Problems</a>
+    </div>
+    <div class="nav-section">
+      <h3>Book III — AI System Design</h3>
+      <a href="../ai/index.html">AI Index</a>
+    </div>
+  </aside>
+  <main class="main">
+    <div class="breadcrumb"><a href="../index.html">Home</a> / <a href="index.html">Book II · HLD</a> / Chapter 9</div>
+    <h1>Chapter 9: Modern Architecture Patterns (2026)</h1>
+
+    <p>Classical patterns — load balancers, read replicas, sharding, caches — haven't disappeared. They're still the bones of every system. But the <em>flesh</em> of a 2026 architecture looks very different from what you'd see in a 2015 textbook. Kubernetes is table stakes. Service meshes are everyday infrastructure. Event sourcing, CQRS, and the outbox pattern are common. GitOps runs deployments. Feature flags ship independently of code. Edge compute runs your auth logic 20ms from the user. And AI now sits as a first-class citizen in your observability stack.</p>
+
+    <p>This chapter catalogs the patterns that emerged (or became mainstream) over the last several years and are expected in modern interviews and real systems. For each pattern we cover: <strong>the pain</strong> (what breaks without it), <strong>the fix</strong> (architecture), <strong>tradeoffs</strong>, <strong>real companies using it</strong>, and <strong>when it's overkill</strong>.</p>
+
+    <div class="callout">
+      <strong>Reading strategy.</strong> Chapter 2 gave you the primitives (LB, DB, cache, queue). This chapter layers the <em>meta-patterns</em> that compose those primitives for distributed-systems-scale problems. If you've only built monoliths, read the "anti-patterns" section first — many teams adopt these patterns prematurely and suffer for it.
+    </div>
+
+    <hr>
+
+    <h2>Part A — Microservices-Era Patterns</h2>
+
+    <h3>1. API Gateway (deep dive)</h3>
+
+    <p><strong>The pain.</strong> You break your monolith into 30 microservices. Your mobile app now has to know 30 hostnames, 30 auth schemes, and call them in the right order. Each service reimplements rate limiting, authentication, logging, and CORS. A new auth scheme means 30 PRs. A DDoS against one service leaks into your whole network because there's no front-door guard.</p>
+
+    <p><strong>The fix.</strong> A single <strong>API Gateway</strong> — a reverse proxy that every external request passes through. It centralizes cross-cutting concerns: auth, rate limiting, request routing, request/response transformation, aggregation, caching, logging, and metrics.</p>
+
+    <div class="diagram"><pre>
+                   ┌──────────────────────────────────────────┐
+  Mobile ────┐     │             API Gateway                  │
+  Web ───────┼───► │  ┌──────┐ ┌──────┐ ┌──────────┐ ┌─────┐  │
+  Partner ───┘     │  │ Auth │→│ Rate │→│ Routing  │→│ Agg │  │
+                   │  └──────┘ │Limit │ │          │ └─────┘  │
+                   │           └──────┘ └──────────┘          │
+                   └──────────┬────────────┬──────────────────┘
+                              │            │
+                     ┌────────▼──┐   ┌─────▼─────┐   ┌──────────┐
+                     │ users-svc │   │ orders-svc│   │ inv-svc  │
+                     └───────────┘   └───────────┘   └──────────┘
+</pre></div>
+
+    <p><strong>Responsibilities (typical).</strong></p>
+    <ul>
+      <li><strong>Authentication / Authorization</strong> — validate JWT/session; inject <code>user_id</code> header to downstream.</li>
+      <li><strong>Rate limiting</strong> — per-IP, per-user, per-API-key, per-route.</li>
+      <li><strong>Routing</strong> — path-based, host-based, header-based.</li>
+      <li><strong>Request aggregation</strong> — one client call fans out to 3 backend calls, merged before response. Saves mobile battery.</li>
+      <li><strong>Protocol translation</strong> — REST in, gRPC out; WebSocket in, Kafka out.</li>
+      <li><strong>Observability</strong> — uniform logs, traces, metrics at ingress.</li>
+      <li><strong>Caching</strong> — edge cache for GETs.</li>
+      <li><strong>TLS termination</strong> — one cert, one place.</li>
+    </ul>
+
+    <p><strong>Implementations.</strong></p>
+    <table>
+      <tr><th>Gateway</th><th>Style</th><th>Strengths</th><th>Notes</th></tr>
+      <tr><td>Kong</td><td>Nginx + Lua plugins</td><td>Mature, plugin ecosystem, DB or DB-less</td><td>Self-hosted, OSS + Enterprise</td></tr>
+      <tr><td>AWS API Gateway</td><td>Managed</td><td>Zero-ops, WAF-integrated, Lambda authorizers</td><td>Costly at high RPS; cold starts</td></tr>
+      <tr><td>Envoy</td><td>C++ L7 proxy</td><td>Fast, used in Istio/Gloo, xDS config</td><td>Config complexity</td></tr>
+      <tr><td>Traefik</td><td>Go, K8s-native</td><td>Dynamic discovery, simple</td><td>Less plugin depth</td></tr>
+      <tr><td>Cloudflare</td><td>Edge-native</td><td>DDoS, WAF, Workers, global PoPs</td><td>Locks you to CF</td></tr>
+      <tr><td>Apigee / Tyk</td><td>Enterprise</td><td>Developer portal, monetization</td><td>Pricey, heavy</td></tr>
+    </table>
+
+    <h4>Backend-for-Frontend (BFF)</h4>
+
+    <p>A single generic API gateway forces every client (mobile, web, TV, partner API) to accept the same response shape. Mobile wants a trimmed payload over slow networks. Web wants richer data with related resources. TV wants cursor pagination plus images in specific sizes.</p>
+
+    <p><strong>BFF fix.</strong> One gateway <em>per client type</em>, owned by the client's team. Each BFF aggregates and shapes data exactly for its client.</p>
+
+    <div class="diagram"><pre>
+   Mobile app ─────► Mobile BFF ──┐
+   Web app    ─────► Web BFF     ─┼─► users, orders, catalog, inventory (gRPC)
+   Partner    ─────► Partner API ─┘
+</pre></div>
+
+    <p><strong>Real world.</strong> Netflix, SoundCloud (coined the term), Spotify, and Shopify use BFF. Netflix's original BFF ("Edge API") later evolved into per-device GraphQL layers — a BFF-Federation hybrid.</p>
+
+    <p><strong>When overkill.</strong> If you have one web client and 5 services, skip BFF. Even an API Gateway is optional under ~5-10 services; a shared library for auth may be cheaper.</p>
+
+    <div class="callout warn"><strong>Gotcha.</strong> API Gateway becomes a deployment bottleneck if every team's routing changes require a central-team PR. Keep config declarative (GitOps) and per-service ownership.</div>
+
+    <h3>2. Sidecar Pattern</h3>
+
+    <p><strong>The pain.</strong> Every service needs logging, metrics, secrets fetching, TLS, and a few retry/timeout primitives. If you build these in-process, every language stack (Go, Java, Python, Node) needs its own library, with its own bugs and release cadence. Upgrading the logging format means 30 services upgrade their library.</p>
+
+    <p><strong>The fix.</strong> Pack the cross-cutting concerns into a <strong>separate container (the sidecar)</strong> that runs alongside your main container in the same pod/task. Same network namespace (localhost communication), same lifecycle, but independent code.</p>
+
+    <div class="diagram"><pre>
+   ┌─────────────────── Pod ────────────────────┐
+   │                                            │
+   │  ┌─────────────┐       ┌─────────────────┐ │
+   │  │  App        │◄─────►│  Sidecar        │ │
+   │  │ (Python)    │ localhost │ (Envoy /    │ │
+   │  │             │       │  log shipper /  │ │
+   │  │             │       │  vault agent)   │ │
+   │  └─────────────┘       └────────┬────────┘ │
+   │                                 │          │
+   └─────────────────────────────────┼──────────┘
+                                     ▼
+                         Upstream service / log backend
+</pre></div>
+
+    <p><strong>Common sidecars.</strong></p>
+    <ul>
+      <li><strong>Envoy / Linkerd-proxy</strong> — service mesh data plane (mTLS, retries, tracing).</li>
+      <li><strong>Fluent Bit / Vector / Fluentd</strong> — log shipper; tail app logs, forward to Loki/ELK.</li>
+      <li><strong>OTel Collector (sidecar mode)</strong> — traces/metrics collection.</li>
+      <li><strong>Vault Agent</strong> — fetch secrets, rotate tokens.</li>
+      <li><strong>Dapr</strong> — portable runtime API (state, pubsub) exposed over localhost HTTP.</li>
+    </ul>
+
+    <p><strong>Why this beats a library.</strong></p>
+    <ul>
+      <li>Language-agnostic — Python and Java apps share the same sidecar.</li>
+      <li>Independent deploys — upgrade sidecar without touching app.</li>
+      <li>Failure isolation — sidecar crash doesn't corrupt app state.</li>
+      <li>Security — secrets stay in sidecar memory, not app code.</li>
+    </ul>
+
+    <p><strong>Tradeoffs.</strong></p>
+    <table>
+      <tr><th>Pro</th><th>Con</th></tr>
+      <tr><td>Polyglot-friendly</td><td>Extra CPU / memory per pod (often 50-150 MB)</td></tr>
+      <tr><td>Lifecycle tied to pod</td><td>Extra hop = latency (sub-ms usually)</td></tr>
+      <tr><td>Independent release</td><td>Operational complexity (two processes per pod)</td></tr>
+    </table>
+
+    <p><strong>When overkill.</strong> Tiny internal services, single language, low service count — an in-process library is simpler. Sidecars shine at 20+ polyglot services.</p>
+
+    <h3>3. Ambassador Pattern</h3>
+
+    <p><strong>The pain.</strong> Your app needs to call a flaky external API. Every caller needs retries, circuit breakers, TLS, logging, authentication headers. And tomorrow you want to swap providers (e.g., Twilio → MessageBird) without rewriting business code.</p>
+
+    <p><strong>The fix.</strong> An <strong>Ambassador sidecar</strong> — a specialized sidecar that represents the <em>remote</em> service. The main app calls it over plain <code>http://localhost</code>; the ambassador handles TLS, auth, retries, failover, observability, and provider substitution.</p>
+
+    <div class="diagram"><pre>
+   ┌───────────────── Pod ──────────────────┐
+   │                                        │
+   │  App ──► http://localhost:9000         │
+   │            │                           │
+   │            ▼                           │
+   │      Ambassador ─── mTLS, retry ─────┐ │
+   │      (localhost)   circuit breaker   │ │
+   │                                      │ │
+   └──────────────────────────────────────┼─┘
+                                          ▼
+                           External API (Twilio / Stripe / ...)
+</pre></div>
+
+    <p><strong>Ambassador vs Sidecar.</strong> Ambassador <em>is</em> a sidecar — specifically one that proxies to external/remote services. A generic sidecar may do local work (log shipping). Ambassadors are outbound-proxies.</p>
+
+    <p><strong>Real world.</strong> Kubernetes Ambassador API Gateway project, Envoy as egress proxy, Linkerd's outbound proxy, Stripe's internal "edge" clients. Netflix's Ribbon/Hystrix was an in-process ambassador precursor.</p>
+
+    <p><strong>When overkill.</strong> If you have one external dep used by one service, a library with retries is fine.</p>
+
+    <h3>4. Service Mesh</h3>
+
+    <p><strong>The pain.</strong> You have 80 microservices in Kubernetes. You want: mTLS everywhere (zero-trust), per-route retries, traffic-splitting for canaries, a uniform distributed trace, and per-service rate limits. Doing this in every app's code is insane — 80 teams implementing the same stuff 80 different ways.</p>
+
+    <p><strong>The fix.</strong> A <strong>service mesh</strong>: a sidecar proxy (usually Envoy) deployed next to every service, <em>plus</em> a control plane that programs those proxies declaratively. The data plane (sidecars) handles traffic; the control plane (Istio's istiod, Linkerd's controller) distributes config.</p>
+
+    <div class="diagram"><pre>
+                          ┌──── Control Plane (istiod) ────┐
+                          │   policy, certs, telemetry     │
+                          └───────────┬────────────────────┘
+                                      │ xDS / configs
+             ┌────────────────────────┼────────────────────────┐
+             ▼                        ▼                        ▼
+    ┌─────────────────┐       ┌─────────────────┐     ┌─────────────────┐
+    │ Pod: svc-A      │       │ Pod: svc-B      │     │ Pod: svc-C      │
+    │ ┌────┐ ┌─────┐  │ mTLS  │ ┌─────┐ ┌────┐  │     │ ┌────┐ ┌─────┐  │
+    │ │app │ │envoy│──┼──────►│ │envoy│ │app │  │     │ │app │ │envoy│  │
+    │ └────┘ └─────┘  │       │ └─────┘ └────┘  │     │ └────┘ └─────┘  │
+    └─────────────────┘       └─────────────────┘     └─────────────────┘
+</pre></div>
+
+    <p><strong>What you get for free.</strong></p>
+    <ul>
+      <li><strong>mTLS everywhere</strong> — automatic cert issuance + rotation (SPIFFE identities).</li>
+      <li><strong>Traffic splitting</strong> — 95% v1 / 5% v2 canary declaratively.</li>
+      <li><strong>Retries & timeouts</strong> — route-level config without touching code.</li>
+      <li><strong>Distributed tracing</strong> — spans injected by proxies.</li>
+      <li><strong>Observability</strong> — golden-four metrics (rate/error/latency/saturation) per service.</li>
+      <li><strong>Authz policies</strong> — "only orders-svc can call payments-svc" declaratively.</li>
+    </ul>
+
+    <p><strong>Popular choices (2026).</strong></p>
+    <table>
+      <tr><th>Mesh</th><th>Proxy</th><th>Strength</th><th>Gotcha</th></tr>
+      <tr><td>Istio</td><td>Envoy</td><td>Feature-rich, Ambient mode (no sidecars)</td><td>Complexity, CPU overhead</td></tr>
+      <tr><td>Linkerd</td><td>Rust micro-proxy</td><td>Lightweight, easy to run</td><td>Smaller feature set</td></tr>
+      <tr><td>Cilium Service Mesh</td><td>eBPF + Envoy</td><td>Kernel-level, no sidecar for L4</td><td>Newer, needs recent kernel</td></tr>
+      <tr><td>Consul Connect</td><td>Envoy</td><td>Works outside K8s too</td><td>Less momentum</td></tr>
+      <tr><td>AWS App Mesh</td><td>Envoy</td><td>Managed</td><td>AWS lock-in</td></tr>
+    </table>
+
+    <p><strong>When worth it.</strong> 20+ services, strict compliance (mTLS, zero trust), multi-team org where central platform team can own the mesh, need canary/traffic-split without code changes.</p>
+
+    <div class="callout danger"><strong>When over-engineering.</strong> Under ~10 services, a service mesh is almost always overkill. The CPU overhead of an Envoy sidecar (~0.1 CPU, ~50 MB RAM per pod) plus operational complexity (cert rotation, config drift, version upgrades) often outweighs the benefits. A simpler combination — ingress-controller + app-level retries + OTel SDK — often beats a full mesh.</div>
+
+    <p><strong>2026 trend: sidecar-less meshes.</strong> Istio's <em>Ambient Mesh</em> and Cilium's eBPF approach push L4 (mTLS, identity) into a per-node proxy instead of per-pod sidecars. Cuts CPU overhead dramatically. L7 features still use an optional per-service "waypoint" proxy.</p>
+
+    <hr>
+
+    <h2>Part B — Data & Event Patterns</h2>
+
+    <h3>5. Event Sourcing (Production Deep Dive)</h3>
+
+    <p><strong>The pain.</strong> Your orders table stores the current status: <code>CONFIRMED</code>. But a customer asks "what happened to my order?" — you don't know. You saved the <em>result</em>, not the <em>journey</em>. Auditing is a nightmare. Reconstructing state at an old timestamp is impossible. Bug fixes can't be "replayed" retroactively.</p>
+
+    <p><strong>The fix.</strong> Store <strong>every state change as an immutable event</strong>. Current state = fold over the events. The event log is the source of truth; rows in normal tables are just <em>materialized views</em> you can rebuild anytime.</p>
+
+    <div class="diagram"><pre>
+   Commands ──► Aggregate ──► Events ──► EVENT STORE (append-only)
+                                              │
+                         ┌────────────────────┼──────────────────┐
+                         ▼                    ▼                  ▼
+                 Materialized View A   Materialized View B   Search Index
+                 (Postgres: orders)    (Redis: leaderboard)  (Elastic)
+</pre></div>
+
+    <p><strong>Example — an order's event stream.</strong></p>
+
+    <pre><code>[
+  { "type": "OrderCreated",     "at": "T+0",   "items": [...] },
+  { "type": "PaymentAuthorized","at": "T+1s",  "amount": 4999 },
+  { "type": "StockReserved",    "at": "T+2s",  "sku": "X",  "qty": 1 },
+  { "type": "OrderShipped",     "at": "T+18h", "tracking": "ZX123" },
+  { "type": "OrderDelivered",   "at": "T+48h" }
+]</code></pre>
+
+    <p>Current state is derived by replaying: <code>OrderCreated → PaymentAuthorized → ...</code>. Want state at T+10s? Replay up to that timestamp.</p>
+
+    <h4>Event store choices</h4>
+
+    <table>
+      <tr><th>Backend</th><th>Pros</th><th>Cons</th></tr>
+      <tr><td>EventStoreDB</td><td>Purpose-built, streams + subscriptions</td><td>Niche ecosystem</td></tr>
+      <tr><td>Kafka (log-compacted topics)</td><td>Scalable, everyone knows it</td><td>No native concurrency control per aggregate</td></tr>
+      <tr><td>Postgres (events table)</td><td>Simple, transactional, Lift with CDC</td><td>Single-node write bottleneck eventually</td></tr>
+      <tr><td>DynamoDB + Streams</td><td>Serverless, scales</td><td>Item-size limits, cost</td></tr>
+      <tr><td>Axon Server</td><td>JVM ecosystem, CQRS+ES native</td><td>Java-centric</td></tr>
+    </table>
+
+    <h4>Snapshots</h4>
+
+    <p>Replaying 50,000 events to load an order is slow. Take a <strong>snapshot</strong> every N events (e.g., every 100): a serialized aggregate state at that point. Rehydrating = load snapshot + replay events since snapshot.</p>
+
+    <h4>Schema evolution — the killer problem</h4>
+
+    <p>Events live <em>forever</em>. Ten years from now, a replay still reads 2026 events. If you rename a field, old events break. Strategies:</p>
+    <ul>
+      <li><strong>Additive only</strong> — never remove or rename, only add optional fields.</li>
+      <li><strong>Versioned events</strong> — <code>OrderCreated.v2</code> alongside v1; aggregates handle both.</li>
+      <li><strong>Upcasting</strong> — on read, transform v1 events into v2 shape in memory.</li>
+      <li><strong>Copy-and-transform migration</strong> — new stream with rewritten events (rare, heavy).</li>
+    </ul>
+
+    <div class="callout warn"><strong>Interview gotcha.</strong> "Can you just drop a field nobody uses?" No — old events might reference it in consumer logic you forgot about. Treat your event schema like a public API.</div>
+
+    <p><strong>When to choose ES.</strong></p>
+    <ul>
+      <li>Audit is regulatory (finance, healthcare, insurance claims).</li>
+      <li>You need time travel / point-in-time state.</li>
+      <li>You need multiple projections (OLTP + search + analytics) from same truth.</li>
+      <li>Undo / compensation flows are first-class.</li>
+    </ul>
+
+    <p><strong>When NOT.</strong> CRUD admin panels. Simple reporting. Teams without strong modelling skills (ES is the easiest pattern in this chapter to get wrong). If you can't name the business events your domain generates, you're not ready.</p>
+
+    <p><strong>Real world.</strong> Nordstrom's Supply Chain, Adyen payments, LMAX exchange, Walmart inventory, ING banking core.</p>
+
+    <h3>6. CQRS — Command Query Responsibility Segregation</h3>
+
+    <p><strong>The pain.</strong> Your write model (normalized, transactional) is optimized for correctness. Your read queries want denormalized, pre-joined, often per-view shapes. Running them on the same tables means complex joins at read time, degrading write performance, and ugly ORMs fighting both sides.</p>
+
+    <p><strong>The fix.</strong> Separate the <strong>write model</strong> (commands mutate state) from <strong>read models</strong> (queries return view-shaped data). A sync mechanism (events, CDC) keeps reads eventually consistent with writes.</p>
+
+    <div class="diagram"><pre>
+   ┌───────────┐  Commands  ┌──────────────┐   events   ┌────────────────┐
+   │  Clients  │ ────────► │  Write model  │ ────────► │  Read model 1  │
+   │           │           │  (OLTP)       │           │  (Dashboard)   │
+   │           │           └───────┬──────┘            └────────────────┘
+   │           │                   │                   ┌────────────────┐
+   │           │ Queries ─────────────────────────► │  Read model 2  │
+   │           │                                       │  (Search)      │
+   └───────────┘                                       └────────────────┘
+</pre></div>
+
+    <p><strong>Example.</strong> An e-commerce product page needs: name, description, 3 lowest prices, top 5 reviews, in-stock count, related products. Write-side keeps products, prices, reviews, inventory as normalized tables. A "product page view" read model materializes the combined document into one Redis key or one Elastic document per product, updated as events flow.</p>
+
+    <p><strong>When to use.</strong></p>
+    <ul>
+      <li>Read-to-write ratio > 10:1 (very common — listings, feeds, dashboards).</li>
+      <li>Different shapes per consumer (mobile vs admin vs analytics).</li>
+      <li>Read scale requires different storage (cache, search, columnar).</li>
+      <li>Often paired with Event Sourcing, though ES isn't required.</li>
+    </ul>
+
+    <p><strong>Tradeoffs.</strong></p>
+    <table>
+      <tr><th>Benefit</th><th>Cost</th></tr>
+      <tr><td>Independent scaling of reads</td><td>Eventual consistency (read-your-writes issues)</td></tr>
+      <tr><td>Pre-optimized read shapes</td><td>Two data models to maintain</td></tr>
+      <tr><td>Swap read store easily</td><td>Projection-rebuild operations</td></tr>
+      <tr><td>Clear command vs query code</td><td>Team must grok eventual consistency UX</td></tr>
+    </table>
+
+    <p><strong>Consistency UX patterns.</strong> After a write, send the client the <em>expected</em> new state so the UI shows it immediately. Or use "read-your-own-writes" by routing the user's own queries to the leader. Or show a "processing..." state for a second.</p>
+
+    <p><strong>When overkill.</strong> Low-volume CRUD apps. "Just a few joins" is not CQRS territory. CQRS shines at scale and with clear read/write divergence.</p>
+
+    <h3>7. Outbox Pattern</h3>
+
+    <p><strong>The pain.</strong> You want to save an order AND publish an <code>OrderPlaced</code> event to Kafka. You do both. The DB write succeeds; the Kafka publish fails (network blip). Now the order exists but no downstream service knows about it. Or vice versa: Kafka succeeds, DB rolls back, consumers get an event for a non-existent order. Classic dual-write problem — two systems, no shared transaction.</p>
+
+    <p><strong>The fix.</strong> <strong>Write the event to an <code>outbox</code> table in the SAME DB transaction</strong> as the business data. A separate process (or CDC) ships outbox rows to the message bus and marks them published.</p>
+
+    <div class="diagram"><pre>
+   ┌──────────────── DB (single transaction) ─────────────────┐
+   │                                                          │
+   │   INSERT orders (...)                                    │
+   │   INSERT outbox (payload='OrderPlaced {id:1, ...}')      │
+   │                                                          │
+   └───────────────────────┬──────────────────────────────────┘
+                           │
+                           ▼
+               ┌──────────────────────┐
+               │ Outbox relay         │    publishes reliably
+               │ (poller or CDC)      │────────────────────────► Kafka
+               └──────────────────────┘
+</pre></div>
+
+    <p><strong>Two relay flavors.</strong></p>
+    <ol>
+      <li><strong>Poller.</strong> A worker <code>SELECT * FROM outbox WHERE published=false LIMIT 100</code>, publishes, marks published. Simple. Can lag under load.</li>
+      <li><strong>CDC (Change Data Capture).</strong> Debezium tails the DB's binlog/WAL and streams <code>outbox</code> inserts into Kafka. Near-zero lag. No polling pressure.</li>
+    </ol>
+
+    <p><strong>Guarantees.</strong> At-least-once delivery (publishing after commit might crash; relay retries on restart). Consumers must be idempotent — see Inbox pattern next.</p>
+
+    <p><strong>Real world.</strong> Shopify, Uber, Stripe, and most fintech systems. The "transactional outbox" is arguably the single most important pattern for correct event-driven systems in 2026.</p>
+
+    <h3>8. Inbox Pattern</h3>
+
+    <p><strong>The pain.</strong> Outbox guarantees at-least-once. Your consumer may receive the same event twice (relay retried; broker redelivered). If processing isn't idempotent, you charge the card twice, email the user twice, ship two packages.</p>
+
+    <p><strong>The fix.</strong> An <strong>inbox table</strong> on the consumer side. On receiving event <code>e</code>:</p>
+    <ol>
+      <li><code>INSERT INTO inbox (event_id) VALUES (e.id)</code> — unique constraint on <code>event_id</code>.</li>
+      <li>If conflict — already processed; skip.</li>
+      <li>Else — process + commit in same transaction.</li>
+    </ol>
+
+    <div class="diagram"><pre>
+   Kafka ──► Consumer
+              │
+              ▼
+     ┌────── Transaction ──────┐
+     │ INSERT inbox(event_id)  │  <-- dedupe guard
+     │ UPDATE business state   │
+     └──────────┬──────────────┘
+                ▼
+           COMMIT (or rollback all)
+</pre></div>
+
+    <p>Combined with outbox on producer side, you get an <strong>end-to-end exactly-once semantic</strong> over an at-least-once transport, using only standard DB transactions. Simple, battle-tested.</p>
+
+    <div class="callout success"><strong>Rule of thumb.</strong> Every event-driven service should have both an outbox (for its outgoing events) and an inbox (for incoming events it processes). Make this a platform-provided library — don't re-implement per team.</div>
+
+    <h3>9. Transactional Outbox + Debezium CDC</h3>
+
+    <p><strong>The pain.</strong> Distributed transactions (2PC / XA) across MySQL and Kafka are operationally painful and rare in practice. You still need cross-service atomicity.</p>
+
+    <p><strong>The fix.</strong> Outbox + Debezium CDC.</p>
+
+    <div class="diagram"><pre>
+ Service A (Postgres)                        Kafka                Service B (MySQL)
+ ┌─────────────────┐    binlog/WAL       ┌─────────────┐         ┌─────────────────┐
+ │ orders          │─►   Debezium     ──►│ topic:      │─────────► inbox + handler
+ │ outbox          │     (Kafka Connect) │ orders.v1   │         │                 │
+ └─────────────────┘                     └─────────────┘         └─────────────────┘
+        ▲                                                                │
+        └────────── separate outbox on service B for its events ◄────────┘
+</pre></div>
+
+    <p><strong>Why this wins over 2PC.</strong></p>
+    <ul>
+      <li>No distributed transaction coordinator — services only use their local DB's transaction.</li>
+      <li>No locks held across services — availability unaffected by peer downtime.</li>
+      <li>Recovery is natural — the log replays.</li>
+      <li>Debezium is production-grade, connectors exist for Postgres/MySQL/Mongo/SQL Server/Oracle.</li>
+    </ul>
+
+    <p><strong>Practical note.</strong> Debezium writes raw binlog row changes by default — use the <em>Outbox Event Router SMT</em> (single message transform) to extract logical events from the outbox table schema. Routes by event type, uses <code>aggregate_id</code> as Kafka key for ordering.</p>
+
+    <h3>10. Saga — Orchestration vs Choreography</h3>
+
+    <p>Covered briefly in Chapter 5; here's the production view.</p>
+
+    <p><strong>Problem recap.</strong> A checkout involves: charge card → reserve inventory → create shipment → send confirmation. Four services. No distributed transaction. If step 3 fails after steps 1-2 succeeded, we must <em>compensate</em> (refund, release stock) — not roll back.</p>
+
+    <h4>Choreography</h4>
+
+    <div class="diagram"><pre>
+  orders-svc  ──OrderPlaced──►  payments-svc  ──Paid──►  inv-svc  ──Reserved──► ship-svc
+                                                 │
+                                            (on failure)
+                                                 ▼
+                                    PaymentFailed ─► orders-svc (cancel)
+</pre></div>
+
+    <p>Services emit events; others listen. No central coordinator. <strong>Pros:</strong> decoupled, no single point of failure. <strong>Cons:</strong> distributed logic — understanding "what sagas exist" requires reading every service. Hard to change, hard to debug.</p>
+
+    <h4>Orchestration</h4>
+
+    <div class="diagram"><pre>
+              ┌── Orchestrator (Temporal workflow) ──┐
+              │                                      │
+              │  step 1 ► payments-svc               │
+              │  step 2 ► inv-svc                    │
+              │  step 3 ► ship-svc                   │
+              │                                      │
+              │  on any failure: run compensations   │
+              └──────────────────────────────────────┘
+</pre></div>
+
+    <p>A central workflow engine calls each service and handles failures. <strong>Pros:</strong> one place to read the business flow, easy to add retries/compensations/SLAs. <strong>Cons:</strong> orchestrator is a dependency; more operational surface.</p>
+
+    <h4>Temporal / Cadence as the orchestration runtime</h4>
+
+    <p>In 2026, Temporal has become the de-facto orchestration engine. Key wins:</p>
+    <ul>
+      <li><strong>Durable execution</strong> — workflow state persists across restarts, crashes, deploys.</li>
+      <li><strong>Code as workflow</strong> — write your saga as imperative code in Go/Java/Python; Temporal handles the state machine.</li>
+      <li><strong>Automatic retries</strong> with exponential backoff per activity.</li>
+      <li><strong>Timers & signals</strong> — wait 7 days for user input; resume exactly where you were.</li>
+      <li><strong>Deterministic replay</strong> — Temporal replays the workflow's history on restart.</li>
+    </ul>
+
+    <p><strong>Compensation design.</strong> For every forward action, define its inverse:</p>
+    <table>
+      <tr><th>Forward</th><th>Compensation</th></tr>
+      <tr><td>Charge card</td><td>Refund</td></tr>
+      <tr><td>Reserve inventory</td><td>Release reservation</td></tr>
+      <tr><td>Create shipment label</td><td>Cancel label</td></tr>
+      <tr><td>Send confirmation email</td><td>Send "oops, cancelled" email</td></tr>
+    </table>
+    <p>Compensations must themselves be idempotent — they can be retried.</p>
+
+    <p><strong>Pick orchestration when:</strong> flows are long, span many services, need visible state/history, or involve human steps. Pick choreography when: two services, simple notification-style coupling, you hate adding dependencies.</p>
+
+    <hr>
+
+    <h2>Part C — Deployment & Operational Patterns</h2>
+
+    <h3>11. Cell-Based Architecture</h3>
+
+    <p><strong>The pain.</strong> A single region, single cluster serving 200M users. A deploy bug takes everyone down. A noisy tenant exhausts a shared queue. A corrupt cache entry poisons all traffic. Blast radius = 100%.</p>
+
+    <p><strong>The fix.</strong> Partition users (by region, hash, tenant, shard key) into <strong>cells</strong> — each cell is a complete, isolated, self-sufficient stack (LB → app → DB → cache → queue). A "thin" routing layer maps a user to a cell.</p>
+
+    <div class="diagram"><pre>
+                 Router (cell-aware)
+                        │
+     ┌──────────────────┼──────────────────┬────────────────┐
+     ▼                  ▼                  ▼                ▼
+   Cell 1             Cell 2             Cell 3          Cell N
+  (LB+app+DB+        (LB+app+DB+        ...              ...
+   cache+queue)       cache+queue)
+</pre></div>
+
+    <p><strong>Properties.</strong></p>
+    <ul>
+      <li><strong>Blast radius containment</strong> — a cell down = ~1/N users affected, not everyone.</li>
+      <li><strong>Independent deploys</strong> — roll deploy cell-by-cell.</li>
+      <li><strong>Noisy neighbor isolation</strong> — tenant in cell 3 can't starve cell 5.</li>
+      <li><strong>Scaling unit</strong> — add capacity = add a new cell.</li>
+      <li><strong>Failure testing</strong> — kill a cell in prod to verify recovery.</li>
+    </ul>
+
+    <p><strong>Router requirements.</strong></p>
+    <ul>
+      <li>Ultra-reliable (it's SPOF-ish). Keep logic tiny, stateless, globally replicated.</li>
+      <li>Sticky routing — same user always hits same cell (cookie, JWT claim, DNS).</li>
+      <li>Migration tool — move a user/tenant between cells without downtime.</li>
+    </ul>
+
+    <p><strong>Real companies.</strong></p>
+    <ul>
+      <li><strong>AWS</strong> — DynamoDB, S3, Route53 use cells internally; AWS whitepaper on "Reducing the Scope of Impact with Cell-Based Architecture".</li>
+      <li><strong>Slack</strong> — user-partitioned cells after their 2022 outage postmortem.</li>
+      <li><strong>Facebook/Meta</strong> — "Scuba" and other infra use cell partitioning.</li>
+      <li><strong>Roblox</strong> — moved to cell-based architecture after 73-hour outage in 2021.</li>
+    </ul>
+
+    <p><strong>When overkill.</strong> Under 1M users or single-region B2B apps. Cells are for when one failure taking everyone down is unacceptable.</p>
+
+    <h3>12. GitOps</h3>
+
+    <p><strong>The pain.</strong> You deploy to K8s by running <code>kubectl apply</code> from laptops. Drift happens — prod has a config nobody remembers setting. Rollback is "what was the previous image? let me dig through Slack."</p>
+
+    <p><strong>The fix.</strong> <strong>Git is the source of truth</strong> for infrastructure. Declarative manifests (K8s YAML, Helm, Kustomize, Terraform) live in git. An agent (ArgoCD, Flux) continuously reconciles the cluster to match git. <em>No human runs <code>kubectl apply</code> in production.</em></p>
+
+    <div class="diagram"><pre>
+   Developer ──► PR ──► main branch ──┐
+                                      │
+                                      ▼
+                         ┌─────────────────────┐
+                         │  ArgoCD / Flux      │
+                         │  (in cluster)       │◄── watches git
+                         │  reconcile loop     │
+                         └──────────┬──────────┘
+                                    │ apply
+                                    ▼
+                               Kubernetes
+</pre></div>
+
+    <p><strong>Benefits.</strong></p>
+    <ul>
+      <li>Full audit trail — every prod change is a git commit.</li>
+      <li>Easy rollback — <code>git revert</code>, reconciler rolls back cluster.</li>
+      <li>Disaster recovery — rebuild a cluster by pointing ArgoCD at the same repo.</li>
+      <li>PR-based review of infra changes; same CI as app code.</li>
+      <li>No human kubectl — no drift, no "oops I changed prod."</li>
+    </ul>
+
+    <p><strong>Tooling.</strong> ArgoCD (most popular, UI-heavy, apps-of-apps pattern), Flux (CNCF graduated, lighter, Kustomize-native), Jenkins X, Rancher Fleet. Often paired with Kustomize overlays or Helm charts for env differences (dev/staging/prod).</p>
+
+    <p><strong>Anti-pattern.</strong> "GitOps but we kubectl apply hotfixes sometimes." That's not GitOps — it's theater. Enforce via RBAC: humans have read-only on prod; only ArgoCD's service account can write.</p>
+
+    <h3>13. Blue-Green vs Canary vs Shadow Traffic</h3>
+
+    <table>
+      <tr><th>Strategy</th><th>How</th><th>Rollback</th><th>Best for</th></tr>
+      <tr><td>Blue-Green</td><td>Two identical environments; switch LB from blue to green all at once</td><td>Switch LB back (seconds)</td><td>Stateless apps, fast switch, easy DB migrations if backward-compatible</td></tr>
+      <tr><td>Canary</td><td>Send small % (1→5→25→100%) of prod traffic to new version</td><td>Stop promotion; drain canary</td><td>Detect issues early with minimal blast radius</td></tr>
+      <tr><td>Shadow / Mirror</td><td>Duplicate traffic to new version; return old's response</td><td>Stop mirroring</td><td>Testing perf / correctness of new version with real traffic, zero user impact</td></tr>
+      <tr><td>Rolling</td><td>Replace pods one-by-one (default K8s)</td><td>Reverse rollout</td><td>Baseline. Simple apps, gradual replace</td></tr>
+      <tr><td>A/B / feature-flag</td><td>Route by user attribute (cohort), not percentage</td><td>Flip flag</td><td>Product experiments</td></tr>
+    </table>
+
+    <p><strong>Tooling (2026).</strong></p>
+    <ul>
+      <li><strong>Argo Rollouts</strong> — canary + blue-green for K8s; integrates with metrics (Prometheus) for automated promotion/rollback.</li>
+      <li><strong>Flagger</strong> — similar, uses service mesh (Istio/Linkerd) for traffic-splitting.</li>
+      <li><strong>LaunchDarkly / Split / Unleash</strong> — feature flags at app level; true cohort targeting.</li>
+      <li><strong>Service mesh</strong> (Istio VirtualService) for traffic-splitting without special tools.</li>
+    </ul>
+
+    <div class="diagram"><pre>
+  Canary with Argo Rollouts + Prometheus gate:
+
+  deploy v2 ──► 5% traffic ──► wait 10min ──► check metrics
+                                                  │
+                          ┌───────────────────────┼───────────────────────┐
+                       good? yes                  no                      │
+                          ▼                                               ▼
+                     promote to 25%                               auto-rollback to v1
+                          │
+                          ▼ ...
+                     promote to 100%
+</pre></div>
+
+    <p><strong>Shadow traffic</strong> is underrated. Duplicate prod requests into your new version asynchronously; compare responses. No user sees the result. Great for: rewrite projects, performance optimization validation, ML model shadow evaluation. <em>Watch side effects</em> — if new version writes to DB/sends emails, you must mock those, or shadow doubles the side-effects.</p>
+
+    <h3>14. Chaos Engineering</h3>
+
+    <p><strong>The pain.</strong> Your system "should" be resilient — you have retries, timeouts, circuit breakers. But nobody's verified that under actual failure. First real outage reveals: retries cascade, timeouts are wrong, circuit breaker threshold is too high.</p>
+
+    <p><strong>The fix.</strong> Deliberately inject failure. Verify your hypotheses about resilience. Netflix: "we don't hope our systems are resilient. We know, because we break them."</p>
+
+    <p><strong>Common experiments.</strong></p>
+    <ul>
+      <li>Kill random pods (Chaos Monkey).</li>
+      <li>Kill an entire AZ (Chaos Gorilla) or region (Chaos Kong).</li>
+      <li>Inject network latency (100ms, 500ms, 2s).</li>
+      <li>Drop N% of packets.</li>
+      <li>CPU saturate a node.</li>
+      <li>Fill disk.</li>
+      <li>Crash a database leader.</li>
+      <li>Stall DNS.</li>
+      <li>Slow a third-party API.</li>
+    </ul>
+
+    <p><strong>Tools.</strong></p>
+    <ul>
+      <li><strong>Chaos Monkey</strong> (Netflix) — kills instances.</li>
+      <li><strong>Gremlin</strong> — SaaS, rich attack library.</li>
+      <li><strong>LitmusChaos</strong> — CNCF, K8s-native.</li>
+      <li><strong>Chaos Mesh</strong> — K8s CRD-based.</li>
+      <li><strong>AWS Fault Injection Service (FIS)</strong> — managed.</li>
+    </ul>
+
+    <p><strong>Game Days.</strong> A scheduled exercise where the on-call team responds to injected incidents as if real. Tests playbooks, alerting, human response, not just code.</p>
+
+    <div class="callout warn"><strong>Start small.</strong> Chaos in prod without baseline confidence is just self-sabotage. Step 1: injection in staging. Step 2: injection in prod during business hours with tight blast-radius scoping. Step 3: expand.</div>
+
+    <h3>15. Progressive Rollout / Feature Flags</h3>
+
+    <p><strong>The pain.</strong> Releasing a feature means deploying code. If the feature is buggy, you redeploy to rollback. Minutes-to-hours of pain. You can't release a "beta" to 5% of users without branching infra.</p>
+
+    <p><strong>The fix.</strong> Wrap features in runtime flags. Code ships dark. A flag-service decides — per request, per user — whether the feature is on. Turning a flag off is instant, no redeploy.</p>
+
+    <pre><code>if (flags.isEnabled("new_checkout_flow", user)) {
+  return renderNewCheckout();
+} else {
+  return renderOldCheckout();
+}</code></pre>
+
+    <p><strong>Capabilities of a good flag service.</strong></p>
+    <ul>
+      <li><strong>Targeting rules</strong> — on for users in country=IN, subscription=premium.</li>
+      <li><strong>Percentage rollout</strong> — on for 5% hashed by user_id.</li>
+      <li><strong>A/B testing</strong> — metrics per variant.</li>
+      <li><strong>Kill switches</strong> — ops-only instant-off.</li>
+      <li><strong>Audit log</strong> — who changed what when.</li>
+    </ul>
+
+    <p><strong>Vendors.</strong> LaunchDarkly (market leader), Split.io, Unleash (OSS), Flagsmith, PostHog (OSS), ConfigCat. Cloudflare and AWS AppConfig also in the game.</p>
+
+    <p><strong>Best practices.</strong></p>
+    <ul>
+      <li>Flags are debt — set expiry; delete after rollout settles.</li>
+      <li>Separate <em>release</em> flags (short-lived) from <em>operational</em> flags (kill switches) from <em>experiment</em> flags (A/B) from <em>permission</em> flags.</li>
+      <li>Treat flag config as versioned — a bad targeting rule is an outage.</li>
+      <li>Cache flag evaluation (SDK-side) — don't hit flag service on every request.</li>
+    </ul>
+
+    <hr>
+
+    <h2>Part D — Serverless & Edge Patterns</h2>
+
+    <h3>16. Serverless / FaaS</h3>
+
+    <p><strong>The pain.</strong> You run servers 24/7 to handle bursts that happen 5% of the time. Or you're a tiny startup and provisioning always-on servers for a nightly batch job is wasteful.</p>
+
+    <p><strong>The fix.</strong> Functions as a service. You deploy code; the platform provisions instances on demand, scales from 0 to thousands, and you pay per invocation + execution time.</p>
+
+    <div class="diagram"><pre>
+  Event Source  ──trigger──►   FaaS platform
+  (API Gateway,                    │
+   S3, SQS,                 ┌──────┴──────┐
+   CloudWatch,              │ Cold start? │──► spin container
+   Kafka, cron)             └──────┬──────┘
+                                   ▼
+                               run handler
+                                   │
+                                   ▼
+                               return / async
+</pre></div>
+
+    <p><strong>Players.</strong> AWS Lambda (incumbent), Google Cloud Functions, Azure Functions, Cloudflare Workers (V8 isolates, sub-ms cold start), Vercel/Netlify functions (dev-friendly wrappers over Lambda or Workers), Fly.io Machines (VM-level, warm-bootable).</p>
+
+    <h4>Cold start problem</h4>
+
+    <p>First invocation after idle = container spin-up + runtime init + your init code. Tens of ms (Workers) to several seconds (Lambda + big Java app + VPC). User experiences lag.</p>
+
+    <p><strong>Mitigations.</strong></p>
+    <ul>
+      <li><strong>Provisioned concurrency</strong> (AWS) — pay for N always-warm instances.</li>
+      <li><strong>SnapStart</strong> (AWS, Java) — snapshot init'd JVM; restore is fast.</li>
+      <li><strong>Smaller runtimes</strong> — Go/Rust binaries >> fat Java apps.</li>
+      <li><strong>Lazy-load heavy deps</strong> — only when first needed, not in global init.</li>
+      <li><strong>Edge runtimes (V8 isolates)</strong> — Cloudflare Workers have ~1ms cold start by design.</li>
+    </ul>
+
+    <h4>Statelessness requirement</h4>
+
+    <p>Each invocation may hit a different container. No in-memory state survives. Push state to external stores (DynamoDB, Redis, DB). Connection pooling is tricky — use RDS Proxy / Neon pooler / serverless-friendly DBs.</p>
+
+    <h4>When Lambda wins</h4>
+    <ul>
+      <li>Bursty or unpredictable traffic (low baseline, rare spikes).</li>
+      <li>Event-driven glue (S3 upload → thumbnail; SQS → processor).</li>
+      <li>Cron / scheduled jobs.</li>
+      <li>Low-volume APIs (prototypes, internal tools).</li>
+      <li>Teams without ops capacity.</li>
+    </ul>
+
+    <h4>When Lambda loses</h4>
+    <ul>
+      <li>Steady high traffic (>~100 RPS 24/7) — always-on VMs are often 5-10x cheaper.</li>
+      <li>Long-running jobs (>15 min Lambda cap).</li>
+      <li>Latency-critical endpoints where cold-start tail matters.</li>
+      <li>Persistent connections (WebSockets are possible but painful).</li>
+      <li>Heavy ML inference with large models (cold load expensive; use provisioned endpoints).</li>
+    </ul>
+
+    <h3>17. Edge Computing</h3>
+
+    <p><strong>The pain.</strong> Your origin is in us-east-1. A user in Mumbai sees 300ms RTT on every request. Login pages, feature flags, A/B decisions, personalization — all this basic logic doesn't need the origin, but currently requires it.</p>
+
+    <p><strong>The fix.</strong> Run code on the CDN's PoPs (Points of Presence) — hundreds of locations globally. Mumbai user hits Mumbai PoP; code runs there, ~20ms RTT. Only calls the origin if needed.</p>
+
+    <div class="diagram"><pre>
+   User (Mumbai)
+       │ 5-20ms
+       ▼
+   Cloudflare PoP (Mumbai)
+       │   Worker runs: auth, A/B, personalization,
+       │   cache lookup, DDoS filter
+       │
+       │─── cache hit ────► response (no origin hit)
+       │
+       │─── miss ─────────► origin (us-east-1)  +180ms RTT
+</pre></div>
+
+    <p><strong>Players.</strong></p>
+    <table>
+      <tr><th>Platform</th><th>Runtime</th><th>Notes</th></tr>
+      <tr><td>Cloudflare Workers</td><td>V8 isolates, Wasm</td><td>Sub-ms cold start; 300+ PoPs; KV, D1, R2, Durable Objects</td></tr>
+      <tr><td>Lambda@Edge / CloudFront Functions</td><td>Node.js / lightweight JS</td><td>AWS ecosystem; CF Functions are faster but more limited</td></tr>
+      <tr><td>Fastly Compute@Edge</td><td>Wasm (Rust, Go, JS, Swift)</td><td>Strong Wasm story; sub-ms cold start</td></tr>
+      <tr><td>Vercel Edge / Netlify Edge</td><td>Cloudflare/Deno-based</td><td>Developer DX wrapper</td></tr>
+      <tr><td>Deno Deploy</td><td>V8, TS-native</td><td>Global, fast</td></tr>
+    </table>
+
+    <h4>Why Wasm matters at the edge</h4>
+
+    <p>WebAssembly lets you run pre-compiled, sandboxed binaries with sub-millisecond cold start, in any language (Rust, Go, Swift, AssemblyScript). No container overhead, no JS runtime tax. Ideal for the edge's ephemeral, massively multi-tenant model. In 2026, Wasm is the de-facto portable compute unit.</p>
+
+    <h4>Edge use cases</h4>
+    <ul>
+      <li><strong>Auth</strong> — validate JWT, attach user context; reject unauthenticated traffic before origin.</li>
+      <li><strong>Personalization</strong> — rewrite response HTML with region/user-specific blocks.</li>
+      <li><strong>A/B testing</strong> — decide cohort at edge; set cookie.</li>
+      <li><strong>Feature flags</strong> — evaluate at edge, avoid origin lookup.</li>
+      <li><strong>Cache warming / stale-while-revalidate</strong>.</li>
+      <li><strong>Geo-routing</strong> — send EU users to EU origin.</li>
+      <li><strong>DDoS & bot filtering</strong> — Cloudflare's bread-and-butter.</li>
+      <li><strong>Image optimization</strong> on-the-fly.</li>
+      <li><strong>Rate limiting by IP / API key</strong>.</li>
+    </ul>
+
+    <div class="callout"><strong>Edge isn't a replacement for origin.</strong> Edge is stateless (mostly), has cold data, limited CPU/mem/time per request. Use edge for fast, stateless, global logic. Use origin for stateful business logic and heavy compute. Durable Objects / D1 start to blur this, but treat them carefully — a single region's durable object is still a region.</div>
+
+    <h3>18. Queue-Based Load Leveling</h3>
+
+    <p><strong>The pain.</strong> A producer generates bursts (10k req in 10s). A slow downstream (image processor, payment gateway) takes 500ms per request. Synchronous calls overwhelm the consumer — errors, timeouts, retries, amplification.</p>
+
+    <p><strong>The fix.</strong> Insert a queue. Producers push at their rate; consumers pull at <em>their</em> rate. Queue absorbs bursts.</p>
+
+    <div class="diagram"><pre>
+   Producers ──burst──►  [ Queue: SQS / Kafka / RabbitMQ ]  ──steady──► Consumers
+          (10k in 10s)         buffer: 500k msgs                (100/s sustained)
+</pre></div>
+
+    <p><strong>Modern variant.</strong> SQS → Lambda. AWS automatically scales Lambda concurrency based on queue depth. You set a max concurrency to protect downstream; Lambda pulls from SQS at that rate. Elegant — no "scale up the worker fleet" logic to write.</p>
+
+    <p><strong>Tradeoffs.</strong></p>
+    <table>
+      <tr><th>Pro</th><th>Con</th></tr>
+      <tr><td>Absorbs spikes</td><td>Adds latency (queue time)</td></tr>
+      <tr><td>Decouples producer/consumer</td><td>Queue is another system to run/monitor</td></tr>
+      <tr><td>Natural retry / DLQ</td><td>Not suited for request/response UX</td></tr>
+    </table>
+
+    <p><strong>When NOT to.</strong> User waits synchronously — login, search, cart. Queue adds latency users feel. For those, use load shedding (pattern 21) instead.</p>
+
+    <hr>
+
+    <h2>Part E — Observability & Resilience</h2>
+
+    <h3>19. Distributed Tracing</h3>
+
+    <p><strong>The pain.</strong> A request fails at 800ms. You scroll logs from 15 services. Each log has a timestamp. None share a correlation ID. You can't reconstruct the call graph. Root-causing takes hours.</p>
+
+    <p><strong>The fix.</strong> Distributed traces. A unique <code>trace_id</code> generated at ingress propagates through every downstream call (HTTP header, gRPC metadata, queue message). Each service emits a <em>span</em> — a timed operation with start, end, parent, attributes. The backend reconstructs a tree.</p>
+
+    <div class="diagram"><pre>
+   trace_id=abc123
+   │
+   ├── span: api-gateway  [0ms→830ms]
+   │    └── span: orders-svc  [5ms→780ms]
+   │         ├── span: db.query (postgres)  [10ms→25ms]
+   │         ├── span: http.call (payments)  [30ms→520ms]  ← slow!
+   │         │    └── span: http.call (stripe)  [35ms→510ms]
+   │         └── span: kafka.produce  [525ms→530ms]
+   │
+   (immediate insight: stripe call is the slow hop)
+</pre></div>
+
+    <p><strong>2026 stack.</strong></p>
+    <ul>
+      <li><strong>OpenTelemetry (OTel)</strong> — the standard. SDKs in every language; a collector aggregates and forwards.</li>
+      <li>Backends: <strong>Jaeger</strong>, <strong>Tempo</strong> (Grafana), <strong>Zipkin</strong>, <strong>Honeycomb</strong>, <strong>Datadog APM</strong>, <strong>Lightstep</strong>, <strong>New Relic</strong>.</li>
+      <li><strong>W3C Trace Context</strong> headers (<code>traceparent</code>) — vendor-neutral propagation.</li>
+    </ul>
+
+    <p><strong>Sampling.</strong> Tracing every request is expensive. Strategies:</p>
+    <ul>
+      <li><strong>Head-based</strong> — decide at trace start (e.g., sample 1%). Simple; misses rare errors.</li>
+      <li><strong>Tail-based</strong> — collect all spans buffered; decide after trace completes (e.g., always keep errors + slow traces). Accurate; heavier infra.</li>
+    </ul>
+
+    <p><strong>Logs aren't enough.</strong> Logs tell you <em>what</em> happened; traces tell you <em>why and where in the call graph</em>. Metrics tell you <em>how often</em>. The three are complementary — "three pillars of observability."</p>
+
+    <h3>20. Retry Budget + Backpressure</h3>
+
+    <p><strong>The pain.</strong> A downstream has a blip. Callers retry with exponential backoff. The blip recovers — but now traffic is <em>higher</em> because every client has a retry queue. Thundering herd; downstream dies again. <strong>Retry storms</strong>.</p>
+
+    <p><strong>The fix.</strong> A <strong>retry budget</strong> — limit total retries to a % of real traffic (e.g., 10%). Beyond the budget, give up and propagate the error.</p>
+
+    <pre><code>// Pseudocode
+retryBudget = RetryBudget(ratio=0.1, minRetries=10)
+if retryBudget.canRetry():
+    retryBudget.deposit()   // acknowledge a successful request
+    retryBudget.withdraw()  // pay for a retry
+    do_retry()
+else:
+    // fail fast — system is struggling, don't amplify
+    return error</code></pre>
+
+    <p><strong>Backpressure.</strong> When a consumer is overwhelmed, it signals "slow down" upstream — e.g., reactive-streams, gRPC flow control, TCP window, or explicit 429/503 with Retry-After. Producers reduce rate (or queue internally). The opposite of retrying harder.</p>
+
+    <p><strong>Used by.</strong> Netflix (they open-sourced <em>concurrency-limits</em>), Google SRE playbook, gRPC's own flow control, Linkerd's retry-budget feature, Envoy's retry budget.</p>
+
+    <h3>21. Load Shedding</h3>
+
+    <p><strong>The pain.</strong> At 110% capacity, everything gets slow — p50 doubles, p99 is 10x, timeouts cascade. If you served 80% at normal speed instead, users would be happier.</p>
+
+    <p><strong>The fix.</strong> Detect overload; <em>reject</em> excess requests (fast, with 503) rather than accept-and-struggle. Accepted requests get served at normal latency.</p>
+
+    <div class="diagram"><pre>
+   Request ──► admission controller
+                     │
+           ┌─────────┴──────────┐
+       under capacity       over capacity
+           │                     │
+           ▼                     ▼
+       serve normally       reject 503 (drop)
+</pre></div>
+
+    <p><strong>Strategies.</strong></p>
+    <ul>
+      <li><strong>Static thresholds</strong> — max in-flight = 1000; 1001+ dropped.</li>
+      <li><strong>Adaptive concurrency limits</strong> — Netflix's library. Watches latency; tightens limit when latency rises (TCP Vegas-like algorithm).</li>
+      <li><strong>Priority-based</strong> — drop low-priority (batch, logged-out users) first; keep high-priority (checkout, paying customers).</li>
+      <li><strong>Cost-based</strong> — reject expensive queries first (large page sizes, complex filters).</li>
+    </ul>
+
+    <p><strong>Works with retry budgets.</strong> Load shedding at the server + retry budget at the client = system degrades gracefully rather than collapsing.</p>
+
+    <p><strong>Real world.</strong> Netflix Concurrency Limits (OSS), Envoy admission control, Facebook "DQ" (Dynamic Queuing), AWS shuffle sharding + shedding, Google Maglev.</p>
+
+    <hr>
+
+    <h2>Part F — 2026-Specific Patterns</h2>
+
+    <h3>22. Cost-Aware Architecture (FinOps)</h3>
+
+    <p><strong>The pain.</strong> Your cloud bill is $2M/month. Nobody owns it. Engineers provision oversize instances "to be safe." Old dev environments run at night. EBS volumes from deleted EC2s linger. S3 buckets pile up uncompressed logs. Hard to tell what feature costs what.</p>
+
+    <p><strong>The fix.</strong> Treat cost as a first-class architecture concern — <strong>FinOps</strong>.</p>
+
+    <h4>Core practices</h4>
+    <ul>
+      <li><strong>Tag everything</strong> — cost allocation tags on every resource (team, product, env, feature).</li>
+      <li><strong>Cost dashboards per team</strong> — weekly review as normal as latency review.</li>
+      <li><strong>Right-sizing</strong> — continuous analysis: are instances actually using their CPU/mem?</li>
+      <li><strong>Spot / preemptible fleets</strong> — up to 90% discount for interruptible workloads (batch, CI, stateless workers).</li>
+      <li><strong>Reserved / Savings Plans</strong> — for baseline capacity (1-3 year commit, 30-70% discount).</li>
+      <li><strong>ARM/Graviton</strong> — AWS Graviton3/4 ~20-40% cheaper at same/better perf for most workloads.</li>
+      <li><strong>Tiered storage</strong> — S3 Intelligent-Tiering, Glacier for cold, object versioning with lifecycle.</li>
+      <li><strong>Serverless where variable</strong> — don't pay for idle.</li>
+      <li><strong>Data transfer awareness</strong> — egress is expensive; prefer same-AZ, compress, batch, use private endpoints.</li>
+    </ul>
+
+    <div class="diagram"><pre>
+   Typical cost-optimized compute mix:
+
+   ┌───────────── Spot (interruptible) ─────────────┐  ~60% of workers
+   │  batch, CI, stateless ML inference             │
+   └────────────────────────────────────────────────┘
+   ┌───────────── Reserved / Savings Plan ──────────┐  ~30% baseline
+   │  always-on services                            │
+   └────────────────────────────────────────────────┘
+   ┌───────────── On-demand / Serverless ───────────┐  ~10% spikes
+   │  spikes, rare bursts                           │
+   └────────────────────────────────────────────────┘
+</pre></div>
+
+    <p><strong>FinOps orgs.</strong> FinOps Foundation (CNCF-adjacent); frameworks like "Inform, Optimize, Operate." Tools: CloudZero, Vantage, Finout, Kubecost (K8s-specific), native AWS Cost Explorer / GCP Billing.</p>
+
+    <h3>23. Multi-Cloud / Hybrid Cloud</h3>
+
+    <p><strong>The pain (theoretical).</strong> "What if AWS has an outage? Or raises prices? Or kicks us out?" Common anxiety; often overblown in practice.</p>
+
+    <p><strong>The real pattern.</strong></p>
+    <ul>
+      <li><strong>Single primary cloud</strong> where 95% of infra lives.</li>
+      <li><strong>DR footprint in a second cloud</strong> — cold standby, data replicated, failover exercised yearly. Real insurance.</li>
+      <li><strong>Workload-fit picks</strong> — e.g., BigQuery on GCP for analytics even though you're an AWS shop; Azure for specific enterprise ties.</li>
+      <li><strong>Hybrid</strong> — on-prem for regulated data (banking, healthcare); cloud for bursty compute. Connected via Direct Connect / ExpressRoute.</li>
+    </ul>
+
+    <p><strong>Active-active multi-cloud is rare.</strong> It doubles cost (idle capacity elsewhere), doubles ops complexity, forces lowest-common-denominator architecture. Almost never worth it unless regulatory or a specific SLA demands it.</p>
+
+    <p><strong>Vendor-neutral abstractions.</strong></p>
+    <ul>
+      <li><strong>Kubernetes</strong> — same manifests on EKS / GKE / AKS / on-prem.</li>
+      <li><strong>Terraform / OpenTofu</strong> — IaC across providers.</li>
+      <li><strong>Postgres</strong> — available managed on all major clouds.</li>
+      <li><strong>S3 API</strong> — GCS, R2, MinIO, Backblaze all implement it.</li>
+      <li><strong>Crossplane</strong> — multi-cloud infra as CRDs.</li>
+    </ul>
+
+    <div class="callout warn"><strong>Lock-in reality check.</strong> The truly sticky locks are: IAM/auth integrations, vendor-specific services (DynamoDB, BigQuery, Cosmos DB), and operational muscle-memory. Even with K8s + Postgres, migrating is weeks of pain. Plan for "portable" not "cloud-agnostic."</div>
+
+    <h3>24. AI Observability Patterns</h3>
+
+    <p><strong>The pain.</strong> You ship an LLM-powered feature. Classical observability (p99, error rate) says all is well. But users report the answers are garbage. A new prompt version regressed quality. Tokens cost 2x last week and nobody noticed.</p>
+
+    <p><strong>The fix.</strong> Extend observability to cover LLM-specific signals.</p>
+
+    <p><strong>New metrics.</strong></p>
+    <table>
+      <tr><th>Dimension</th><th>Signals</th></tr>
+      <tr><td>Cost</td><td>Tokens in / out per request; $/request; $/user/day; cost by model; cost by feature</td></tr>
+      <tr><td>Latency</td><td>Time-to-first-token (TTFT), time-between-tokens, time-to-last-token</td></tr>
+      <tr><td>Quality</td><td>Offline eval scores; LLM-as-judge scores on sample; user thumbs-up/down rate; task-success rate</td></tr>
+      <tr><td>Safety</td><td>PII leak rate; jailbreak detection hits; toxicity classifier scores; refusal rate</td></tr>
+      <tr><td>Usage</td><td>Prompt template version distribution; tool-call frequency; fallback/retry rate</td></tr>
+    </table>
+
+    <p><strong>Tracing LLM calls.</strong> Extend OTel spans to include: prompt, response, model, tokens, temperature, tools invoked, retrieval docs (for RAG). Every span becomes a replayable unit. Tools: LangSmith, Langfuse, Arize, WhyLabs, Helicone, Phoenix.</p>
+
+    <p><strong>Regression detection.</strong></p>
+    <ul>
+      <li>Curated eval set ("golden questions") runs nightly; fail deploy if score drops >X%.</li>
+      <li>Shadow-eval with LLM-as-judge on a % of live traffic; alert on quality drift.</li>
+      <li>Prompt-version cohorting — compare new prompt version against old via A/B before full rollout.</li>
+    </ul>
+
+    <p><strong>Cost alerting.</strong> "Tokens per user" spike is often a prompt bug (infinite loop, missing stop sequence). Alert on abnormal cost-per-request, not just total spend.</p>
+
+    <p>See Book III for full AI-system observability patterns.</p>
+
+    <hr>
+
+    <h2>Part G — Anti-Patterns (Things Not to Do)</h2>
+
+    <h3>Distributed Monolith</h3>
+
+    <p>Microservices that must all deploy together. Symptoms: deploy order matters, version skew breaks things, DB migrations require coordinated multi-service rollouts, "atomic release" Slack channel exists. Worst of both worlds — you pay microservices tax (network, ops, complexity) and get monolith's pain (deploy coupling). Usually a sign you split on wrong seams. <strong>Fix:</strong> find the true domain boundaries (often fewer, bigger services); introduce contract tests; version APIs properly; decouple schemas.</p>
+
+    <h3>Shared DB across microservices</h3>
+
+    <p>Multiple "microservices" all read/write the same DB tables. Coupling in disguise — schema change blocks every team; no independent deploy; performance-coupled (one team's slow query = everyone's outage). <strong>Fix:</strong> each service owns its schema. Share via APIs or events, not tables. If data is truly shared reference data, make it a service.</p>
+
+    <h3>Nanoservices</h3>
+
+    <p>Services so tiny that the overhead (network hop, container, deploy pipeline, observability) outweighs their work. Often one endpoint per service. <strong>Fix:</strong> merge functionally related nanoservices; minimum sensible unit is roughly "owned by one team, deployable independently, meaningful domain concept."</p>
+
+    <h3>Premature microservices</h3>
+
+    <p>Your team of 8 runs 35 services for a product with 500 users. You're spending 80% of engineering time on ops; feature velocity is glacial. <strong>Fix:</strong> start as a well-structured modular monolith. Extract a service only when a seam <em>proves itself</em> — different scaling needs, different team, different tech, different deploy cadence.</p>
+
+    <h3>Multi-cloud for flexibility</h3>
+
+    <p>"We'll go multi-cloud so we can switch if AWS is bad." You spend 2x on networking, 2x on ops, 2x on expertise — to preserve optionality you'll likely never exercise. <strong>Fix:</strong> pick one primary, use portable tech (K8s, Postgres, Terraform) for <em>reversibility</em>, actually-multi-cloud only for DR or specific workload fit.</p>
+
+    <h3>Event-sourcing everything</h3>
+
+    <p>Replacing every CRUD table with an event stream because it's "cleaner." Most teams are not ready; schema evolution punishes you; read queries become hard. <strong>Fix:</strong> use ES for domains where audit, replay, or multiple projections genuinely matter. Keep CRUD for the rest.</p>
+
+    <h3>Service mesh in a 5-service cluster</h3>
+
+    <p>Istio for 5 services = ~5 Envoys × 0.1 CPU × 50 MB = wasteful operational tax. <strong>Fix:</strong> plain ingress + libraries until service count + cross-cutting complexity justify the mesh.</p>
+
+    <h3>Kubernetes for everything</h3>
+
+    <p>A 3-person team running EKS with 5 microservices. You now own: cluster upgrades, node OS patches, networking, RBAC, CRDs, Helm, observability stack. <strong>Fix:</strong> Fly.io / Render / Railway / ECS Fargate / App Engine / Cloud Run for small teams. K8s when scale or customization demands.</p>
+
+    <hr>
+
+    <h2>Part H — 2026 Pattern Composition Map</h2>
+
+    <p>No real system uses one pattern. Here's how patterns compose for common system types.</p>
+
+    <h3>Real-time chat (Slack-like)</h3>
+    <ul>
+      <li><strong>Cell-based</strong> by workspace — isolation for tenants.</li>
+      <li><strong>WebSocket gateway</strong> (often with Envoy/custom) as edge; sticky session per cell.</li>
+      <li><strong>Kafka / Pulsar</strong> fan-out bus for message delivery.</li>
+      <li><strong>Outbox + CDC</strong> for "message persisted + event emitted atomically."</li>
+      <li><strong>CQRS</strong> — write store (sharded DB) vs read store (threads, search).</li>
+      <li><strong>Elastic / Typesense</strong> for search as a read model.</li>
+      <li><strong>Edge PoPs</strong> for presence/typing indicators close to user.</li>
+      <li><strong>Service mesh</strong> (at scale) for internal mTLS + retries.</li>
+      <li><strong>Feature flags</strong> for per-workspace feature gating.</li>
+    </ul>
+
+    <h3>Batch / data pipelines</h3>
+    <ul>
+      <li><strong>Queue-based load leveling</strong> — Kafka / SQS absorbs bursts.</li>
+      <li><strong>Serverless</strong> (Lambda) for small transforms; <strong>Spark/Flink on Spot fleet</strong> for heavy.</li>
+      <li><strong>Outbox + Debezium CDC</strong> from OLTP into analytics lake/warehouse.</li>
+      <li><strong>GitOps</strong> for Airflow/Dagster DAGs (DAG as code, versioned).</li>
+      <li><strong>Retry budget + DLQ</strong> per stage.</li>
+      <li><strong>Distributed tracing</strong> across stages — one trace per logical job.</li>
+      <li><strong>Cost-aware</strong> — Spot for stateless map tasks, Reserved for coordinators.</li>
+    </ul>
+
+    <h3>AI products (RAG assistants, agents)</h3>
+    <ul>
+      <li><strong>API Gateway + BFF</strong> for chat UI vs API consumers.</li>
+      <li><strong>Edge auth</strong> (Workers) — validate token close to user; cheap rejection.</li>
+      <li><strong>Retry budget + load shedding</strong> at LLM gateway (providers throttle).</li>
+      <li><strong>Outbox + queue</strong> for async agent tasks; Temporal for multi-step agent workflows.</li>
+      <li><strong>Vector DB</strong> + cache (Redis) for RAG retrieval.</li>
+      <li><strong>AI observability</strong> — token cost, quality eval, prompt versioning, LLM-as-judge.</li>
+      <li><strong>Feature flags</strong> per model (gpt-4o vs claude vs llama) for A/B and fallback.</li>
+      <li><strong>Semantic cache</strong> to dedupe repeat LLM calls (see Chapter 10).</li>
+    </ul>
+
+    <h3>Fintech (payments, ledger)</h3>
+    <ul>
+      <li><strong>Event sourcing</strong> for the ledger — audit, replay, regulatory.</li>
+      <li><strong>CQRS</strong> — write (ledger) vs read (balances, statements).</li>
+      <li><strong>Saga with orchestration</strong> (Temporal) for money movement with compensations.</li>
+      <li><strong>Outbox + Inbox</strong> across every service boundary (idempotency is sacred).</li>
+      <li><strong>Cell-based</strong> by region or customer segment (compliance).</li>
+      <li><strong>Service mesh</strong> — mTLS everywhere, zero-trust.</li>
+      <li><strong>Chaos engineering</strong> — prove the system handles outages without losing money.</li>
+      <li><strong>Tight load shedding</strong> — never lose a customer's request, fail fast not slow.</li>
+    </ul>
+
+    <h3>E-commerce</h3>
+    <ul>
+      <li><strong>API Gateway + BFF</strong> (mobile vs web).</li>
+      <li><strong>Edge cache</strong> for product pages (Cloudflare / CloudFront + stale-while-revalidate).</li>
+      <li><strong>CQRS</strong> heavy — write is transactional (orders, inventory); reads are product pages, recommendations, search.</li>
+      <li><strong>Outbox + CDC</strong> from orders DB → warehouse, search index, recs pipeline.</li>
+      <li><strong>Saga</strong> for checkout (reserve → pay → fulfill → notify).</li>
+      <li><strong>Inventory cell-based</strong> by warehouse / region.</li>
+      <li><strong>Canary + feature flags</strong> for fearless releases during peak season.</li>
+      <li><strong>Chaos</strong> and <strong>load-shedding</strong> for Black Friday resilience.</li>
+      <li><strong>FinOps</strong> — Spot for batch/ML; Reserved for baseline; edge cache reduces origin egress cost.</li>
+    </ul>
+
+    <hr>
+
+    <h2>Closing thoughts</h2>
+
+    <p>Every pattern here exists because someone paid, in downtime or cost or tears, to learn it. They're not architecture trivia — they're crystallized scar tissue.</p>
+
+    <p>But they're also not checklists. A well-run 5-engineer startup should <em>not</em> have a service mesh, CQRS, event sourcing, cells, and a Temporal cluster. Each pattern imposes a tax. You earn the right to use it by proving the problem it solves is <em>your</em> problem — not a problem you read about.</p>
+
+    <p>The strongest senior engineers are not those who know the most patterns. They're the ones who can look at a system and say "we don't need this yet — and here's the exact signal that would tell us we do."</p>
+
+    <p>The next chapter looks at 2026-specific <em>problems</em> (LLM cost explosions, AI hallucinations in prod, multi-tenant vector DBs, agent-system failure modes) and which of these patterns solve them.</p>
+
+    <div class="chapter-nav">
+      <a href="08-real-architectures.html"><div class="label">← Previous</div><div class="title">Chapter 8: Real Architectures</div></a>
+      <a class="next" href="10-modern-problems.html"><div class="label">Next →</div><div class="title">Chapter 10: Modern Problems</div></a>
+    </div>
+  </main>
+</div>
+<script src="../assets/js/nav.js"></script>
+</body>
+</html>

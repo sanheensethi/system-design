@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Rate Limiter — Token Bucket Visualization</title>
+<link rel="stylesheet" href="../assets/css/style.css">
+<link rel="stylesheet" href="../assets/css/viz.css">
+<style>
+.bucket-wrap { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; margin: 1.5rem 0; }
+.bucket {
+  background: var(--code-bg); border: 2px solid var(--border);
+  border-radius: 10px; height: 300px; position: relative; overflow: hidden;
+  display: flex; flex-direction: column-reverse; padding: 10px;
+}
+.token {
+  width: 40px; height: 40px; border-radius: 50%;
+  background: linear-gradient(135deg, #fbbf24, #f59e0b);
+  box-shadow: 0 0 10px #fbbf2488;
+  margin: 3px auto; animation: tokenDrop 0.4s;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 1rem; color: #000; font-weight: bold;
+}
+@keyframes tokenDrop { 0% { transform: translateY(-200px); opacity: 0; } 100% { transform: translateY(0); opacity: 1; } }
+.token.consumed { animation: tokenConsume 0.5s forwards; }
+@keyframes tokenConsume { to { transform: scale(0) translateX(300px); opacity: 0; } }
+.bucket-label { position: absolute; top: 10px; left: 10px; font-size: 0.8rem; color: var(--text-dim); z-index: 2; }
+.bucket-count { position: absolute; top: 10px; right: 10px; font-family: Monaco; background: var(--bg-elev); padding: 0.2rem 0.6rem; border-radius: 4px; }
+.bucket-wrap h3 { margin: 0 0 0.5rem 0; }
+.req-log {
+  background: var(--code-bg); border: 1px solid var(--border); border-radius: 8px;
+  padding: 0.75rem; height: 200px; overflow-y: auto; font-family: Monaco; font-size: 0.8rem;
+}
+.req-log div { padding: 0.2rem 0; border-bottom: 1px solid #1f2937; }
+.req-log .allow { color: var(--success); }
+.req-log .deny  { color: var(--danger); }
+</style>
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">System Design Books</div>
+    <div class="brand-sub">by Sanheen · Progressive Learning</div>
+    <div class="nav-section"><h3>Home</h3><a href="../index.html">Overview</a></div>
+    <div class="nav-section"><h3>🎬 Interactive Viz</h3><a href="index.html">All</a></div>
+  </aside>
+  <main class="main">
+    <div class="breadcrumb"><a href="../index.html">Home</a> / <a href="index.html">Viz</a> / Rate Limiter</div>
+    <h1>Rate Limiter — Token Bucket</h1>
+    <p>A bucket holds up to <strong>5 tokens</strong>. It refills at <strong>1 token/second</strong>. Each request consumes 1 token. If bucket is empty → <strong>request denied (429)</strong>. Click buttons or fire bursts to see the algorithm in action.</p>
+
+    <div class="viz-controls">
+      <button class="viz-btn primary" id="btnReq">📤 Send Request</button>
+      <button class="viz-btn" id="btnBurst">💥 Burst 10</button>
+      <button class="viz-btn" id="btnSlow">🐢 1/sec steady</button>
+      <button class="viz-btn" id="btnReset">Reset</button>
+      <div class="viz-speed">Refill rate: <span id="rateTxt">1 token/sec</span></div>
+    </div>
+
+    <div class="bucket-wrap">
+      <div>
+        <h3>🪣 Token Bucket</h3>
+        <div class="bucket" id="bucket">
+          <div class="bucket-label">Capacity: 5</div>
+          <div class="bucket-count" id="countTxt">5 / 5</div>
+        </div>
+      </div>
+      <div>
+        <h3>📜 Request Log</h3>
+        <div class="req-log" id="log"></div>
+        <div class="viz-stats" style="margin-top:1rem;">
+          <div class="viz-stat"><div class="viz-stat-val" id="st-total">0</div><div class="viz-stat-label">Total</div></div>
+          <div class="viz-stat"><div class="viz-stat-val" id="st-allow">0</div><div class="viz-stat-label">Allowed</div></div>
+          <div class="viz-stat"><div class="viz-stat-val" id="st-deny">0</div><div class="viz-stat-label">Denied (429)</div></div>
+        </div>
+      </div>
+    </div>
+
+    <h2>How it works</h2>
+    <pre><code>class TokenBucket:
+    def __init__(self, capacity=5, refill_rate=1.0):  # tokens/sec
+        self.capacity = capacity
+        self.tokens = capacity  # start full
+        self.refill_rate = refill_rate
+        self.last_refill = time.now()
+
+    def allow(self):
+        # Refill based on elapsed time
+        now = time.now()
+        elapsed = now - self.last_refill
+        self.tokens = min(self.capacity, self.tokens + elapsed * self.refill_rate)
+        self.last_refill = now
+
+        # Consume
+        if self.tokens >= 1:
+            self.tokens -= 1
+            return True   # 200 OK
+        return False      # 429 Too Many Requests</code></pre>
+
+    <h3>When to use Token Bucket vs other algorithms</h3>
+    <table>
+      <thead><tr><th>Algorithm</th><th>Allows burst?</th><th>Memory</th><th>When</th></tr></thead>
+      <tbody>
+        <tr><td><strong>Token Bucket</strong> (this)</td><td>Yes, up to capacity</td><td>2 floats</td><td>APIs where burst is OK</td></tr>
+        <tr><td>Leaky Bucket</td><td>No, strict rate</td><td>Queue</td><td>Traffic shaping, smooth rate</td></tr>
+        <tr><td>Fixed Window Counter</td><td>Yes at boundary</td><td>1 int</td><td>Simplest, has edge bug</td></tr>
+        <tr><td>Sliding Window Log</td><td>No</td><td>O(rate)</td><td>Precise, memory-hungry</td></tr>
+        <tr><td>Sliding Window Counter</td><td>Approx</td><td>2 ints</td><td>Redis-backed, good balance</td></tr>
+      </tbody>
+    </table>
+  </main>
+</div>
+<script src="../assets/js/nav.js"></script>
+<script src="../assets/js/animator.js"></script>
+<script>
+const CAPACITY = 5;
+const REFILL_RATE = 1.0;  // per sec
+let tokens = CAPACITY;
+let lastRefill = Date.now();
+let stats = { total: 0, allow: 0, deny: 0 };
+
+function refill() {
+  const now = Date.now();
+  const elapsed = (now - lastRefill) / 1000;
+  tokens = Math.min(CAPACITY, tokens + elapsed * REFILL_RATE);
+  lastRefill = now;
+  renderBucket();
+}
+
+function renderBucket() {
+  const bucket = document.getElementById('bucket');
+  // keep static children (label, count)
+  [...bucket.querySelectorAll('.token')].forEach(t => t.remove());
+  const whole = Math.floor(tokens);
+  for (let i = 0; i < whole; i++) {
+    const t = document.createElement('div');
+    t.className = 'token';
+    t.textContent = '🪙';
+    bucket.appendChild(t);
+  }
+  document.getElementById('countTxt').textContent = tokens.toFixed(1) + ' / ' + CAPACITY;
+}
+
+function renderStats() {
+  document.getElementById('st-total').textContent = stats.total;
+  document.getElementById('st-allow').textContent = stats.allow;
+  document.getElementById('st-deny').textContent = stats.deny;
+}
+
+function log(msg, ok) {
+  const el = document.getElementById('log');
+  const t = new Date().toLocaleTimeString();
+  const line = document.createElement('div');
+  line.className = ok ? 'allow' : 'deny';
+  line.textContent = `[${t}] ${ok?'✓ 200 OK':'✗ 429 DENIED'} — tokens: ${tokens.toFixed(1)} → ${(tokens - (ok?1:0)).toFixed(1)}`;
+  el.appendChild(line);
+  el.scrollTop = el.scrollHeight;
+}
+
+function tryRequest() {
+  refill();
+  stats.total++;
+  if (tokens >= 1) {
+    // consume with visible animation (take last token)
+    const lastToken = document.querySelector('#bucket .token:last-child');
+    if (lastToken) {
+      lastToken.classList.add('consumed');
+      setTimeout(() => lastToken.remove(), 500);
+    }
+    log('Request served', true);
+    tokens -= 1;
+    stats.allow++;
+  } else {
+    log('Bucket empty, request denied', false);
+    stats.deny++;
+  }
+  renderBucket();
+  renderStats();
+}
+
+document.getElementById('btnReq').onclick = tryRequest;
+
+document.getElementById('btnBurst').onclick = async () => {
+  for (let i = 0; i < 10; i++) {
+    tryRequest();
+    await new Promise(r => setTimeout(r, 150));
+  }
+};
+
+let slowTimer = null;
+document.getElementById('btnSlow').onclick = () => {
+  if (slowTimer) { clearInterval(slowTimer); slowTimer = null; document.getElementById('btnSlow').textContent = '🐢 1/sec steady'; return; }
+  slowTimer = setInterval(tryRequest, 1000);
+  document.getElementById('btnSlow').textContent = '⏸ Stop steady';
+};
+
+document.getElementById('btnReset').onclick = () => {
+  tokens = CAPACITY; lastRefill = Date.now();
+  stats = { total: 0, allow: 0, deny: 0 };
+  renderBucket(); renderStats();
+  document.getElementById('log').innerHTML = '';
+};
+
+// Continuous refill every 100ms for smooth animation
+setInterval(() => {
+  refill();
+}, 100);
+
+renderBucket();
+renderStats();
+</script>
+</body>
+</html>

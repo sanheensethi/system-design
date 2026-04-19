@@ -1,18 +1,50 @@
-// Inject Book III (AI) links + LLD Ch 9 into any sidebar that doesn't have them
-// This lets existing pages navigate to the new book without editing every file.
+// Inject new chapters (Book III, LLD 9-11, HLD 7b/9-10) into any sidebar missing them
 function injectNewNavigation() {
   const sidebar = document.querySelector('.sidebar');
   if (!sidebar) return;
 
-  const alreadyHasBook3 = sidebar.querySelector('a[href$="ai/index.html"], a[href="index.html"][data-book="3"]');
-  const isAiPage = window.location.pathname.replace(/\\/g, '/').toLowerCase().includes('/ai/');
+  const path = window.location.pathname.replace(/\\/g, '/').toLowerCase();
+  const isAiPage  = path.includes('/ai/');
+  const isLldPage = path.includes('/lld/');
+  const isHldPage = path.includes('/hld/');
 
-  // Determine path prefix based on current page depth
-  const path = window.location.pathname.replace(/\\/g, '/');
-  const depth = (path.match(/\/(lld|hld|ai)\//) ? '../' : '');
+  // Build a prefix resolver: "../" if we're inside /lld/ /hld/ /ai/, else ""
+  const depth = (isLldPage || isHldPage || isAiPage) ? '../' : '';
 
-  // Add Book III link if missing
-  if (!alreadyHasBook3 && !isAiPage) {
+  // --- Interactive Viz section ---
+  const hasViz = Array.from(sidebar.querySelectorAll('.nav-section h3'))
+    .some(h => h.textContent.includes('Interactive Viz'));
+  if (!hasViz) {
+    const section = document.createElement('div');
+    section.className = 'nav-section';
+    section.innerHTML = `
+      <h3>🎬 Interactive Viz</h3>
+      <a href="${depth}viz/index.html">All Visualizations</a>
+      <a href="${depth}viz/lru-cache.html">LRU Cache (LLD)</a>
+      <a href="${depth}viz/parking-lot.html">Parking Lot (LLD)</a>
+      <a href="${depth}viz/vending-machine.html">Vending Machine (LLD)</a>
+      <a href="${depth}viz/bfs-dfs.html">BFS / DFS (LLD)</a>
+      <a href="${depth}viz/rate-limiter.html">Rate Limiter (LLD/HLD)</a>
+      <a href="${depth}viz/request-flow.html">Request Flow (HLD)</a>
+      <a href="${depth}viz/load-balancer.html">Load Balancer (HLD)</a>
+      <a href="${depth}viz/cache-aside.html">Cache-Aside (HLD)</a>
+      <a href="${depth}viz/consistent-hashing.html">Consistent Hashing (HLD)</a>
+      <a href="${depth}viz/db-replication.html">DB Replication (HLD)</a>
+      <a href="${depth}viz/kafka-partitioning.html">Kafka Partitions (HLD)</a>
+      <a href="${depth}viz/circuit-breaker.html">Circuit Breaker (HLD)</a>
+      <a href="${depth}viz/raft-election.html">Raft Election (HLD)</a>
+      <a href="${depth}viz/saga.html">Saga Pattern (HLD)</a>
+      <a href="${depth}viz/rag-pipeline.html">RAG Pipeline (AI)</a>
+      <a href="${depth}viz/agent-react.html">Agent ReAct (AI)</a>
+    `;
+    sidebar.appendChild(section);
+  }
+
+  // --- Book III (AI) section ---
+  const hasBook3 = Array.from(sidebar.querySelectorAll('.nav-section h3'))
+    .some(h => h.textContent.includes('Book III'));
+
+  if (!hasBook3) {
     const section = document.createElement('div');
     section.className = 'nav-section';
     section.innerHTML = `
@@ -30,20 +62,54 @@ function injectNewNavigation() {
     sidebar.appendChild(section);
   }
 
-  // Add LLD Ch 9 link if missing in LLD sidebar
+  // --- Inject LLD Ch 9, 10, 11 into LLD section if missing ---
   const lldSection = Array.from(sidebar.querySelectorAll('.nav-section')).find(s => {
     const h3 = s.querySelector('h3');
-    return h3 && h3.textContent.includes('Book I');
+    return h3 && h3.textContent.includes('Book I') && !h3.textContent.includes('Book III');
   });
-  if (lldSection && !lldSection.querySelector('a[href$="09-real-world.html"]')) {
-    const lastLldLink = Array.from(lldSection.querySelectorAll('a')).pop();
-    if (lastLldLink && lastLldLink.href.includes('08-real-code')) {
-      const lldPrefix = lastLldLink.getAttribute('href').replace(/08-real-code\.html$/, '');
-      const ch9 = document.createElement('a');
-      ch9.href = lldPrefix + '09-real-world.html';
-      ch9.textContent = '9. Applying LLD in Real Work';
-      lastLldLink.after(ch9);
-    }
+  if (lldSection) {
+    const lldLinks = Array.from(lldSection.querySelectorAll('a'));
+    const lastLldLink = lldLinks[lldLinks.length - 1];
+    const prefix = lastLldLink ? lastLldLink.getAttribute('href').replace(/[^\/]+$/, '') : `${depth}lld/`;
+
+    const ensureLink = (fileName, label) => {
+      if (!lldSection.querySelector(`a[href$="${fileName}"]`)) {
+        const a = document.createElement('a');
+        a.href = prefix + fileName;
+        a.textContent = label;
+        lldSection.appendChild(a);
+      }
+    };
+    ensureLink('09-real-world.html', '9. Applying LLD in Real Work');
+    ensureLink('10-modern-patterns.html', '10. Modern Patterns (2026)');
+    ensureLink('11-modern-problems.html', '11. Modern 2026 Problems');
+  }
+
+  // --- Inject HLD 7b, 9, 10 into HLD section if missing ---
+  const hldSection = Array.from(sidebar.querySelectorAll('.nav-section')).find(s => {
+    const h3 = s.querySelector('h3');
+    return h3 && h3.textContent.includes('Book II');
+  });
+  if (hldSection) {
+    const hldLinks = Array.from(hldSection.querySelectorAll('a'));
+    const lastHldLink = hldLinks[hldLinks.length - 1];
+    const prefix = lastHldLink ? lastHldLink.getAttribute('href').replace(/[^\/]+$/, '') : `${depth}hld/`;
+
+    const ensureLink = (fileName, label, after) => {
+      if (!hldSection.querySelector(`a[href$="${fileName}"]`)) {
+        const a = document.createElement('a');
+        a.href = prefix + fileName;
+        a.textContent = label;
+        if (after) {
+          const anchor = hldSection.querySelector(`a[href$="${after}"]`);
+          if (anchor) { anchor.after(a); return; }
+        }
+        hldSection.appendChild(a);
+      }
+    };
+    ensureLink('07b-war-room-extra.html', '7b. War Room Extras', '07-war-room.html');
+    ensureLink('09-modern-patterns.html', '9. Modern Architecture Patterns (2026)');
+    ensureLink('10-modern-problems.html', '10. Modern 2026 Problems');
   }
 }
 
@@ -59,9 +125,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   });
 
-  // Single-pass tokenizer. The FIRST alternative that matches at a position
-  // consumes that span of text, so we never double-tokenize (no "class=class"
-  // artifacts when a keyword/string appears inside an already-emitted span).
+  // Single-pass tokenizer (ordered alternation; first match wins)
   const pattern = new RegExp([
     '(#[^\\n]*|//[^\\n]*|/\\*[\\s\\S]*?\\*/)',
     '(\'(?:\\\\.|[^\'\\\\\\n])*\'|"(?:\\\\.|[^"\\\\\\n])*"|`(?:\\\\.|[^`\\\\])*`)',

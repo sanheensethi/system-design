@@ -1,0 +1,634 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Saga Pattern — Interactive Visualization</title>
+<link rel="stylesheet" href="../assets/css/style.css">
+<link rel="stylesheet" href="../assets/css/viz.css">
+<style>
+  .saga-node {
+    position: absolute;
+    transform: translate(-50%, -50%);
+    min-width: 170px;
+    padding: 0.75rem 0.9rem;
+    border-radius: 12px;
+    border: 2px solid var(--border);
+    background: var(--bg-card);
+    text-align: center;
+    transition: border-color 0.3s, box-shadow 0.3s, background 0.3s, opacity 0.3s;
+    box-shadow: 0 4px 18px rgba(0,0,0,0.25);
+  }
+  .saga-node.orchestrator {
+    min-width: 220px;
+    border-color: #9b6dff;
+    box-shadow: 0 0 22px rgba(155,109,255,0.35);
+  }
+  .saga-node.state-PENDING { border-color: var(--border); opacity: 0.75; }
+  .saga-node.state-RESERVED {
+    border-color: #f1c40f;
+    box-shadow: 0 0 20px rgba(241,196,15,0.4);
+  }
+  .saga-node.state-COMMITTED {
+    border-color: #2ecc71;
+    box-shadow: 0 0 22px rgba(46,204,113,0.45);
+  }
+  .saga-node.state-FAILED {
+    border-color: #e74c3c;
+    box-shadow: 0 0 22px rgba(231,76,60,0.5);
+    background: rgba(231,76,60,0.08);
+  }
+  .saga-node.state-COMPENSATED {
+    border-color: #4a9eff;
+    box-shadow: 0 0 20px rgba(74,158,255,0.4);
+    opacity: 0.85;
+  }
+  .saga-node.active {
+    transform: translate(-50%, -50%) scale(1.05);
+  }
+  .saga-title {
+    font-size: 0.7rem;
+    color: var(--text-dim);
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+  }
+  .saga-name {
+    font-size: 1rem;
+    font-weight: 700;
+    margin: 0.25rem 0 0.35rem;
+  }
+  .saga-state {
+    font-family: "SF Mono", Monaco, Consolas, monospace;
+    font-size: 0.72rem;
+    font-weight: 700;
+    padding: 2px 8px;
+    border-radius: 4px;
+    display: inline-block;
+    letter-spacing: 0.06em;
+  }
+  .saga-state.state-PENDING { background: rgba(150,150,150,0.2); color: #aaa; }
+  .saga-state.state-RESERVED { background: rgba(241,196,15,0.2); color: #f1c40f; }
+  .saga-state.state-COMMITTED { background: rgba(46,204,113,0.2); color: #2ecc71; }
+  .saga-state.state-FAILED { background: rgba(231,76,60,0.2); color: #e74c3c; }
+  .saga-state.state-COMPENSATED {
+    background: rgba(74,158,255,0.2);
+    color: #4a9eff;
+    text-decoration: line-through;
+  }
+  .saga-info {
+    font-size: 0.7rem;
+    color: var(--text-dim);
+    margin-top: 0.4rem;
+    min-height: 1em;
+    font-family: "SF Mono", Monaco, Consolas, monospace;
+  }
+  .saga-info.compensated { text-decoration: line-through; opacity: 0.6; }
+
+  .mode-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.45rem 0.85rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg-elev);
+    font-size: 0.85rem;
+  }
+  .mode-toggle .dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: #9b6dff;
+  }
+  .mode-toggle.choreography .dot { background: #ffb347; }
+
+  pre.code {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1rem;
+    font-family: "SF Mono", Monaco, Consolas, monospace;
+    font-size: 0.82rem;
+    line-height: 1.55;
+    overflow-x: auto;
+  }
+
+  .legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+    margin: 0.75rem 0 1rem;
+    font-size: 0.78rem;
+  }
+  .legend-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.25rem 0.6rem;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: var(--bg-elev);
+  }
+  .legend-dot {
+    width: 10px; height: 10px; border-radius: 50%;
+  }
+</style>
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">System Design Books</div>
+    <div class="brand-sub">by Sanheen · Progressive Learning</div>
+    <div class="nav-section">
+      <h3>Home</h3>
+      <a href="../index.html">Overview</a>
+    </div>
+    <div class="nav-section">
+      <h3>🎬 Interactive Visualizations</h3>
+      <a href="index.html">Viz Index</a>
+      <a href="lru-cache.html">LRU Cache (LLD)</a>
+      <a href="request-flow.html">Request Flow (HLD)</a>
+      <a href="load-balancer.html">Load Balancer (HLD)</a>
+      <a href="cache-aside.html">Cache Aside Pattern (HLD)</a>
+      <a href="saga.html">Saga Pattern (HLD)</a>
+    </div>
+    <div class="nav-section">
+      <h3>Book II — High Level Design</h3>
+      <a href="../hld/index.html">HLD Index</a>
+    </div>
+  </aside>
+
+  <main class="main">
+    <div class="breadcrumb"><a href="../index.html">Home</a> / <a href="index.html">Visualizations</a> / Saga Pattern</div>
+    <h1>Saga Pattern — Distributed Transaction with Compensation</h1>
+    <p>A user books a trip: <strong>Flight + Hotel + Car + Payment</strong>. In a monolith, this would be one ACID transaction. Across services, we use a <strong>Saga</strong>: a sequence of local transactions, each with a <em>compensating action</em> to undo it. If any step fails, we run the compensations in reverse order.</p>
+
+    <div class="viz-controls">
+      <button class="viz-btn primary" id="btnHappy">✅ Happy Path</button>
+      <button class="viz-btn" id="btnHotelFail">❌ Hotel Fails</button>
+      <button class="viz-btn" id="btnCarFail">❌ Car Fails</button>
+      <button class="viz-btn" id="btnPayFail">❌ Payment Fails</button>
+      <button class="mode-toggle" id="btnMode"><span class="dot"></span><span id="modeLabel">Orchestration</span></button>
+      <button class="viz-btn" id="btnReset">⟲ Reset</button>
+      <div class="viz-speed">
+        <label>Speed</label>
+        <input type="range" id="speed" min="300" max="1400" value="700">
+        <span id="spdtxt">0.7s/hop</span>
+      </div>
+    </div>
+
+    <div class="legend">
+      <span class="legend-item"><span class="legend-dot" style="background:#aaa"></span>PENDING</span>
+      <span class="legend-item"><span class="legend-dot" style="background:#f1c40f"></span>RESERVED</span>
+      <span class="legend-item"><span class="legend-dot" style="background:#2ecc71"></span>COMMITTED</span>
+      <span class="legend-item"><span class="legend-dot" style="background:#e74c3c"></span>FAILED</span>
+      <span class="legend-item"><span class="legend-dot" style="background:#4a9eff"></span>COMPENSATED (rolled back)</span>
+    </div>
+
+    <div class="viz-arch" id="arch" style="min-height: 480px;"></div>
+
+    <div class="viz-stats">
+      <div class="viz-stat"><div class="viz-stat-val" id="st-done">0</div><div class="viz-stat-label">Sagas Completed</div></div>
+      <div class="viz-stat"><div class="viz-stat-val" id="st-comp">0</div><div class="viz-stat-label">Sagas Compensated</div></div>
+      <div class="viz-stat"><div class="viz-stat-val" id="st-fwd">0</div><div class="viz-stat-label">Forward Operations</div></div>
+      <div class="viz-stat"><div class="viz-stat-val" id="st-back">0</div><div class="viz-stat-label">Compensating Operations</div></div>
+    </div>
+
+    <div class="viz-desc" id="desc" style="margin-top:1rem;min-height:90px;">Pick a scenario to run the saga. Watch the <strong>Orchestrator</strong> coordinate Flight → Hotel → Car → Payment. On any failure, compensations fire in <strong>reverse order</strong>. Toggle <em>Choreography Mode</em> to see the event-driven variant with no central coordinator.</div>
+
+    <h2>1. What is a Saga?</h2>
+    <p>A <strong>saga</strong> is a <em>long-running distributed transaction</em> composed of local transactions across multiple services. Instead of holding locks across the network (which two-phase commit does — and which blocks on coordinator failure), a saga gives up atomicity in exchange for availability. Each step commits locally and publishes a result; if a later step fails, prior steps are undone by calling their <strong>compensating actions</strong>.</p>
+    <ul>
+      <li><strong>No 2PC, no XA, no distributed locks.</strong> Each service owns its data and commits when it wants.</li>
+      <li><strong>Eventual consistency.</strong> Between step 2 of 5 and the rollback, the system is in an intermediate state that is externally visible. You design your UX around this (e.g., "booking in progress…").</li>
+      <li><strong>Compensations, not rollbacks.</strong> You cannot <code>ROLLBACK</code> a committed flight reservation — you issue a <code>cancel_flight(id)</code> API call.</li>
+    </ul>
+
+    <h2>2. Orchestration vs Choreography</h2>
+    <table>
+      <thead><tr><th></th><th>Orchestration</th><th>Choreography</th></tr></thead>
+      <tbody>
+        <tr><td>Control</td><td>Central <strong>Orchestrator</strong> tells each service what to do</td><td>Services listen to events and react; no central brain</td></tr>
+        <tr><td>Example</td><td>Temporal workflow, AWS Step Functions, Netflix Conductor</td><td>Services publish to Kafka; each subscribes to relevant events</td></tr>
+        <tr><td>Readability</td><td>Business flow is <em>in one place</em> — easy to follow</td><td>Flow is <em>emergent</em> — you reconstruct it from event topics</td></tr>
+        <tr><td>Coupling</td><td>Services depend on orchestrator API shape</td><td>Services couple through event schema only</td></tr>
+        <tr><td>Failure handling</td><td>Orchestrator handles retries, timeouts, compensations centrally</td><td>Each service must handle its own retries and emit compensation events</td></tr>
+        <tr><td>Scalability</td><td>Orchestrator can be a bottleneck (though Temporal-style can scale)</td><td>Naturally scales — brokers like Kafka handle load</td></tr>
+        <tr><td>Debugging</td><td>One trace, one place</td><td>Distributed trace across many consumers — harder</td></tr>
+        <tr><td>Best for</td><td>Complex business logic, heterogeneous steps, tight SLA</td><td>High-volume, loosely coupled, event-native domains</td></tr>
+      </tbody>
+    </table>
+
+    <h2>3. Compensating Actions</h2>
+    <p>Every forward action must have a rollback that is semantically sound — and often it's <em>not</em> a symmetric operation:</p>
+    <table>
+      <thead><tr><th>Forward</th><th>Compensation</th><th>Note</th></tr></thead>
+      <tbody>
+        <tr><td><code>reserve_flight(dates)</code></td><td><code>cancel_flight(id)</code></td><td>May trigger fee / refund</td></tr>
+        <tr><td><code>reserve_hotel(city, dates)</code></td><td><code>cancel_hotel(id)</code></td><td>Refund policy varies</td></tr>
+        <tr><td><code>charge_card($2450)</code></td><td><code>refund($2450)</code></td><td>Not reversal — a <em>new</em> txn</td></tr>
+        <tr><td><code>send_email("Booked!")</code></td><td><code>send_email("Cancelled")</code></td><td>Can't un-send; apologize</td></tr>
+        <tr><td><code>ship_package()</code></td><td><code>request_return()</code></td><td>Fundamentally asymmetric</td></tr>
+      </tbody>
+    </table>
+
+    <h2>4. Idempotency Requirement</h2>
+    <p>Sagas retry. Compensations retry. Messages duplicate. <strong>Every step must be idempotent</strong> — calling it twice with the same input must have the same effect as calling it once. Typical pattern:</p>
+    <pre class="code">def cancel_flight(reservation_id, saga_id):
+    # Use saga_id as idempotency key
+    if already_cancelled(reservation_id, saga_id):
+        return OK   # second call → no-op
+    mark_cancelled(reservation_id, saga_id)
+    refund_card(...)
+    return OK</pre>
+    <p>Without this, a retried compensation could refund twice. Or cancel a flight twice and send the customer two "sorry" emails.</p>
+
+    <h2>5. Real-World Systems</h2>
+    <ul>
+      <li><strong>Temporal / Cadence (Uber)</strong> — durable workflow runtime. You write orchestration as plain code and the engine persists every step, so crashes don't lose state. De-facto industry standard for sagas in 2024+.</li>
+      <li><strong>AWS Step Functions</strong> — managed orchestration with JSON state machines. Great for AWS-native stacks; retries and error branches are first-class.</li>
+      <li><strong>Netflix Conductor</strong> — open-source orchestration from Netflix, JSON workflow definitions.</li>
+      <li><strong>Apache Kafka + events</strong> — the choreography route. Services publish <code>flight-reserved</code>, hotel service subscribes, emits <code>hotel-reserved</code>, etc. Failures emit <code>*-failed</code> events which trigger compensation consumers.</li>
+      <li><strong>Eventuate / Axon</strong> — frameworks specifically for event-sourced sagas in JVM land.</li>
+    </ul>
+
+    <h2>6. Saga vs Two-Phase Commit (2PC)</h2>
+    <table>
+      <thead><tr><th></th><th>Saga</th><th>2PC / XA</th></tr></thead>
+      <tbody>
+        <tr><td>Consistency</td><td>Eventual — intermediate states visible</td><td>Strong — atomic all-or-nothing</td></tr>
+        <tr><td>Availability</td><td>High — no cross-service locks</td><td>Low — coordinator crash blocks participants in PREPARED state</td></tr>
+        <tr><td>Locks</td><td>None across services</td><td>Row/table locks held across network for entire txn</td></tr>
+        <tr><td>Latency</td><td>Fast local commits</td><td>Slow — two full roundtrips plus disk fsyncs</td></tr>
+        <tr><td>Partial failure</td><td>Design handles it via compensations</td><td>Can leave participants stuck</td></tr>
+        <tr><td>Fits microservices</td><td>Yes — each service owns its DB</td><td>No — requires shared XA resource manager</td></tr>
+        <tr><td>Used in</td><td>Uber, Netflix, Airbnb, most modern systems</td><td>Legacy banking, classic J2EE, Oracle RAC</td></tr>
+      </tbody>
+    </table>
+    <p>Rule of thumb: if you're building microservices and you reach for 2PC, step back — you probably want a saga. Use 2PC only when you truly need synchronous strong consistency <em>and</em> all participants are in your control <em>and</em> availability isn't critical.</p>
+
+    <h2>7. Saga vs Monolith Transaction</h2>
+    <p>In a monolith, <code>BEGIN; INSERT flight; INSERT hotel; INSERT car; UPDATE balance; COMMIT</code> is atomic and isolated. An outsider never sees "flight booked but hotel not yet". With a saga, you gave up atomicity — which means <strong>intermediate inconsistency is externally visible</strong>, and you must design for it:</p>
+    <ul>
+      <li><strong>UX:</strong> show "Booking in progress…" rather than "Trip confirmed!" until the final step commits.</li>
+      <li><strong>Queries:</strong> a trip in <code>RESERVED</code> state should not show up in "my completed trips" yet.</li>
+      <li><strong>Timeouts:</strong> pending reservations must expire. Otherwise a crashed saga leaks seats/rooms forever.</li>
+      <li><strong>Semantic lock:</strong> some literature calls the reserved-but-not-committed state a <em>"semantic lock"</em> — functionally, no other saga can book that seat, but no DB lock is held.</li>
+    </ul>
+
+    <h2>8. Orchestrator in Python</h2>
+    <pre class="code">class TripSaga:
+    def __init__(self, services):
+        self.services = services            # {'flight': ..., 'hotel': ..., 'car': ..., 'payment': ...}
+        self.completed = []                 # stack of (service, id) for compensations
+        self.saga_id  = uuid.uuid4().hex    # idempotency key for every call
+
+    def execute(self, request):
+        try:
+            flight = self.services['flight'].reserve(request.dates, self.saga_id)
+            self.completed.append(('flight', flight.id))
+
+            hotel = self.services['hotel'].reserve(request.city, request.dates, self.saga_id)
+            self.completed.append(('hotel', hotel.id))
+
+            car = self.services['car'].reserve(request.location, request.dates, self.saga_id)
+            self.completed.append(('car', car.id))
+
+            payment = self.services['payment'].charge(request.total, self.saga_id)
+            # If we get here, everything stuck. Mark saga COMMITTED in durable store.
+            return {'status': 'SUCCESS', 'saga_id': self.saga_id}
+
+        except SagaStepFailed as e:
+            log.warn(f"Saga {self.saga_id} failed at {e.service}: {e}")
+            self.compensate()
+            return {'status': 'FAILED', 'saga_id': self.saga_id, 'reason': str(e)}
+
+    def compensate(self):
+        # Reverse order — last-in, first-out
+        for service, id in reversed(self.completed):
+            try:
+                self.services[service].cancel(id, self.saga_id)
+            except Exception as e:
+                # Compensation itself failed — log and alert, do NOT abort the loop.
+                # Other compensations still need to run; this one goes to a retry queue.
+                log.error(f"Compensation failed for {service}:{id} — {e}")
+                dead_letter.enqueue({'service': service, 'id': id, 'saga_id': self.saga_id})</pre>
+
+    <p style="margin-top:2rem;color:var(--text-dim);font-size:0.85rem;">Tip: in production, don't roll this yourself. Use Temporal, Step Functions, or Conductor — they handle the durable state, retries, and timer-based timeouts for you. Rolling your own saga runtime is a surprisingly deep rabbit hole.</p>
+  </main>
+</div>
+
+<script src="../assets/js/nav.js"></script>
+<script src="../assets/js/animator.js"></script>
+<script>
+const arch = new ArchAnimator('#arch');
+
+let mode = 'orchestration';   // or 'choreography'
+let busy = false;
+let stats = { done: 0, comp: 0, fwd: 0, back: 0 };
+
+const SERVICES = [
+  { id: 'flight',  name: 'Flight Service',  icon: '✈️',  x: 15, y: 62, detail: '—' },
+  { id: 'hotel',   name: 'Hotel Service',   icon: '🏨',  x: 40, y: 62, detail: '—' },
+  { id: 'car',     name: 'Car Service',     icon: '🚗',  x: 65, y: 62, detail: '—' },
+  { id: 'payment', name: 'Payment Service', icon: '💳',  x: 85, y: 62, detail: '—' },
+];
+
+// Per-service state: PENDING | RESERVED | COMMITTED | FAILED | COMPENSATED
+const svcState = {};
+const svcDetail = {};
+const svcReservationId = {};
+
+function initState() {
+  SERVICES.forEach(s => {
+    svcState[s.id] = 'PENDING';
+    svcDetail[s.id] = s.detail;
+    svcReservationId[s.id] = null;
+  });
+}
+
+function serviceNodeHTML(svc) {
+  const st = svcState[svc.id] || 'PENDING';
+  const detail = svcDetail[svc.id] || '—';
+  const compClass = st === 'COMPENSATED' ? ' compensated' : '';
+  return `
+    <div class="saga-title">${svc.icon} ${svc.name}</div>
+    <div class="saga-state state-${st}">${st}</div>
+    <div class="saga-info${compClass}">${detail}</div>
+  `;
+}
+
+function orchestratorHTML() {
+  const label = mode === 'orchestration' ? 'ORCHESTRATOR' : 'EVENT BUS (Kafka)';
+  const sub   = mode === 'orchestration' ? 'central coordinator' : 'choreography — no coordinator';
+  return `
+    <div class="saga-title">${mode === 'orchestration' ? '🎯' : '📬'} ${label}</div>
+    <div class="saga-name">Trip Booking Saga</div>
+    <div class="saga-info">${sub}</div>
+  `;
+}
+
+function buildArch() {
+  arch.clear();
+  arch.addNode('orchestrator', orchestratorHTML(), 50, 15, 'orchestrator');
+  SERVICES.forEach(s => {
+    arch.addNode(s.id, serviceNodeHTML(s), s.x, s.y);
+    arch.addEdge('orchestrator', s.id);
+    // Apply current state class
+    arch.nodes[s.id].el.classList.add('saga-node');
+    arch.nodes[s.id].el.classList.add('state-' + svcState[s.id]);
+  });
+  arch.nodes.orchestrator.el.classList.add('saga-node', 'orchestrator');
+}
+
+function updateService(id, state, detail) {
+  svcState[id] = state;
+  if (detail !== undefined) svcDetail[id] = detail;
+  const el = arch.nodes[id].el;
+  // Clean prior state classes
+  ['PENDING','RESERVED','COMMITTED','FAILED','COMPENSATED'].forEach(s => el.classList.remove('state-' + s));
+  el.classList.add('state-' + state);
+  el.innerHTML = serviceNodeHTML(SERVICES.find(s => s.id === id));
+}
+
+function refreshOrchestrator() {
+  const el = arch.nodes.orchestrator.el;
+  el.innerHTML = orchestratorHTML();
+}
+
+function renderStats() {
+  document.getElementById('st-done').textContent = stats.done;
+  document.getElementById('st-comp').textContent = stats.comp;
+  document.getElementById('st-fwd').textContent  = stats.fwd;
+  document.getElementById('st-back').textContent = stats.back;
+}
+
+function say(msg) {
+  document.getElementById('desc').innerHTML = msg;
+}
+
+let speed = 700;
+document.getElementById('speed').oninput = (e) => {
+  speed = parseInt(e.target.value);
+  document.getElementById('spdtxt').textContent = (speed/1000).toFixed(1) + 's/hop';
+};
+
+async function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+// ======================= FORWARD STEP =======================
+// Send request packet orchestrator → service, brief processing, response back.
+async function forwardStep(svcId, opts) {
+  const { reserveDetail, commitDetail, fail = false, failReason = '', commit = true } = opts;
+  stats.fwd++; renderStats();
+
+  const fromNode = (mode === 'orchestration') ? 'orchestrator' : prevSiblingOrOrch(svcId);
+  const toNode   = svcId;
+
+  await arch.sendPacket(fromNode, toNode, { duration: speed });
+  // Processing — flip to RESERVED or FAILED
+  await sleep(speed * 0.35);
+
+  if (fail) {
+    updateService(svcId, 'FAILED', failReason);
+    // Failure reply
+    await arch.sendPacket(toNode, fromNode, { cls: 'response', duration: speed });
+    // Flash edge red via a second "failure" packet
+    return false;
+  }
+
+  updateService(svcId, 'RESERVED', reserveDetail);
+  await arch.sendPacket(toNode, fromNode, { cls: 'response', duration: speed });
+
+  if (commit) {
+    await sleep(speed * 0.2);
+    updateService(svcId, 'COMMITTED', commitDetail || reserveDetail);
+  }
+  return true;
+}
+
+function prevSiblingOrOrch(svcId) {
+  // Choreography mode: previous service in chain "emits" the event
+  const idx = SERVICES.findIndex(s => s.id === svcId);
+  if (idx <= 0) return 'orchestrator';  // first step: booking UI posts event to bus
+  return SERVICES[idx - 1].id;
+}
+
+// ======================= COMPENSATION =======================
+async function compensateStep(svcId, note) {
+  stats.back++; renderStats();
+  const fromNode = (mode === 'orchestration') ? 'orchestrator' : nextSiblingOrOrch(svcId);
+  await arch.sendPacket(fromNode, svcId, { duration: speed });
+  await sleep(speed * 0.3);
+  updateService(svcId, 'COMPENSATED', note || svcDetail[svcId]);
+  await arch.sendPacket(svcId, fromNode, { cls: 'cached', duration: speed });
+}
+
+function nextSiblingOrOrch(svcId) {
+  const idx = SERVICES.findIndex(s => s.id === svcId);
+  if (idx === SERVICES.length - 1) return 'orchestrator';
+  return SERVICES[idx + 1].id;
+}
+
+async function runCompensations(completedStack, customNotes = {}) {
+  // Reverse order
+  for (let i = completedStack.length - 1; i >= 0; i--) {
+    const svc = completedStack[i];
+    const note = customNotes[svc] || (svcDetail[svc] + ' → REFUNDED');
+    say(`<strong>💥 Compensating ${svc.toUpperCase()}</strong>: rolling back the ${svc} reservation.`);
+    await compensateStep(svc, note);
+  }
+}
+
+function resetState() {
+  initState();
+  buildArch();
+}
+
+// ======================= SCENARIOS =======================
+
+async function runHappyPath() {
+  resetState();
+  say('<strong>🚀 Saga started.</strong> Orchestrator will reserve Flight → Hotel → Car, then charge payment, then confirm all.');
+  await sleep(300);
+
+  say('<strong>Step 1:</strong> Orchestrator → Flight Service: <code>reserve(dates=Nov 20-25)</code>');
+  await forwardStep('flight', { reserveDetail: 'seat 12A reserved', commitDetail: '✈️ seat 12A · $620' });
+
+  say('<strong>Step 2:</strong> Flight OK. Orchestrator → Hotel: <code>reserve(city=SF, dates=Nov 20-25)</code>');
+  await forwardStep('hotel', { reserveDetail: 'room 301 reserved', commitDetail: '🏨 room 301 · $980' });
+
+  say('<strong>Step 3:</strong> Hotel OK. Orchestrator → Car: <code>reserve(location=SFO, dates=Nov 20-25)</code>');
+  await forwardStep('car', { reserveDetail: 'Camry reserved', commitDetail: '🚗 Toyota Camry · $350' });
+
+  say('<strong>Step 4:</strong> All 3 resources held. Orchestrator → Payment: <code>charge($2450)</code>');
+  await forwardStep('payment', { reserveDetail: 'authorizing $2450', commitDetail: '💳 $2450 charged' });
+
+  say('<strong>🎉 Saga complete!</strong> Orchestrator marks all services COMMITTED. User sees: "Trip confirmed — enjoy!"');
+  stats.done++; renderStats();
+}
+
+async function runHotelFails() {
+  resetState();
+  say('<strong>Scenario: Hotel sold out.</strong> Flight succeeds, hotel fails, flight must be compensated.');
+  await sleep(300);
+
+  say('<strong>Step 1:</strong> Orchestrator → Flight: <code>reserve</code>. ✓');
+  await forwardStep('flight', { reserveDetail: 'seat 12A reserved', commitDetail: '✈️ seat 12A · $620' });
+
+  say('<strong>Step 2:</strong> Orchestrator → Hotel: <code>reserve</code>. ❌ <strong>No rooms available for those dates.</strong>');
+  await forwardStep('hotel', { fail: true, failReason: 'NO ROOMS AVAILABLE' });
+
+  say('<strong>💥 Compensation begins (reverse order):</strong>');
+  await sleep(300);
+  await runCompensations(['flight'], { flight: '✈️ seat 12A → CANCELLED · refunded' });
+
+  say('<strong>Saga compensated.</strong> User notified: "Sorry, your hotel dates are booked up. Nothing was charged — pick new dates."');
+  stats.comp++; renderStats();
+}
+
+async function runCarFails() {
+  resetState();
+  say('<strong>Scenario: Car unavailable.</strong> Flight + Hotel succeed, Car fails, both must be rolled back.');
+  await sleep(300);
+
+  say('<strong>Step 1:</strong> Orchestrator → Flight: <code>reserve</code>. ✓');
+  await forwardStep('flight', { reserveDetail: 'seat 12A reserved', commitDetail: '✈️ seat 12A · $620' });
+
+  say('<strong>Step 2:</strong> Orchestrator → Hotel: <code>reserve</code>. ✓');
+  await forwardStep('hotel', { reserveDetail: 'room 301 reserved', commitDetail: '🏨 room 301 · $980' });
+
+  say('<strong>Step 3:</strong> Orchestrator → Car: <code>reserve</code>. ❌ <strong>No vehicles at SFO.</strong>');
+  await forwardStep('car', { fail: true, failReason: 'NO VEHICLES AT LOCATION' });
+
+  say('<strong>💥 Compensation begins (reverse order: Hotel → Flight):</strong>');
+  await sleep(300);
+  await runCompensations(['flight','hotel'], {
+    hotel:  '🏨 room 301 → CANCELLED · refunded',
+    flight: '✈️ seat 12A → CANCELLED · refunded'
+  });
+
+  say('<strong>Saga compensated.</strong> User notified: "Car rental unavailable. Flight + hotel released — no charge."');
+  stats.comp++; renderStats();
+}
+
+async function runPaymentFails() {
+  resetState();
+  say('<strong>Scenario: Payment declined.</strong> All 3 resources booked, card declines, compensate ALL three in reverse.');
+  await sleep(300);
+
+  say('<strong>Step 1:</strong> Orchestrator → Flight: <code>reserve</code>. ✓');
+  await forwardStep('flight', { reserveDetail: 'seat 12A reserved', commitDetail: '✈️ seat 12A · $620' });
+
+  say('<strong>Step 2:</strong> Orchestrator → Hotel: <code>reserve</code>. ✓');
+  await forwardStep('hotel', { reserveDetail: 'room 301 reserved', commitDetail: '🏨 room 301 · $980' });
+
+  say('<strong>Step 3:</strong> Orchestrator → Car: <code>reserve</code>. ✓');
+  await forwardStep('car', { reserveDetail: 'Camry reserved', commitDetail: '🚗 Toyota Camry · $350' });
+
+  say('<strong>Step 4:</strong> Orchestrator → Payment: <code>charge($2450)</code>. ❌ <strong>CARD DECLINED.</strong>');
+  await forwardStep('payment', { fail: true, failReason: 'CARD DECLINED' });
+
+  say('<strong>💥 Compensation begins (reverse: Car → Hotel → Flight):</strong>');
+  await sleep(400);
+  await runCompensations(['flight','hotel','car'], {
+    car:    '🚗 Camry → CANCELLED · no charge',
+    hotel:  '🏨 room 301 → CANCELLED · refunded',
+    flight: '✈️ seat 12A → CANCELLED · refunded'
+  });
+
+  say('<strong>Saga failed and compensated.</strong> User notified: "Payment declined. All reservations released. Please try a different card."');
+  stats.comp++; renderStats();
+}
+
+// ======================= BUTTON WIRING =======================
+function lock() {
+  busy = true;
+  document.querySelectorAll('.viz-btn').forEach(b => b.disabled = true);
+}
+function unlock() {
+  busy = false;
+  document.querySelectorAll('.viz-btn').forEach(b => b.disabled = false);
+}
+
+async function run(fn) {
+  if (busy) return;
+  lock();
+  try { await fn(); }
+  finally { unlock(); }
+}
+
+document.getElementById('btnHappy').onclick     = () => run(runHappyPath);
+document.getElementById('btnHotelFail').onclick = () => run(runHotelFails);
+document.getElementById('btnCarFail').onclick   = () => run(runCarFails);
+document.getElementById('btnPayFail').onclick   = () => run(runPaymentFails);
+
+document.getElementById('btnMode').onclick = () => {
+  if (busy) return;
+  mode = (mode === 'orchestration') ? 'choreography' : 'orchestration';
+  const lbl = document.getElementById('modeLabel');
+  const btn = document.getElementById('btnMode');
+  if (mode === 'orchestration') {
+    lbl.textContent = 'Orchestration';
+    btn.classList.remove('choreography');
+    say('<strong>Mode: Orchestration.</strong> A central Orchestrator calls each service in sequence. Packets flow between the orchestrator and every service (star topology).');
+  } else {
+    lbl.textContent = 'Choreography';
+    btn.classList.add('choreography');
+    say('<strong>Mode: Choreography.</strong> No central coordinator. Services publish events (to Kafka), and the next service listens for them. Packets flow service → service (chain topology). On failure, services emit <code>*-failed</code> events which trigger compensation consumers.');
+  }
+  refreshOrchestrator();
+};
+
+document.getElementById('btnReset').onclick = () => {
+  if (busy) return;
+  stats = { done: 0, comp: 0, fwd: 0, back: 0 };
+  renderStats();
+  resetState();
+  say('Reset. Pick a scenario to run the saga again.');
+};
+
+// ======================= INIT =======================
+initState();
+buildArch();
+renderStats();
+</script>
+</body>
+</html>

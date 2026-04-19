@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Interactive Visualizations — System Design Books</title>
+<link rel="stylesheet" href="../assets/css/style.css">
+<link rel="stylesheet" href="../assets/css/viz.css">
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">System Design Books</div>
+    <div class="brand-sub">by Sanheen · Progressive Learning</div>
+    <div class="nav-section">
+      <h3>Home</h3>
+      <a href="../index.html">Overview</a>
+    </div>
+    <div class="nav-section">
+      <h3>🎬 Interactive Visualizations</h3>
+      <a href="index.html">Viz Index</a>
+      <a href="lru-cache.html">LRU Cache (LLD)</a>
+      <a href="request-flow.html">Request Flow (HLD)</a>
+      <a href="load-balancer.html">Load Balancer (HLD)</a>
+      <a href="cache-aside.html">Cache Aside Pattern (HLD)</a>
+    </div>
+    <div class="nav-section">
+      <h3>Book I — Low Level Design</h3>
+      <a href="../lld/index.html">LLD Index</a>
+    </div>
+    <div class="nav-section">
+      <h3>Book II — High Level Design</h3>
+      <a href="../hld/index.html">HLD Index</a>
+    </div>
+    <div class="nav-section">
+      <h3>Book III — AI System Design</h3>
+      <a href="../ai/index.html">AI Index</a>
+    </div>
+  </aside>
+
+  <main class="main">
+    <div class="breadcrumb"><a href="../index.html">Home</a> / Visualizations</div>
+    <h1>🎬 Interactive Visualizations</h1>
+    <p style="font-size:1.15rem;color:var(--text-dim);">Watch code execute line-by-line. Watch requests flow through architecture as animated dots. Step through, pause, rewind. See what code actually DOES, not just what it says.</p>
+
+    <h2>LLD — Code Execution</h2>
+    <p>Step through data-structure and algorithm code line-by-line. Watch variables change, pointers move, and state evolve. Pause at any step to read the description.</p>
+    <div class="cards">
+      <a class="card" href="lru-cache.html">
+        <div class="card-badge badge-medium">LLD · Interactive</div>
+        <div class="card-title">LRU Cache</div>
+        <div class="card-desc">Put and Get operations. Watch the HashMap and Doubly-Linked List evolve. See eviction happen. Understand O(1) mechanics visually.</div>
+      </a>
+    </div>
+
+    <h2>HLD — Architecture & Traffic Flow</h2>
+    <p>Real actors (clients, load balancers, servers, caches, databases) with animated request packets flowing between them. Click a simulate button and watch traffic move.</p>
+    <div class="cards">
+      <a class="card" href="request-flow.html">
+        <div class="card-badge badge-medium">HLD · Interactive</div>
+        <div class="card-title">Client → Server Request Flow</div>
+        <div class="card-desc">Watch a request travel from client through DNS, CDN, load balancer, application, cache, and database. See response come back.</div>
+      </a>
+      <a class="card" href="load-balancer.html">
+        <div class="card-badge badge-medium">HLD · Interactive</div>
+        <div class="card-title">Load Balancer (Round Robin)</div>
+        <div class="card-desc">5 clients fire requests simultaneously. Watch LB distribute to 3 backend servers. See what happens when one server dies.</div>
+      </a>
+      <a class="card" href="cache-aside.html">
+        <div class="card-badge badge-medium">HLD · Interactive</div>
+        <div class="card-title">Cache-Aside Pattern</div>
+        <div class="card-desc">App checks cache → miss → reads DB → populates cache → next request hits cache. Watch hit rate climb as cache warms up.</div>
+      </a>
+    </div>
+
+    <div class="callout">
+      <div class="callout-title">How to Use</div>
+      Each visualization has <strong>Play / Pause / Step Forward / Step Back / Reset</strong> controls. Adjust speed with the slider. Step-by-step through code is best for understanding; auto-play is good for getting the feel of the flow.
+    </div>
+
+    <h2>More Demos</h2>
+    <div class="cards">
+      <a class="card" href="rate-limiter.html">
+        <div class="card-badge badge-medium">LLD+HLD · Interactive</div>
+        <div class="card-title">Rate Limiter (Token Bucket)</div>
+        <div class="card-desc">Watch tokens refill over time. Fire bursts and see 429s. Compare with other algorithms.</div>
+      </a>
+      <a class="card" href="consistent-hashing.html">
+        <div class="card-badge badge-advanced">HLD · Interactive</div>
+        <div class="card-title">Consistent Hashing Ring</div>
+        <div class="card-desc">Add servers, add keys, watch each key snap to the next clockwise server. See why adding a server only moves 1/N keys.</div>
+      </a>
+      <a class="card" href="db-replication.html">
+        <div class="card-badge badge-medium">HLD · Interactive</div>
+        <div class="card-title">DB Replication + Failover</div>
+        <div class="card-desc">Primary + 2 replicas. Kill primary, promote replica. See replication lag in action.</div>
+      </a>
+      <a class="card" href="kafka-partitioning.html">
+        <div class="card-badge badge-advanced">HLD · Interactive</div>
+        <div class="card-title">Kafka Partitioning</div>
+        <div class="card-desc">Producers → 3 partitions (by key hash) → consumer group. Kill consumer, see rebalance.</div>
+      </a>
+      <a class="card" href="circuit-breaker.html">
+        <div class="card-badge badge-medium">HLD · Interactive</div>
+        <div class="card-title">Circuit Breaker</div>
+        <div class="card-desc">Watch CLOSED → OPEN → HALF_OPEN transitions as failures accumulate.</div>
+      </a>
+      <a class="card" href="rag-pipeline.html">
+        <div class="card-badge badge-advanced">AI · Interactive</div>
+        <div class="card-title">RAG Pipeline</div>
+        <div class="card-desc">Query → Embed → Vector search + BM25 → Rerank → LLM. See cost and latency at each hop.</div>
+      </a>
+    </div>
+
+    <h2>LLD — Classic Problems</h2>
+    <div class="cards">
+      <a class="card" href="parking-lot.html">
+        <div class="card-badge badge-basic">LLD · Interactive</div>
+        <div class="card-title">Parking Lot</div>
+        <div class="card-desc">Park cars on 3 floors. Toggle lock mode and watch the race condition: without locking, two cars collide on the last spot.</div>
+      </a>
+      <a class="card" href="vending-machine.html">
+        <div class="card-badge badge-basic">LLD · Interactive</div>
+        <div class="card-title">Vending Machine</div>
+        <div class="card-desc">State Pattern in action. Watch IDLE → HAS_MONEY → ITEM_SELECTED → DISPENSING transitions with animated state diagram.</div>
+      </a>
+      <a class="card" href="bfs-dfs.html">
+        <div class="card-badge badge-basic">LLD · Interactive</div>
+        <div class="card-title">BFS / DFS Traversal</div>
+        <div class="card-desc">8-node graph. Pick BFS or DFS, step through. Watch queue/stack evolve and see visual difference between level-order and depth-first.</div>
+      </a>
+    </div>
+
+    <h2>HLD — Advanced Patterns</h2>
+    <div class="cards">
+      <a class="card" href="raft-election.html">
+        <div class="card-badge badge-advanced">HLD · Interactive</div>
+        <div class="card-title">Raft Leader Election</div>
+        <div class="card-desc">5-node cluster. Kill the leader, watch followers time out, candidate runs election, majority votes elect new leader. Try network partition.</div>
+      </a>
+      <a class="card" href="saga.html">
+        <div class="card-badge badge-advanced">HLD · Interactive</div>
+        <div class="card-title">Saga Pattern</div>
+        <div class="card-desc">Trip booking: flight + hotel + car + payment. Watch compensation cascade in reverse when any step fails. Orchestration vs Choreography.</div>
+      </a>
+      <a class="card" href="agent-react.html">
+        <div class="card-badge badge-advanced">AI · Interactive</div>
+        <div class="card-title">AI Agent (ReAct Loop)</div>
+        <div class="card-desc">Watch an agent Think → Tool → Observe → Think until task complete. Inject errors and hallucinations to see recovery.</div>
+      </a>
+    </div>
+  </main>
+</div>
+<script src="../assets/js/nav.js"></script>
+</body>
+</html>
