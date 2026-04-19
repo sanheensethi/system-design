@@ -1,0 +1,500 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>War Room Extra Scenarios — Book II · HLD</title>
+<link rel="stylesheet" href="../assets/css/style.css">
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">System Design Books</div>
+    <div class="brand-sub">by Sanheen · Progressive Learning</div>
+    <div class="nav-section">
+      <h3>Home</h3>
+      <a href="../index.html">Overview</a>
+    </div>
+    <div class="nav-section">
+      <h3>Book I — Low Level Design</h3>
+      <a href="../lld/index.html">LLD Index</a>
+    </div>
+    <div class="nav-section">
+      <h3>Book II — High Level Design</h3>
+      <a href="index.html">HLD Index</a>
+      <a href="01-foundations.html">1. Foundations & Capacity</a>
+      <a href="02-building-blocks.html">2. Building Blocks</a>
+      <a href="03-basic-systems.html">3. Basic Systems</a>
+      <a href="04-intermediate.html">4. Intermediate Systems</a>
+      <a href="05-advanced.html">5. Advanced Systems</a>
+      <a href="06-very-high-scale.html">6. Very High Scale</a>
+      <a href="07-war-room.html">7. War Room Scenarios</a>
+      <a href="07b-war-room-extra.html">7b. War Room Extras</a>
+      <a href="08-real-architectures.html">8. Real Architectures</a>
+    </div>
+  </aside>
+  <main class="main">
+    <div class="breadcrumb"><a href="../index.html">Home</a> / <a href="index.html">Book II · HLD</a> / Chapter 7b</div>
+    <h1>Chapter 7b: War Room — Extra Scenarios</h1>
+    <p style="font-size:1.1rem;color:var(--text-dim);">Additional real-world production incidents beyond Chapter 7. Each scenario mirrors real outages from major engineering teams.</p>
+
+    <h2>Scenario 1: The Retry Storm</h2>
+    <div class="callout danger">
+      <strong>ALERT — 02:14 UTC:</strong> payment-service p99 latency 8s (SLO 400ms). Error rate 42%. Downstream fraud-check service CPU 100%. Checkout conversion dropped 60% in 4 minutes.
+    </div>
+
+    <p><strong>#war-room slack:</strong></p>
+    <p><em>@priya (SRE):</em> payment-svc is on fire. Fraud-check behind it also dying.<br>
+    <em>@marco (payments):</em> Fraud-check got slow first — I see 6× normal RPS on it.<br>
+    <em>@priya:</em> But upstream traffic is only 1.3× normal. Where is the 6× coming from?<br>
+    <em>@dan (platform):</em> Oh no. Check the retry config on the payment SDK.</p>
+
+    <h3>Timeline</h3>
+    <ol>
+      <li><strong>02:10</strong> — Fraud-check ML model deploy bumps inference p99 from 80ms to 900ms.</li>
+      <li><strong>02:11</strong> — Payment service calls fraud-check, hits 2s client-side timeout, retries.</li>
+      <li><strong>02:12</strong> — Each upstream call becomes 3 calls to fraud-check. CPU saturates.</li>
+      <li><strong>02:13</strong> — Fraud-check slows further → more timeouts → more retries. Amplification spirals to 4×.</li>
+      <li><strong>02:14</strong> — Page fires. Checkout conversion craters.</li>
+      <li><strong>02:22</strong> — On-call rolls back fraud-check model. Load normalizes in 90s.</li>
+    </ol>
+
+    <h3>Wrong First Hypothesis</h3>
+    <p>The team assumed a traffic spike (Black Friday promo had started 2 hours earlier). They tried to scale up fraud-check horizontally, but new pods came up and immediately got crushed by the amplified retry traffic. Scaling out made it worse because the retry budget regenerated faster.</p>
+
+    <h3>Root Cause</h3>
+    <p>The payment SDK had a naive retry policy: 3 retries, no backoff, no jitter, no circuit breaker. When fraud-check slowed from 80ms to 900ms, every caller's 2s timeout fired partway through, and each client fired 3 more requests into an already-saturated service. This is the classic retry amplification pattern.</p>
+
+    <pre><code>// BAD — what was in production
+async function callFraudCheck(req) {
+  for (let i = 0; i &lt; 3; i++) {
+    try { return await http.post('/fraud', req, { timeout: 2000 }); }
+    catch (e) { /* retry immediately */ }
+  }
+  throw new Error('fraud-check failed');
+}</code></pre>
+
+    <div class="callout success">
+      <strong>Immediate Fix (02:22):</strong> Rolled back the fraud-check ML model. As latency dropped back to 80ms, retry amplification collapsed and load normalized within 90 seconds without any code change on the caller.
+    </div>
+
+    <h3>Long-Term Fix</h3>
+    <pre><code>// GOOD — exponential backoff + jitter + circuit breaker + idempotency
+const breaker = new CircuitBreaker({ failureRate: 0.5, window: '10s' });
+
+async function callFraudCheck(req) {
+  if (breaker.isOpen()) return fallbackDecision(req);
+  const idemKey = req.paymentId; // server dedupes
+  for (let i = 0; i &lt; 3; i++) {
+    try {
+      return await http.post('/fraud', req, {
+        timeout: 2000,
+        headers: { 'Idempotency-Key': idemKey }
+      });
+    } catch (e) {
+      if (!isRetryable(e)) throw e;
+      const backoff = Math.min(100 * 2**i, 2000);
+      const jitter = Math.random() * backoff; // full jitter
+      await sleep(jitter);
+      breaker.recordFailure();
+    }
+  }
+  throw new Error('fraud-check failed');
+}</code></pre>
+
+    <div class="callout warn">
+      <strong>Prevention:</strong> Every RPC client must have (1) exponential backoff with full jitter, (2) a circuit breaker keyed on the downstream service, (3) a retry budget (max 10% of baseline RPS), (4) idempotency keys so retries are safe. Load-test by artificially injecting 500ms of latency into a dependency and watch whether upstream calls amplify or stay flat.
+    </div>
+
+    <div class="callout">
+      <strong>Staff Engineer Takeaway:</strong> Retries are a distributed-systems weapon. Naive retries convert a latency incident into a full outage. Treat retry configuration with the same rigor as timeouts and capacity planning. The cure for a slow dependency is almost never "try it again immediately."
+    </div>
+
+    <h2>Scenario 2: The DB Connection Pool Exhaustion</h2>
+    <div class="callout danger">
+      <strong>ALERT — 14:47 UTC:</strong> api-gateway returning 503 on 80% of routes. Postgres <code>active_connections</code> pinned at 200/200. Request queue depth 12k and climbing. All tenants affected, not just the new AI feature.
+    </div>
+
+    <p><strong>#war-room slack:</strong></p>
+    <p><em>@ananya (backend):</em> Everything is 503. Even <code>/healthz</code>.<br>
+    <em>@rohan (DBA):</em> Postgres is idle. CPU 8%. But all 200 pool slots say "in transaction".<br>
+    <em>@ananya:</em> Wait — the AI summary endpoint we shipped Tuesday... it's inside a <code>db.transaction()</code> block while it calls OpenAI.<br>
+    <em>@rohan:</em> Those calls take 15 minutes for long docs. 🫠</p>
+
+    <h3>Timeline</h3>
+    <ol>
+      <li><strong>Tue</strong> — New "summarize document" endpoint ships. Opens a transaction, reads doc, calls OpenAI, writes summary, commits.</li>
+      <li><strong>Thu 14:30</strong> — Marketing email drives traffic spike on that endpoint.</li>
+      <li><strong>Thu 14:42</strong> — 200 concurrent requests each holding a Postgres connection for 10+ minutes.</li>
+      <li><strong>Thu 14:47</strong> — Pool exhausted. Every other endpoint queues. Health checks fail. Pods restart, reconnect, immediately starve again.</li>
+      <li><strong>Thu 14:55</strong> — Feature flag disables summarize endpoint. Pool drains in 8 minutes.</li>
+    </ol>
+
+    <h3>Wrong First Hypothesis</h3>
+    <p>Team suspected Postgres itself was hung (long-running query, lock contention, vacuum). <code>pg_stat_activity</code> showed all 200 connections <code>idle in transaction</code> — which <em>looks</em> like a DB problem but was actually application code holding open transactions across a network call to a third-party API.</p>
+
+    <h3>Root Cause</h3>
+    <pre><code>// BAD — transaction wraps a 15-minute external call
+await db.transaction(async (tx) =&gt; {
+  const doc = await tx.query('SELECT body FROM docs WHERE id = $1', [id]);
+  const summary = await openai.summarize(doc.body); // &lt;-- 10-15 min
+  await tx.query('UPDATE docs SET summary = $1 WHERE id = $2', [summary, id]);
+});</code></pre>
+    <p>Connections are a shared, bounded resource. Any code path that holds one across an unbounded external call is a ticking bomb. At 200 pool slots and 300 concurrent summarizations, the pool is gone in seconds.</p>
+
+    <div class="callout success">
+      <strong>Immediate Fix (14:55):</strong> Feature-flagged the summarize endpoint off. Within 8 minutes existing transactions timed out or completed, the pool drained, and 503s stopped. Launched a follow-up endpoint queued to a background worker.
+    </div>
+
+    <h3>Long-Term Fix</h3>
+    <pre><code>// GOOD — release connection before external call, re-acquire for write
+const doc = await db.query('SELECT body FROM docs WHERE id = $1', [id]);
+const summary = await openai.summarize(doc.body); // no connection held
+await db.query('UPDATE docs SET summary = $1 WHERE id = $2', [summary, id]);
+
+// BETTER — move to async worker
+await queue.enqueue('summarize', { docId: id });
+return { status: 'queued' };</code></pre>
+
+    <div class="diagram"><pre>
+ Before:                              After:
+ ┌──────────────┐                    ┌──────────────┐
+ │ API          │                    │ API          │
+ │  BEGIN       │──┐                 │  SELECT ────▶│  pool (short)
+ │  SELECT      │  │ pool (15 min)   │  [OpenAI]    │
+ │  [OpenAI]    │  │                 │  UPDATE ────▶│  pool (short)
+ │  UPDATE      │  │                 └──────────────┘
+ │  COMMIT      │──┘
+ └──────────────┘
+</pre></div>
+
+    <div class="callout warn">
+      <strong>Prevention:</strong> (1) Never hold a DB transaction across a network call to anything you don't control. (2) Set <code>statement_timeout</code> and <code>idle_in_transaction_session_timeout</code> on the database side. (3) Split pools: <code>api</code> pool (short, high count), <code>worker</code> pool (longer), <code>analytics</code> pool (separate entirely). (4) Alert on <code>pool_in_use_ratio &gt; 0.7</code> before exhaustion.
+    </div>
+
+    <div class="callout">
+      <strong>Staff Engineer Takeaway:</strong> Connection pools are the most common shared-fate failure in backend services. A single misbehaving endpoint can take down every unrelated route. Architect for connection <em>scarcity</em>: treat each connection as a precious resource that must be released as aggressively as possible.
+    </div>
+
+    <h2>Scenario 3: The Hot Partition in DynamoDB</h2>
+    <div class="callout danger">
+      <strong>ALERT — 21:03 UTC:</strong> <code>ProvisionedThroughputExceededException</code> spiking on <code>live-reactions</code> table. Table provisioned at 50k WCU. CloudWatch shows aggregate consumed 11k WCU — throttled anyway. One creator's livestream has 14M concurrent viewers.
+    </div>
+
+    <p><strong>#war-room slack:</strong></p>
+    <p><em>@jin (platform):</em> We're being throttled at 20% of provisioned capacity. How?<br>
+    <em>@fatima (data):</em> Hot partition. All reactions for stream <code>sx_9f22</code> are going to one physical shard.<br>
+    <em>@jin:</em> Partition key is <code>streamId</code>. Every reaction for that stream lands on the same 1000 WCU partition.<br>
+    <em>@fatima:</em> That stream alone is generating 400k reactions/sec. We need to shard writes NOW.</p>
+
+    <h3>Timeline</h3>
+    <ol>
+      <li><strong>20:45</strong> — A celebrity goes live. Viewer count climbs past 5M.</li>
+      <li><strong>20:58</strong> — Reactions start throttling. Backend retries absorb it briefly.</li>
+      <li><strong>21:03</strong> — 14M viewers, ~400k reactions/sec all keyed on <code>streamId=sx_9f22</code>. One partition allows ~1000 WCU. Everything else drops.</li>
+      <li><strong>21:06</strong> — Emergency: write path switches to sharded key <code>{streamId}#{rand(0..99)}</code>.</li>
+      <li><strong>21:09</strong> — Throttling stops. Read path aggregates across 100 shards.</li>
+    </ol>
+
+    <h3>Wrong First Hypothesis</h3>
+    <p>First instinct was "we're under-provisioned" — the team tried to bump capacity from 50k to 200k WCU. This had zero effect because DynamoDB partitions capacity across physical shards. A single partition key can only consume what its underlying partition can deliver (1000 WCU / 3000 RCU historically; adaptive capacity helps but cannot save you from a truly single-key hot spot).</p>
+
+    <h3>Root Cause</h3>
+    <p>The schema treated <code>streamId</code> as the partition key. For 99% of streams this works fine. For the 0.01% of viral streams it creates a single-partition hotspot that no amount of provisioned capacity can fix. This is a fundamental property of consistent-hashed partitioned stores.</p>
+
+    <pre><code>// BAD — single hot partition for viral streams
+{
+  "PartitionKey": "sx_9f22",           // streamId
+  "SortKey": "2026-04-19T21:03:12.412Z#uid_88812",
+  "ReactionType": "heart"
+}
+
+// GOOD — write shard; aggregate on read
+{
+  "PartitionKey": "sx_9f22#42",        // streamId#shard (0..99)
+  "SortKey": "2026-04-19T21:03:12.412Z#uid_88812",
+  "ReactionType": "heart"
+}</code></pre>
+
+    <div class="callout success">
+      <strong>Immediate Fix (21:06):</strong> Deployed write-side sharding. Reactions now written to <code>streamId#rand(0..99)</code>. Read path issues 100 parallel queries and sums counts. Throttling dropped to zero in under 3 minutes.
+    </div>
+
+    <div class="callout warn">
+      <strong>Prevention:</strong> (1) Pre-compute a "virality score" per stream; switch to sharded key once score exceeds threshold. (2) Use adaptive capacity and on-demand mode for tables with unpredictable hotness. (3) Read path should always assume N shards even if N=1 today. (4) Load-test with a synthetic "all traffic to one key" pattern.
+    </div>
+
+    <div class="callout">
+      <strong>Staff Engineer Takeaway:</strong> In partitioned stores, per-key capacity is your real limit — not total capacity. "How much can one key handle?" is a design question, not an operational one. If your business has a long tail that occasionally spikes (viral content, mega-customers, flash sales), bake write-sharding into the schema from day one.
+    </div>
+
+    <h2>Scenario 4: The Kubernetes Memory Cascade</h2>
+    <div class="callout danger">
+      <strong>ALERT — 03:21 UTC:</strong> 6 of 40 nodes in <code>prod-us-east</code> cluster NotReady in 4 minutes. Pods evicted and rescheduling. API server latency 4s. Every service reporting partial outage.
+    </div>
+
+    <p><strong>#war-room slack:</strong></p>
+    <p><em>@kiran (platform):</em> Node <code>ip-10-4-22-18</code> went down, then <code>-19</code>, then <code>-20</code>. Cascading.<br>
+    <em>@meera (infra):</em> OOMKilled events everywhere. Look at <code>reports-worker</code> — RSS 28GB on a 32GB node.<br>
+    <em>@kiran:</em> No memory limit set. It ate the whole node. Kubelet killed system pods too.<br>
+    <em>@meera:</em> And when it rescheduled, it landed on the next node and did it again.</p>
+
+    <h3>Timeline</h3>
+    <ol>
+      <li><strong>03:17</strong> — <code>reports-worker</code> processes a 1.2M-row customer export. Streams to memory instead of S3.</li>
+      <li><strong>03:19</strong> — Pod RSS grows past 24GB. No memory limit configured.</li>
+      <li><strong>03:20</strong> — Node runs out of memory. Kernel OOM killer starts. Kubelet can't heartbeat.</li>
+      <li><strong>03:21</strong> — Node marked NotReady. Pods evicted and rescheduled.</li>
+      <li><strong>03:22</strong> — <code>reports-worker</code> lands on next node. Repeats. Three more nodes fall.</li>
+      <li><strong>03:25</strong> — Manual: cordon suspect pods, delete the deployment, cluster stabilizes.</li>
+    </ol>
+
+    <h3>Wrong First Hypothesis</h3>
+    <p>Initial suspicion was a node-level issue — maybe an EC2 instance health problem or a kernel upgrade gone bad. Team almost terminated the underlying EC2 instances, which would have accelerated the cascade by forcing more reschedules of the poison pod.</p>
+
+    <h3>Root Cause</h3>
+    <p>The <code>reports-worker</code> deployment had no <code>resources.limits.memory</code>. Kubernetes assigned it <code>BestEffort</code> QoS class, which is the first to be evicted but also has no kernel-level memory cap. A single runaway pod consumed the entire node, starving the kubelet itself, which led to the node being marked NotReady and pods rescheduled elsewhere — carrying the poison with them.</p>
+
+    <pre><code># BAD — no limits, BestEffort QoS, can eat a whole node
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: reports-worker }
+spec:
+  template:
+    spec:
+      containers:
+      - name: worker
+        image: reports-worker:v42
+        # no resources block
+
+# GOOD — Guaranteed QoS, bounded blast radius
+        resources:
+          requests: { cpu: "500m", memory: "2Gi" }
+          limits:   { cpu: "2",    memory: "4Gi" }</code></pre>
+
+    <div class="callout success">
+      <strong>Immediate Fix (03:25):</strong> <code>kubectl delete deploy reports-worker</code>. Cluster stabilized in 90 seconds as rescheduling stopped. Nodes rejoined. API server latency dropped back to 40ms.
+    </div>
+
+    <div class="callout warn">
+      <strong>Prevention:</strong> (1) Enforce <code>LimitRange</code> per namespace so pods without explicit limits get defaults. (2) Use <code>ResourceQuota</code> to cap total namespace consumption. (3) Add <code>PodDisruptionBudget</code> on critical services so mass eviction can't take them all. (4) HPA for legitimate scaling. (5) Admission controller rejects workloads without limits.
+    </div>
+
+    <div class="callout">
+      <strong>Staff Engineer Takeaway:</strong> In Kubernetes, "no memory limit" does not mean "unlimited memory" — it means "allowed to destroy the node." The scheduler assumes you will be honest about your resource needs; if you aren't, the platform has no way to protect itself. Default-deny unlimited resources via admission policy. A poison pod that can reschedule is a cluster-wide DOS weapon.
+    </div>
+
+    <h2>Scenario 5: The Self-DDoS Deploy</h2>
+    <div class="callout danger">
+      <strong>ALERT — 11:02 UTC:</strong> API edge load balancer at 4.2M RPS (normal 140k). p99 latency 12s. Backend autoscaler maxed at 800 pods. Error budget for the quarter burned in 14 minutes. No external traffic spike — it's our own app.
+    </div>
+
+    <p><strong>#war-room slack:</strong></p>
+    <p><em>@sofia (mobile):</em> We shipped client v2.4.0 yesterday. It's on ~40% of devices.<br>
+    <em>@leo (platform):</em> Edge RPS is 30× normal but active users is flat. That's a client bug.<br>
+    <em>@sofia:</em> Oh god. The feed polling interval — someone changed <code>30000</code> to <code>1000</code>. Thought it was milliseconds to seconds.<br>
+    <em>@leo:</em> We're DDoSing ourselves from 18M installed clients. Kill-switch the feature flag.</p>
+
+    <h3>Timeline</h3>
+    <ol>
+      <li><strong>Yesterday</strong> — Client v2.4.0 ships with "1" instead of "30" for poll interval (a refactor from ms → seconds).</li>
+      <li><strong>Today 08:00</strong> — App store rollout hits 20% of devices. RPS climbs gradually.</li>
+      <li><strong>11:00</strong> — Rollout hits 40%. Backend autoscaler can't keep up. Saturation.</li>
+      <li><strong>11:02</strong> — Page fires. Edge LB queues requests. User-visible latency.</li>
+      <li><strong>11:06</strong> — Remote config flips <code>feed_poll_seconds</code> to 30. Clients that honor config back off.</li>
+      <li><strong>11:09</strong> — RPS back to 180k. Stragglers (clients that ignore config on this code path) still at 3×.</li>
+      <li><strong>11:40</strong> — Emergency app-store hotfix v2.4.1 submitted.</li>
+    </ol>
+
+    <h3>Wrong First Hypothesis</h3>
+    <p>First theory was an external DDoS — the traffic pattern looked like a volumetric attack. But source IPs were diverse-but-legitimate (ISP ranges matching our user geography), user-agents were our own app, and TLS fingerprints matched. The "attack" was the app itself.</p>
+
+    <h3>Root Cause</h3>
+    <pre><code>// Old client (v2.3.x)
+const POLL_MS = 30_000;
+setInterval(fetchFeed, POLL_MS);
+
+// New client (v2.4.0) — refactor intended seconds
+const POLL_SECONDS = 1;            // was 30
+setInterval(fetchFeed, POLL_SECONDS); // BUG: setInterval still takes ms
+// → polls every 1ms until throttled by event loop ≈ every 1-4ms</code></pre>
+    <p>The refactor changed the <em>variable name</em> (ms → seconds) but not the <em>call site</em>. <code>setInterval</code> continued to interpret the argument as milliseconds. Instead of polling every 30 seconds, clients polled as fast as the event loop allowed — hundreds of times per second per device.</p>
+
+    <div class="callout success">
+      <strong>Immediate Fix (11:06):</strong> Remote config flipped <code>feed_poll_seconds</code> to 30 — but only worked because the team had (luckily) kept a server-controlled override knob. That single line of remote config brought RPS down 85% in 3 minutes.
+    </div>
+
+    <div class="callout warn">
+      <strong>Prevention:</strong> (1) Every client release is staged: 1% → 5% → 25% → 100% over days, with auto-rollback on backend SLO burn. (2) All polling intervals, batch sizes, and retry counts must be server-controlled via remote config. (3) Server-side per-user rate limits cap damage from any single client version. (4) Clients honor HTTP 429 <code>Retry-After</code>. (5) Synthetic load tests simulate "worst-case client" (broken backoff, infinite retry).
+    </div>
+
+    <div class="callout">
+      <strong>Staff Engineer Takeaway:</strong> Your mobile fleet is a botnet you own. A one-character bug in a client, multiplied by 18M installs, is larger than most DDoS attacks you will ever face. You cannot recall a bad client — you can only survive it. Every client-driven parameter must be server-overridable, and your backend must assume clients will misbehave.
+    </div>
+
+    <h2>Scenario 6: The CDN Cache Poisoning</h2>
+    <div class="callout danger">
+      <strong>ALERT — 16:44 UTC:</strong> Security team reports users worldwide seeing a crypto-scam banner on the homepage. Content is not in git. Origin returns clean HTML. CDN is serving poisoned HTML. 30M users affected over 8 minutes.
+    </div>
+
+    <p><strong>#war-room slack:</strong></p>
+    <p><em>@hannah (security):</em> Users are seeing "Claim 2 BTC" on our homepage. IT IS NOT IN OUR CODE.<br>
+    <em>@raj (cdn):</em> Origin returns clean. CDN edge returns poisoned. Cache has bad HTML.<br>
+    <em>@hannah:</em> Purge everything. Also — how did a bad response enter the cache?<br>
+    <em>@raj:</em> Look at this request: <code>Host: evil.attacker.site</code>, URL <code>/</code>. We proxied it. Cache key was URL-only. Everyone after got served the attacker's response.</p>
+
+    <h3>Timeline</h3>
+    <ol>
+      <li><strong>16:36</strong> — Attacker sends request to our CDN edge with spoofed <code>Host: evil.attacker.site</code>.</li>
+      <li><strong>16:36</strong> — Our origin (misconfigured) serves a page from a dev vhost that includes user-controlled content. Response is cacheable.</li>
+      <li><strong>16:36</strong> — CDN stores response under cache key <code>GET /</code> (Host not included).</li>
+      <li><strong>16:37</strong> — Every subsequent user requesting <code>GET /</code> with our real Host header gets the cached attacker response.</li>
+      <li><strong>16:44</strong> — User reports flood in. Page fires.</li>
+      <li><strong>16:46</strong> — Global purge issued. CDN clears. Origin Host validation deployed.</li>
+    </ol>
+
+    <h3>Wrong First Hypothesis</h3>
+    <p>Security initially suspected a compromise of the build pipeline — someone had pushed malicious code. But git history was clean, CI was clean, and direct origin fetches returned clean HTML. Only CDN edges were poisoned. The attack was in the cache layer, not the code layer.</p>
+
+    <h3>Root Cause</h3>
+    <pre><code># BAD — CDN cache key ignored Host header
+cache_key: "$request_method $request_uri"
+# Origin accepted any Host header and served matching vhost
+
+# GOOD
+cache_key: "$request_method $http_host $request_uri"
+# Origin rejects unknown Host (return 421)
+if ($http_host !~* "^(www\.)?example\.com$") {
+  return 421;  # Misdirected Request
+}</code></pre>
+    <p>Two defects combined: (1) CDN cache key did not include the Host header, so responses for different hosts shared a cache slot. (2) Origin accepted arbitrary Host headers and served matching vhosts, including a dev config that rendered untrusted content. Either defect alone would have been less dangerous; together they created global cache poisoning.</p>
+
+    <div class="callout success">
+      <strong>Immediate Fix (16:46):</strong> Global CDN purge on the affected paths. Deployed origin Host-header allowlist returning 421 for anything unknown. Added Host to cache key within 20 minutes.
+    </div>
+
+    <div class="callout warn">
+      <strong>Prevention:</strong> (1) Cache key MUST include every header that influences the response (<code>Host</code>, <code>Accept-Encoding</code>, <code>Authorization</code> class, locale). (2) Origin must validate <code>Host</code> against an allowlist and reject unknown hosts with 421. (3) Never mark dev/internal vhosts as cacheable. (4) Security header policy: <code>Content-Security-Policy</code>, <code>X-Content-Type-Options: nosniff</code>, <code>Strict-Transport-Security</code>. (5) Continuous cache-poisoning fuzzer in CI/CD (tools like Param Miner).
+    </div>
+
+    <div class="callout">
+      <strong>Staff Engineer Takeaway:</strong> The CDN is part of your trust boundary. A poisoned edge is indistinguishable from a compromised server to end users. Cache keys are a security control — not a performance control. Every header or parameter that changes the response must either be in the cache key or be stripped before it reaches the origin. Assume attackers will probe every permutation.
+    </div>
+
+    <h2>Scenario 7: The Message Queue Back-Pressure</h2>
+    <div class="callout danger">
+      <strong>ALERT — Sunday 04:12 UTC:</strong> Kafka broker <code>kfk-3</code> disk 98% full. Consumer lag on topic <code>events.raw</code> is 2.8 billion messages (3.5 days behind). Analytics dashboards showing data from last Wednesday. No alerts fired earlier.
+    </div>
+
+    <p><strong>#war-room slack:</strong></p>
+    <p><em>@zoe (data):</em> How did lag get to 3 days without a single alert?<br>
+    <em>@amir (platform):</em> We alerted on broker CPU and disk, not on consumer lag. Consumer is <code>spark-etl</code>, scaled at a fixed 20 executors.<br>
+    <em>@zoe:</em> Producer traffic has doubled since February. Consumers never scaled.<br>
+    <em>@amir:</em> And retention is 7 days. We'll hit disk full in ~6 hours. Broker will crash. We'll lose data.</p>
+
+    <h3>Timeline</h3>
+    <ol>
+      <li><strong>February</strong> — New product launch doubles producer throughput. Consumers still at fixed 20 executors.</li>
+      <li><strong>Feb–April</strong> — Consumer lag grows linearly. No lag alert configured. Analytics team sees "slightly stale" dashboards and assumes pipeline quirk.</li>
+      <li><strong>Sunday 03:30</strong> — Disk on <code>kfk-3</code> crosses 95%. First disk alert fires. On-call wakes up.</li>
+      <li><strong>Sunday 04:12</strong> — Disk 98%. War room opens.</li>
+      <li><strong>Sunday 04:40</strong> — Emergency: scale <code>spark-etl</code> to 120 executors, temporarily drop retention to 3 days, compress old segments.</li>
+      <li><strong>Sunday 11:15</strong> — Lag caught up. No data lost.</li>
+    </ol>
+
+    <h3>Wrong First Hypothesis</h3>
+    <p>On-call first suspected a broker hardware issue and considered failing over to a follower. That would have been catastrophic: the problem was not the broker — it was that the consumer was hopelessly behind. Failing over would have moved the 3-day backlog to a new broker and solved nothing.</p>
+
+    <h3>Root Cause</h3>
+    <p>The pipeline had no back-pressure feedback loop. Producers wrote as fast as they could; consumers ran at a fixed size; Kafka silently accumulated the delta on disk. Nothing in the system said "slow down" or "scale up." Worse, the alerting was on broker-level symptoms (disk, CPU) not on pipeline health (lag, age of oldest unprocessed message).</p>
+
+    <pre><code># BAD alerting — only broker symptoms
+- alert: KafkaDiskHigh
+  expr: kafka_log_dir_size / kafka_log_dir_capacity &gt; 0.95
+
+# GOOD alerting — pipeline health
+- alert: ConsumerLagGrowing
+  expr: rate(kafka_consumergroup_lag[1h]) &gt; 0
+  for: 2h
+- alert: OldestMessageAge
+  expr: kafka_oldest_unconsumed_message_seconds &gt; 900  # 15 min
+- alert: ConsumerScalingCap
+  expr: consumer_replicas == max_replicas and lag &gt; 0</code></pre>
+
+    <div class="callout success">
+      <strong>Immediate Fix (04:40):</strong> Scaled <code>spark-etl</code> consumer 6× to 120 executors. Temporarily reduced retention from 7 to 3 days to free disk. Enabled log compression on cold segments. Lag drained in 6.5 hours with zero data loss.
+    </div>
+
+    <div class="callout warn">
+      <strong>Prevention:</strong> (1) HPA/KEDA on consumer replica count driven by lag metric, not CPU. (2) Alert on <code>rate(lag) &gt; 0 for 1h</code> — detects drift before it becomes crisis. (3) Producer-side flow control: if lag exceeds threshold, start shedding low-priority events. (4) Retention sized to <em>worst-case</em> lag recovery time, not best-case. (5) Capacity review every quarter — producer growth vs. consumer capacity.
+    </div>
+
+    <div class="callout">
+      <strong>Staff Engineer Takeaway:</strong> Queues are shock absorbers, not storage. A queue that is growing monotonically is a queue that is broken — the system upstream of it is permanently faster than the system downstream, and physics will win eventually. Alert on the derivative (rate of lag change), not just the absolute value. The difference between a well-designed and a doomed pipeline is whether back-pressure is explicit.
+    </div>
+
+    <h2>Scenario 8: The Multi-Region Write Conflict</h2>
+    <div class="callout danger">
+      <strong>ALERT — Retrospective, discovered 4 months late:</strong> Finance team notices that 0.3% of user profile changes are missing. Audit log shows updates committed successfully in both regions. Data is simply... gone. Estimated 112,000 customer records silently corrupted over 6 months.
+    </div>
+
+    <p><strong>#war-room slack (much later):</strong></p>
+    <p><em>@nadia (data):</em> Support ticket 882341 — user says their phone number keeps "resetting." I can reproduce.<br>
+    <em>@omar (platform):</em> Both regions accepted the write. Both replicated. But only one value survived.<br>
+    <em>@nadia:</em> Active-active Cassandra. Last-write-wins by timestamp. If clocks drift or writes are near-simultaneous, one silently loses.<br>
+    <em>@omar:</em> We've been losing data for months. Nobody noticed because neither region errored.</p>
+
+    <h3>Timeline</h3>
+    <ol>
+      <li><strong>6 months ago</strong> — Multi-region active-active deployed. LWW conflict resolution chosen for "simplicity."</li>
+      <li><strong>Ongoing</strong> — Users who update profiles from two devices (phone + laptop) within ~2s window occasionally lose one update.</li>
+      <li><strong>Month 3</strong> — Support tickets trickle in. Closed as "user error" because no logs show anything wrong.</li>
+      <li><strong>Month 6</strong> — Finance compares billing records to profile table, finds ~112k mismatches. Escalation.</li>
+      <li><strong>Month 6 + 2 weeks</strong> — Full audit. Estimated 0.3% of writes silently dropped. Compliance incident filed.</li>
+    </ol>
+
+    <h3>Wrong First Hypothesis</h3>
+    <p>Earlier, engineers assumed support complaints were UX issues (double-tap, form reset, browser back button). They were never brought together as "data loss" because the database showed no errors — every write succeeded, replication was healthy, no alerts fired. Silent data loss is the hardest kind of incident to detect.</p>
+
+    <h3>Root Cause</h3>
+    <p>Last-write-wins conflict resolution requires a total order on writes. In a multi-region active-active setup with wall-clock timestamps, two near-simultaneous writes to the same key from different regions will be ordered by timestamp, and the "loser" is dropped with no indication. Clock skew makes this worse — a write with an earlier logical time but a later wall-clock will win incorrectly.</p>
+
+    <pre><code>// The silent killer
+Region A:  UPDATE users SET phone='555-A' WHERE id=1  (ts=10.000s)
+Region B:  UPDATE users SET phone='555-B' WHERE id=1  (ts=10.003s)
+
+// Both succeed. Replication resolves via LWW:
+//   A's value is overwritten by B. A's user sees their update "disappear."
+//   No error. No log. No alert.</code></pre>
+
+    <div class="diagram"><pre>
+ Active-Active with LWW:             Geo-Partitioned Leader:
+ ┌──────────┐   ┌──────────┐          ┌──────────┐   ┌──────────┐
+ │ Region A │   │ Region B │          │ Region A │   │ Region B │
+ │  write x │◀─▶│  write x │          │  LEADER  │──▶│ follower │
+ │  (race)  │   │  (race)  │          │  for x   │   │  for x   │
+ └──────────┘   └──────────┘          └──────────┘   └──────────┘
+  silent loss                          all writes for x → A
+</pre></div>
+
+    <div class="callout success">
+      <strong>Immediate Fix:</strong> For the user-profile table, switched to <em>single-leader-per-user</em>: each user deterministically hashed to a home region; all writes for that user routed there. Other regions can read but must forward writes. Data loss stopped; cross-region latency increased for ~30% of writes (accepted trade-off).
+    </div>
+
+    <div class="callout warn">
+      <strong>Prevention:</strong> (1) Never use LWW for any data where correctness matters. (2) For mergeable data (counters, sets, presence), use CRDTs. (3) For user-owned data, geo-partition by user — one leader per entity. (4) Use vector clocks or Lamport timestamps if you truly need multi-writer semantics, and expose conflicts to the application to resolve. (5) Continuous "read-your-write" probes across regions to detect silent loss <em>before</em> support tickets do.
+    </div>
+
+    <div class="callout">
+      <strong>Staff Engineer Takeaway:</strong> The most dangerous outages are the ones that don't trigger alerts. Silent data loss from LWW in multi-writer systems is arguably the single most common correctness bug in large distributed architectures — because the default libraries make it easy, the symptoms are invisible, and the cost shows up months later as "why are our numbers wrong?" Choose your conflict-resolution strategy as deliberately as you choose your database. "Eventually consistent" is not a synonym for "correct."
+    </div>
+
+    <div class="chapter-nav">
+      <a href="07-war-room.html"><div class="label">← Previous</div><div class="title">Chapter 7: War Room</div></a>
+      <a class="next" href="08-real-architectures.html"><div class="label">Next →</div><div class="title">Chapter 8: Real Architectures</div></a>
+    </div>
+  </main>
+</div>
+<script src="../assets/js/nav.js"></script>
+</body>
+</html>

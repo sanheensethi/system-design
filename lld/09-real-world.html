@@ -1,0 +1,867 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Applying LLD in Real Work — Book I · LLD</title>
+<link rel="stylesheet" href="../assets/css/style.css">
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">System Design Books</div>
+    <div class="brand-sub">by Sanheen · Progressive Learning</div>
+    <div class="nav-section">
+      <h3>Home</h3>
+      <a href="../index.html">Overview</a>
+    </div>
+    <div class="nav-section">
+      <h3>Book I — Low Level Design</h3>
+      <a href="index.html">LLD Index</a>
+      <a href="01-foundations.html">1. Foundations (OOP, SOLID)</a>
+      <a href="02-patterns.html">2. Design Patterns Primer</a>
+      <a href="03-basic-problems.html">3. Basic Problems</a>
+      <a href="04-intermediate.html">4. Intermediate Problems</a>
+      <a href="05-advanced.html">5. Advanced Problems</a>
+      <a href="06-concurrency.html">6. Concurrency in LLD</a>
+      <a href="07-war-room.html">7. War Room Scenarios</a>
+      <a href="08-real-code.html">8. Real Company Code</a>
+      <a href="09-real-world.html">9. Applying LLD in Real Work</a>
+    </div>
+    <div class="nav-section">
+      <h3>Book II — High Level Design</h3>
+      <a href="../hld/index.html">HLD Index</a>
+    </div>
+    <div class="nav-section">
+      <h3>Book III — AI System Design</h3>
+      <a href="../ai/index.html">AI Index</a>
+    </div>
+  </aside>
+  <main class="main">
+    <div class="breadcrumb"><a href="../index.html">Home</a> / <a href="index.html">Book I · LLD</a> / Chapter 9</div>
+    <h1>Chapter 9: Applying LLD in Real Work</h1>
+
+    <p class="lede">You've read eight chapters. You know SOLID. You know the Gang-of-Four patterns. You can explain Strategy vs State vs Command in an interview. Monday morning arrives. Jira ticket: <em>"Add support for Apple Pay to checkout."</em> You open the existing code and freeze. Where do patterns fit here? Do you refactor everything first? Do you just add another <code>if</code> branch? This chapter is the answer.</p>
+
+    <p>Everything up to now was vocabulary. This chapter is about <strong>judgment</strong> — when to reach for a pattern, when to leave the duct tape in place, what you must remember forever, and what you're allowed to forget.</p>
+
+    <hr>
+
+    <h2>1. The Meta-Question: What to Memorize vs Derive</h2>
+
+    <p>Here is the dirty secret no bootcamp tells you: senior engineers do not walk around with 23 Gang-of-Four patterns memorized. If you asked a staff engineer to implement the Abstract Factory pattern on a whiteboard cold, they might fumble. What they <em>do</em> carry, permanently, is a tiny set of principles and a reflex for recognizing pain. The patterns are the output of applying those principles — not the input to thinking.</p>
+
+    <p>You should deliberately decide what to memorize, what to internalize, and what to derive. Overload the memorize bucket and you will burn out. Under-fill the internalize bucket and you will produce rigid code. Here is the split that actually works in practice.</p>
+
+    <div class="callout success">
+      <strong>If you remember only four things from this entire book, remember these four principles. Everything else is a fresh derivation from them.</strong>
+    </div>
+
+    <h3>1.1 MEMORIZE — the Four Principles</h3>
+
+    <p>These four are non-negotiable. You must be able to recite them while half-asleep, apply them while debugging at 3 AM, and see violations of them in a pull request within 30 seconds of opening the diff.</p>
+
+    <table>
+      <thead>
+        <tr><th>Principle</th><th>One-line meaning</th><th>What violating it feels like</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>Single Responsibility (SRP)</strong></td>
+          <td>A class should have one reason to change.</td>
+          <td>Every feature touches the same class. Merge conflicts on every PR.</td>
+        </tr>
+        <tr>
+          <td><strong>Open/Closed (OCP)</strong></td>
+          <td>Open to extension, closed to modification.</td>
+          <td>Every new case means editing a long <code>if/elif</code> ladder.</td>
+        </tr>
+        <tr>
+          <td><strong>Dependency Inversion (DIP)</strong></td>
+          <td>Depend on abstractions, not concretions.</td>
+          <td>You cannot unit test anything without spinning up Postgres.</td>
+        </tr>
+        <tr>
+          <td><strong>Don't Repeat Yourself (DRY)</strong></td>
+          <td>One fact, one place in code.</td>
+          <td>Bugs that need to be fixed in four files. One file always misses.</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <p>Notice we skipped LSP and ISP from SOLID. They matter, but in day-to-day work they fall out for free if you respect SRP and DIP. You can hold four principles in your head forever; five starts to blur.</p>
+
+    <h3>1.2 INTERNALIZE — the Three Smells</h3>
+
+    <p>Smells are not principles. They are the sensations you feel in your fingers when something is wrong with a file before you can articulate why. You internalize them by writing bad code, feeling the pain, and refactoring — over and over, for years.</p>
+
+    <table>
+      <thead>
+        <tr><th>Smell</th><th>What it looks like</th><th>What you actually feel</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>God class</strong></td>
+          <td>One class, 800 lines, imports everything, knows everything.</td>
+          <td>Dread when opening the file. Scroll bar is tiny.</td>
+        </tr>
+        <tr>
+          <td><strong>Shotgun surgery</strong></td>
+          <td>One conceptual change (e.g. "add a new currency") touches 14 files.</td>
+          <td>You forget a file. QA catches it. You hate yourself.</td>
+        </tr>
+        <tr>
+          <td><strong>Rigid class</strong></td>
+          <td>Cannot add a new case without editing the class itself.</td>
+          <td>Every PR description starts with "I had to also change X, Y, Z because..."</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h3>1.3 DERIVE — Everything Else</h3>
+
+    <p>The 23 patterns, the specific SOLID letters L and I, refactoring tactics, architectural styles — all of that is <em>derived</em> when a specific smell meets a specific principle.</p>
+
+    <div class="diagram"><pre>
+  Smell detected        Principle applied         Pattern that emerges
+  ─────────────────     ─────────────────         ─────────────────────
+  God class         +   SRP               →       Extract Class / Facade
+  Rigid class       +   OCP               →       Strategy / State / Template
+  Hard to test      +   DIP               →       Dependency Injection / Repository
+  Duplicate code    +   DRY               →       Template Method / Decorator / Mixin
+  Shotgun surgery   +   SRP + OCP         →       Event bus / Observer / Polymorphism
+    </pre></div>
+
+    <p>You do not "apply the Strategy pattern." You notice a rigid class, recall OCP, and the shape that falls out of refactoring happens to be what textbooks call Strategy. The name is a label you attach <em>after</em> the work, so you can communicate with teammates. If you design by looking at the GoF book and asking "which chapter applies here?", you will produce tortured code.</p>
+
+    <div class="callout warn">
+      <strong>The trap:</strong> Juniors memorize patterns and apply them pre-emptively. Seniors ignore patterns until pain appears, then reach for them. Know which you are.
+    </div>
+
+    <hr>
+
+    <h2>2. The Pattern Recognition Cheat Sheet</h2>
+
+    <p>This is the table you want pinned above your monitor. Left column: what your code <em>actually looks like</em> right before reaching for a pattern. Right column: the pattern name your teammate will recognize in a PR description. The middle column is the principle you're invoking.</p>
+
+    <table>
+      <thead>
+        <tr><th>Code smell you see today</th><th>Principle in play</th><th>Pattern that falls out</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>15 <code>if isinstance(x, Foo)</code> checks scattered across the file</td><td>OCP + SRP</td><td>Strategy or Polymorphism</td></tr>
+        <tr><td>Constructor takes 10 arguments, half optional</td><td>SRP on the constructor</td><td>Builder</td></tr>
+        <tr><td>A <code>status</code> field drives a big switch inside every method</td><td>OCP</td><td>State</td></tr>
+        <tr><td>You need to add logging / metrics to 20 classes</td><td>DRY + OCP</td><td>Decorator / AOP / Middleware</td></tr>
+        <tr><td>One class talks to Stripe, MySQL, SMTP, and holds business logic</td><td>SRP</td><td>Extract Class (SRP split)</td></tr>
+        <tr><td>Tests are hard because things are static / global / imported at the top</td><td>DIP</td><td>Dependency Injection</td></tr>
+        <tr><td>You copy-pasted a file parser for CSV, JSON, XML</td><td>DRY + OCP</td><td>Strategy or Template Method</td></tr>
+        <tr><td>Event in system A must trigger N unrelated handlers in other modules</td><td>SRP + OCP</td><td>Observer / Event Bus</td></tr>
+        <tr><td>Third-party library's API does not fit yours</td><td>DIP</td><td>Adapter</td></tr>
+        <tr><td>You want to wrap 20 methods with the same try/except or timer</td><td>DRY</td><td>Decorator</td></tr>
+        <tr><td>Want to swap MySQL to Postgres without touching business logic</td><td>DIP</td><td>Repository / Port-Adapter</td></tr>
+        <tr><td>Same 8 setup steps repeat in every test</td><td>DRY</td><td>Fixture / Factory</td></tr>
+        <tr><td>Deeply nested <code>if</code>s inside a function &gt; 3 levels</td><td>SRP</td><td>Guard clauses / Extract Method / Specification</td></tr>
+        <tr><td>You undo a long workflow halfway through</td><td>SRP + OCP</td><td>Command with undo</td></tr>
+        <tr><td>You build an object across 4 method calls before using it</td><td>SRP</td><td>Builder or Fluent Interface</td></tr>
+        <tr><td>Client needs a simplified view of a subsystem with 30 classes</td><td>SRP + DIP</td><td>Facade</td></tr>
+        <tr><td>Same object is created in 11 places with subtle differences</td><td>DRY</td><td>Factory Method</td></tr>
+        <tr><td>You need "one and only one" of a thing, globally</td><td>—</td><td>Singleton (use sparingly)</td></tr>
+        <tr><td>You want to queue / log / retry operations uniformly</td><td>OCP</td><td>Command</td></tr>
+        <tr><td>Traversing a collection reveals its internal structure</td><td>SRP</td><td>Iterator</td></tr>
+      </tbody>
+    </table>
+
+    <div class="callout">
+      <strong>How to use this table:</strong> Do not read it top to bottom like a novel. When you feel discomfort in a file, scan the left column for a description that matches. The right column gives you the vocabulary; the derivation still happens in your head.
+    </div>
+
+    <hr>
+
+    <h2>3. When to Use Each Pattern at Your Day Job</h2>
+
+    <p>For the next 13 patterns, we answer four questions that actually matter on Monday morning:</p>
+    <ol>
+      <li><strong>Real scenarios at work</strong> — concrete situations at a regular B2B or B2C company</li>
+      <li><strong>Signs you need it</strong> — what your code looks like the minute before you reach</li>
+      <li><strong>Signs you DON'T need it</strong> — over-engineering red flags</li>
+      <li><strong>How to introduce it gradually</strong> — without triggering a team rebellion</li>
+    </ol>
+
+    <h3>3.1 Strategy</h3>
+
+    <p><em>Pick an algorithm at runtime from a family of interchangeable ones.</em></p>
+
+    <p><strong>Real scenarios.</strong> (a) Your checkout supports Stripe, PayPal, Razorpay — each with its own SDK. (b) Your shipping calculator has different rules per country. (c) Your export feature can emit CSV, JSON, or PDF.</p>
+
+    <p><strong>Signs you need it.</strong> An <code>if/elif/elif/elif</code> ladder keyed on a string or enum, appearing in three or more places. A method that starts <code>if kind == "stripe":</code> and another method later that also starts <code>if kind == "stripe":</code> — duplicated dispatch.</p>
+
+    <p><strong>Signs you DON'T need it.</strong> You have exactly one implementation and no second one on the roadmap. Two branches of a two-arm <code>if</code> that will not grow. Under-used Strategy interfaces are dead weight.</p>
+
+    <p><strong>How to introduce gradually.</strong> Refactor ONE call site. Extract the interface, keep the existing implementation as the first strategy, ship. Next week, add the second strategy. Do not convert all four dispatch sites in one PR.</p>
+
+    <h3>3.2 Factory</h3>
+
+    <p><em>Centralize object creation when it is non-trivial or varies by context.</em></p>
+
+    <p><strong>Real scenarios.</strong> (a) Build the right <code>PaymentGateway</code> given a country code. (b) Instantiate per-tenant config objects. (c) Wire a <code>User</code> aggregate from a database row plus related tables.</p>
+
+    <p><strong>Signs you need it.</strong> You wrote <code>new Foo(a, b, c, d, e, f)</code> in six files, and the arguments are computed identically each time. Or, you pass around a flag and <code>new</code> different subclasses based on it in multiple places.</p>
+
+    <p><strong>Signs you DON'T need it.</strong> The object takes two arguments and is created in one place. A factory for that is bureaucracy.</p>
+
+    <p><strong>How to introduce gradually.</strong> Replace one call site's <code>new Foo(...)</code> with <code>FooFactory.create(context)</code>. Inline the others over time.</p>
+
+    <h3>3.3 Builder</h3>
+
+    <p><em>Construct a complex object step by step.</em></p>
+
+    <p><strong>Real scenarios.</strong> (a) Build a complex HTTP request with optional headers, query params, retries, timeout. (b) Compose a SQL query with conditional WHERE clauses. (c) Build an email with optional CC, BCC, attachments.</p>
+
+    <p><strong>Signs you need it.</strong> A constructor with 7+ parameters, half of them optional or <code>None</code>. Calls that look like <code>EmailMessage(subject, body, None, None, None, True, None)</code> — the <code>None</code>s tell you Builder is coming.</p>
+
+    <p><strong>Signs you DON'T need it.</strong> Three parameters, all required. Named arguments in Python or Kotlin usually suffice before you go full Builder.</p>
+
+    <p><strong>How to introduce gradually.</strong> Keep the old constructor. Add a builder class next to it. Migrate call sites opportunistically. Delete the old constructor once all callers migrate.</p>
+
+    <h3>3.4 Singleton</h3>
+
+    <p><em>Exactly one instance, globally accessible.</em></p>
+
+    <p><strong>Real scenarios.</strong> (a) Config object loaded once at startup. (b) Connection pool. (c) Application-level cache.</p>
+
+    <p><strong>Signs you need it.</strong> Almost never, honestly. Most "singletons" in real codebases are better expressed as "one instance wired by the DI container at startup." The pattern of writing <code>Singleton.getInstance()</code> is usually a smell.</p>
+
+    <p><strong>Signs you DON'T need it.</strong> If you can inject it as a constructor argument, prefer that. Testing a true singleton is painful.</p>
+
+    <p><strong>How to introduce gradually.</strong> Don't. If you need one instance, create it at <code>main()</code> and pass it down. That is a singleton without the pattern tax.</p>
+
+    <div class="callout warn">
+      <strong>Controversial take:</strong> In 15 years of writing real code, Singleton is the pattern you will use least and misuse most. Prefer dependency injection every time.
+    </div>
+
+    <h3>3.5 Adapter</h3>
+
+    <p><em>Make one interface look like another.</em></p>
+
+    <p><strong>Real scenarios.</strong> (a) Stripe SDK returns <code>PaymentIntent</code> objects, your domain uses <code>Charge</code>. An adapter translates. (b) You swap a logging library; an adapter preserves the call sites. (c) A legacy REST API speaks XML; an adapter converts to your JSON DTOs.</p>
+
+    <p><strong>Signs you need it.</strong> You are about to write <code>try: stripe_intent.amount except: stripe_intent.value</code> scattered across your service. A third-party type has leaked into your domain.</p>
+
+    <p><strong>Signs you DON'T need it.</strong> One small call to the library, contained in one module. Adapting it is overkill.</p>
+
+    <p><strong>How to introduce gradually.</strong> Write the adapter the first time you feel pain. Route all new code through it. Old code migrates on touch.</p>
+
+    <h3>3.6 Decorator</h3>
+
+    <p><em>Wrap an object to add behaviour without changing its interface.</em></p>
+
+    <p><strong>Real scenarios.</strong> (a) Add caching around a slow function. (b) Add retry logic around a flaky HTTP client. (c) Add authorization checks around a service method. (d) Add logging/metrics/tracing around many methods.</p>
+
+    <p><strong>Signs you need it.</strong> You are about to add the same <code>try/except</code>, timing, or log statement to many methods. You feel gross about it. That feeling is correct.</p>
+
+    <p><strong>Signs you DON'T need it.</strong> A single method needs logging once. Just write the log line.</p>
+
+    <p><strong>How to introduce gradually.</strong> In Python, decorators are a single annotation. Start by wrapping one function; if it composes nicely, expand.</p>
+
+    <h3>3.7 Facade</h3>
+
+    <p><em>Provide a simple interface to a complex subsystem.</em></p>
+
+    <p><strong>Real scenarios.</strong> (a) Your checkout calls inventory, pricing, tax, fraud, payment, email — you wrap these in a <code>CheckoutService.place_order()</code>. (b) AWS SDK has 40 methods; you expose <code>StorageClient</code> with <code>upload / download / delete</code>.</p>
+
+    <p><strong>Signs you need it.</strong> Controllers or CLI scripts orchestrate 5+ services directly, duplicating the choreography across endpoints.</p>
+
+    <p><strong>Signs you DON'T need it.</strong> The "subsystem" is two classes. You are hiding nothing.</p>
+
+    <p><strong>How to introduce gradually.</strong> Extract the orchestration from one controller into a new service class. Other controllers migrate when touched.</p>
+
+    <h3>3.8 Observer</h3>
+
+    <p><em>Notify many subscribers when a subject changes.</em></p>
+
+    <p><strong>Real scenarios.</strong> (a) When a user signs up, send welcome email + create Stripe customer + log to analytics + notify Slack. (b) When an order ships, notify shipping system + email customer + update dashboard.</p>
+
+    <p><strong>Signs you need it.</strong> The original action (signup) keeps growing side-effects. Every product feature request adds one more <code>do_thing_X()</code> call to the signup function.</p>
+
+    <p><strong>Signs you DON'T need it.</strong> One subscriber, forever. Just call it directly.</p>
+
+    <p><strong>How to introduce gradually.</strong> Extract the existing side effects to named handler functions first (keeps behaviour identical). Then introduce an event bus; subscribe the handlers. Then it becomes easy to add new ones.</p>
+
+    <h3>3.9 State</h3>
+
+    <p><em>An object changes behaviour when its internal state changes.</em></p>
+
+    <p><strong>Real scenarios.</strong> (a) An <code>Order</code> behaves differently when it's <code>CART</code>, <code>PLACED</code>, <code>PAID</code>, <code>SHIPPED</code>, <code>DELIVERED</code>, <code>REFUNDED</code>. (b) A document editor has <code>DRAFT</code>, <code>REVIEW</code>, <code>PUBLISHED</code> states with different allowed actions.</p>
+
+    <p><strong>Signs you need it.</strong> Almost every method in a class starts with <code>if self.status == ...</code>. Illegal transitions leak through because checks were forgotten in a few places.</p>
+
+    <p><strong>Signs you DON'T need it.</strong> Two states (<code>active</code> / <code>inactive</code>). A boolean flag is fine.</p>
+
+    <p><strong>How to introduce gradually.</strong> Draw the state machine on paper first — that alone catches 80% of bugs. Then introduce a <code>transition(event)</code> method to centralise legality checks. Extract state objects only if behaviour really diverges.</p>
+
+    <h3>3.10 Template Method</h3>
+
+    <p><em>Define the skeleton of an algorithm, let subclasses fill in the steps.</em></p>
+
+    <p><strong>Real scenarios.</strong> (a) Import pipelines: <code>fetch → validate → transform → load</code>, with each importer supplying its own <code>validate</code> and <code>transform</code>. (b) Scheduled jobs with <code>setup → run → cleanup</code>, where only <code>run</code> varies.</p>
+
+    <p><strong>Signs you need it.</strong> Three similar classes copy-paste the same 80% of an algorithm and diverge in 20%.</p>
+
+    <p><strong>Signs you DON'T need it.</strong> The algorithm has one implementation. Inheritance is expensive; do not introduce it for future-proofing.</p>
+
+    <p><strong>How to introduce gradually.</strong> Extract common steps to a base class. Leave the abstract methods. Migrate one implementation at a time.</p>
+
+    <h3>3.11 Command</h3>
+
+    <p><em>Package an action as an object that can be queued, logged, or undone.</em></p>
+
+    <p><strong>Real scenarios.</strong> (a) A background job queue — each task is a command serialised to Redis. (b) Undo/redo in a text editor or CAD tool. (c) An audit log where every write is recorded as a named command.</p>
+
+    <p><strong>Signs you need it.</strong> You need to defer, queue, retry, or undo operations. You are tempted to pass around lambdas with arbitrary shape.</p>
+
+    <p><strong>Signs you DON'T need it.</strong> The operation runs synchronously and never needs to be replayed.</p>
+
+    <p><strong>How to introduce gradually.</strong> Start by boxing up one operation (e.g. <code>SendEmailCommand</code>) and pushing it to a queue. Others follow when needed.</p>
+
+    <h3>3.12 Repository</h3>
+
+    <p><em>Abstract data storage behind a domain-oriented interface.</em></p>
+
+    <p><strong>Real scenarios.</strong> (a) Swap MySQL for Postgres without the domain noticing. (b) Add a caching layer above the database. (c) Provide a fake in-memory implementation for tests.</p>
+
+    <p><strong>Signs you need it.</strong> SQL queries are scattered across controllers and services. Business logic knows about <code>psycopg2</code> cursors. Tests require a real database.</p>
+
+    <p><strong>Signs you DON'T need it.</strong> A thin CRUD app where the domain IS the table. A repository that just wraps <code>session.query(X).get(id)</code> is worse than the ORM it hides.</p>
+
+    <p><strong>How to introduce gradually.</strong> Extract one repository for the highest-churn aggregate. Give it an in-memory fake. Migrate tests of that aggregate. Repeat.</p>
+
+    <h3>3.13 Dependency Injection</h3>
+
+    <p><em>Pass dependencies in, don't construct them inside.</em></p>
+
+    <p><strong>Real scenarios.</strong> (a) A service needs a database, a clock, and an email sender — all three are constructor args. (b) You need to swap the clock for a fake in tests without monkey-patching.</p>
+
+    <p><strong>Signs you need it.</strong> Your class reaches out with <code>datetime.now()</code>, <code>requests.get()</code>, or <code>global_config</code> deep inside methods. Tests are painful because of this.</p>
+
+    <p><strong>Signs you DON'T need it.</strong> Never — DI is almost always a good idea. Only skip it for pure value objects with no dependencies.</p>
+
+    <p><strong>How to introduce gradually.</strong> Make one constructor argument optional with a sensible default. Over time, flip defaults to required and wire from <code>main()</code>.</p>
+
+    <hr>
+
+    <h2>4. How Senior Engineers Actually Design Code</h2>
+
+    <p>Let's walk through the exact thought process a senior engineer follows for a concrete, common request: <strong>"Add support for a new payment provider — Razorpay — alongside our existing Stripe integration."</strong> Watch how the order of operations differs from the junior approach.</p>
+
+    <h3>4.1 Step 1 — Read before you type</h3>
+
+    <p>Senior opens the repo and greps for <code>stripe</code>. Does not write any code yet. Finds three call sites:</p>
+
+<pre><code># checkout/service.py
+def place_order(user, cart):
+    ...
+    intent = stripe.PaymentIntent.create(amount=cart.total_cents, currency="usd")
+    order.stripe_intent_id = intent.id
+    ...
+
+# webhooks/stripe.py
+def handle_stripe_webhook(payload):
+    if payload["type"] == "payment_intent.succeeded":
+        order.status = "paid"
+    ...
+
+# admin/refunds.py
+def refund(order, amount):
+    stripe.Refund.create(payment_intent=order.stripe_intent_id, amount=amount)
+</code></pre>
+
+    <p>Observation: payment logic is entangled with three unrelated concerns — order placement, webhook handling, and refunds. <code>stripe</code> imports leak everywhere.</p>
+
+    <h3>4.2 Step 2 — Name the smell</h3>
+
+    <p>The senior labels it silently: <em>rigid class, shotgun surgery incoming</em>. Adding Razorpay means editing three files and sprinkling more <code>if provider == "stripe":</code> branches. OCP violation.</p>
+
+    <h3>4.3 Step 3 — Refactor FIRST, do not add the feature yet</h3>
+
+    <p>This is the senior move: do a structural refactor that <strong>adds no new features</strong>. Extract a <code>PaymentGateway</code> interface, make the existing Stripe code the first implementation. Ship this PR on its own.</p>
+
+<pre><code># payments/gateway.py
+class PaymentGateway(Protocol):
+    def create_payment(self, amount_cents: int, currency: str) -&gt; PaymentRef: ...
+    def refund(self, ref: PaymentRef, amount_cents: int) -&gt; None: ...
+    def parse_webhook(self, payload: dict) -&gt; WebhookEvent: ...
+
+# payments/stripe_gateway.py
+class StripeGateway:
+    def create_payment(self, amount_cents, currency):
+        intent = stripe.PaymentIntent.create(amount=amount_cents, currency=currency)
+        return PaymentRef(provider="stripe", external_id=intent.id)
+    ...
+</code></pre>
+
+    <p>Call sites now depend on <code>PaymentGateway</code>, not <code>stripe</code>. Behaviour is identical. Tests still pass. Ship.</p>
+
+    <h3>4.4 Step 4 — Now add the feature</h3>
+
+<pre><code># payments/razorpay_gateway.py
+class RazorpayGateway:
+    def create_payment(self, amount_cents, currency):
+        order = razorpay_client.order.create({"amount": amount_cents, "currency": currency})
+        return PaymentRef(provider="razorpay", external_id=order["id"])
+    ...
+</code></pre>
+
+    <p>One new file. Zero edits to checkout, webhooks, or refunds. Feature ships. Next provider is even cheaper.</p>
+
+    <h3>4.5 Step 5 — Write the tests at the interface level</h3>
+
+    <p>Tests are written against the <code>PaymentGateway</code> contract with an in-memory <code>FakeGateway</code>. This means business logic tests run in milliseconds without network calls.</p>
+
+    <h3>4.6 Contrast: the junior approach</h3>
+
+    <div class="callout danger">
+      <strong>What the junior does:</strong>
+      <ol>
+        <li>Opens <code>checkout/service.py</code>, adds <code>if provider == "razorpay": razorpay_client.order.create(...)</code></li>
+        <li>Opens <code>webhooks/</code>, copy-pastes <code>stripe.py</code> to <code>razorpay.py</code> — 80% identical code</li>
+        <li>Opens <code>refunds.py</code>, adds another <code>elif</code></li>
+        <li>Forgets to propagate the currency format difference — Razorpay uses paise, Stripe uses cents. Bug in production Monday.</li>
+        <li>Tests mock <code>stripe</code> and <code>razorpay</code> directly — tests are now 3x slower and coupled to SDKs.</li>
+      </ol>
+    </div>
+
+    <p>The senior finished Monday. The junior finishes Thursday with three bugs in QA. The "extra day spent refactoring" was the cheapest day of the week.</p>
+
+    <hr>
+
+    <h2>5. What NOT to Do — Over-Engineering</h2>
+
+    <p>Patterns are tools. Like any tool, applied without judgment they make things worse. A measurable majority of legacy codebase pain is caused not by missing patterns but by <em>wrongly applied</em> patterns that add indirection where none was needed.</p>
+
+    <h3>5.1 The hall of shame</h3>
+
+    <ul>
+      <li><strong><code>AbstractSingletonProxyFactoryBean</code></strong> — a real class name from early Spring. Five patterns stacked without a single concrete use case. If your class name takes a breath to say out loud, something is wrong.</li>
+      <li><strong>Five-class hierarchies for ten lines of logic.</strong> <code>Animal</code> → <code>Mammal</code> → <code>Carnivore</code> → <code>Feline</code> → <code>DomesticCat</code>, and all you wanted was to count cats in a shelter.</li>
+      <li><strong>Observer where a direct call works fine.</strong> "Decoupled" UI that now requires tracing through three files to understand one button click.</li>
+      <li><strong>Strategy with one implementation</strong> — the dead-giveaway ghost pattern. The interface exists because someone <em>imagined</em> a second provider. Two years later, no second provider, and the interface has to be updated every time the one impl changes.</li>
+      <li><strong>DI framework for a 200-line CLI script.</strong> Spring for a script that runs once per day. You spent more time wiring annotations than writing logic.</li>
+    </ul>
+
+    <div class="callout">
+      <strong>The rule:</strong> Do not apply a pattern until you have had the pain without it. Write the simple code. Feel the hurt. <em>Then</em> refactor to the pattern.
+    </div>
+
+    <h3>5.2 The YAGNI companion</h3>
+
+    <p>"You Aren't Gonna Need It." The future extension you are designing for probably will not come, or will come in a shape you did not predict. Prepare seams only for changes you are <em>actively planning this quarter</em>. Speculative flexibility costs money forever.</p>
+
+    <h3>5.3 Line-count rule of thumb</h3>
+
+    <p>A crude but useful heuristic: if the number of lines of pattern scaffolding (interfaces, factories, adapters) exceeds the number of lines of business logic being abstracted, you have over-engineered. Business-to-scaffolding ratio should be at least 3:1 for small modules, higher as modules grow.</p>
+
+    <hr>
+
+    <h2>6. The "Does My Team Agree?" Problem</h2>
+
+    <p>Knowing patterns is half the job. The other half is introducing them without turning into the engineer everyone dreads on code review — the one who rewrites other people's code unrequested.</p>
+
+    <h3>6.1 Why teams push back</h3>
+
+    <p>Refactors look risky without context. To the reviewer: "Why are you touching 14 files for a one-line feature?" To you: "Because the code was wrong and this is the right shape." Both are true. Your job is to close the communication gap.</p>
+
+    <h3>6.2 Techniques that actually work</h3>
+
+    <ul>
+      <li><strong>Start with tests.</strong> Nobody argues against adding tests. Tests force you to decouple. Decoupling reveals the seams where a pattern wants to live. You did not "apply a pattern"; you "made the code testable."</li>
+      <li><strong>Extract one responsibility at a time.</strong> Do not boil the ocean. A PR that extracts one class is reviewable. A PR that rewrites the module is not.</li>
+      <li><strong>Show before/after diffs in the PR description.</strong> A 3-line comment saying "this refactor lets us add Apple Pay next week with 20 lines instead of 200" converts skeptics instantly.</li>
+      <li><strong>Let pain argue for you.</strong> Wait for a real bug that the pattern would have prevented. Your PR writes itself: "This bug happened because X wasn't a strategy. Here's the fix, and here's the refactor that makes a future X impossible."</li>
+      <li><strong>Never refactor code you are not also shipping a feature in.</strong> Drive-by refactors are the most hated PRs in software. Couple refactor to feature; justify structurally.</li>
+      <li><strong>Use the team's existing vocabulary.</strong> If the team calls them "handlers," don't insist on "strategies." Label flexibility buys you political capital.</li>
+    </ul>
+
+    <h3>6.3 Anti-techniques</h3>
+
+    <div class="callout danger">
+      <ul>
+        <li>Do not rewrite a colleague's module while they're on vacation.</li>
+        <li>Do not open a 2,000-line PR titled "refactor everything."</li>
+        <li>Do not cite Gang-of-Four chapters in PR comments. Nobody wants to hear "this violates the Liskov Substitution Principle."</li>
+        <li>Do not refactor during a crunch sprint. Patterns are a peacetime activity.</li>
+      </ul>
+    </div>
+
+    <hr>
+
+    <h2>7. The Code Review Lens</h2>
+
+    <p>Most of your career influence on code quality will come through code review — not your own code, but the code you read with intent. Here is the checklist your eyes should run automatically on every diff.</p>
+
+    <h3>7.1 Structural red flags</h3>
+
+    <table>
+      <thead>
+        <tr><th>What you see</th><th>What it usually means</th><th>What to comment</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Class doing 3+ unrelated things</td><td>SRP violation</td><td>"Could we split the X responsibilities into their own class?"</td></tr>
+        <tr><td>File &gt; 500 lines</td><td>God class forming</td><td>"Is there a natural split here — maybe X + Y?"</td></tr>
+        <tr><td>Method &gt; 50 lines</td><td>Method doing too much</td><td>"Can we extract the validation block into its own method?"</td></tr>
+        <tr><td>More than 5 parameters</td><td>Object missing; or command object needed</td><td>"Could these group into a context/request object?"</td></tr>
+        <tr><td>Public mutable fields</td><td>Encapsulation violated</td><td>"Could this be set through a method so we can validate later?"</td></tr>
+        <tr><td><code>if</code> nesting &gt; 3 levels</td><td>Guard clauses missing</td><td>"Early-return on the error cases to flatten this?"</td></tr>
+        <tr><td>Duplicated 10-line block in 3+ places</td><td>DRY violation</td><td>"Worth extracting into a helper?"</td></tr>
+        <tr><td><code>except Exception:</code> with re-raise</td><td>Swallowing too much</td><td>"Can we narrow the exception type?"</td></tr>
+        <tr><td>Hardcoded URL / timeout / limit</td><td>Configuration missing</td><td>"This varies between envs — move to config?"</td></tr>
+        <tr><td>Method mutates input arguments</td><td>Surprising side effect</td><td>"Could we return a new object instead?"</td></tr>
+        <tr><td>Any <code>TODO</code> without a ticket</td><td>Tech debt going dark</td><td>"Link a Jira for this?"</td></tr>
+      </tbody>
+    </table>
+
+    <h3>7.2 PR comment cheat sheet — phrasings that don't sound accusatory</h3>
+
+    <table>
+      <thead><tr><th>Instead of</th><th>Say</th></tr></thead>
+      <tbody>
+        <tr><td>"This violates SRP."</td><td>"I see X and Y here — would splitting them help testing?"</td></tr>
+        <tr><td>"Use Strategy."</td><td>"When we add Z next month, this <code>if</code> ladder will grow. Want to extract a handler interface now?"</td></tr>
+        <tr><td>"Bad code."</td><td>"Is there a simpler shape?"</td></tr>
+        <tr><td>"Don't use Singleton."</td><td>"Could we inject this so tests can substitute a fake?"</td></tr>
+        <tr><td>"Why didn't you decouple this?"</td><td>"What's the blast radius when we change X? Could the interface narrow that?"</td></tr>
+      </tbody>
+    </table>
+
+    <p>Ask questions, do not prescribe. The author usually already senses something is off; your question gives them the framework to articulate and fix it.</p>
+
+    <hr>
+
+    <h2>8. How to Not Forget (Spaced Retention)</h2>
+
+    <p>You will read this book, feel enlightened, and forget 70% of it within three months if you do not practice. The good news: LLD rewards small, daily practice far more than cram sessions. Here are the habits that compound.</p>
+
+    <h3>8.1 Re-read your own old code</h3>
+
+    <p>Every six months, open a file you wrote a year ago. If you feel no cringe, you have not grown. Growth <em>is</em> the cringe. Write down what you would do differently now — that note is more educational than any blog post.</p>
+
+    <h3>8.2 Read open-source PRs</h3>
+
+    <p>Pick one mature project (Django, Rails, Flask, Spring, React). Once a week, open a merged non-trivial PR and read the review comments. You will see real senior engineers negotiating real design trade-offs. This is the apprenticeship the internet accidentally gave you for free.</p>
+
+    <h3>8.3 One small refactor per week</h3>
+
+    <p>Do not batch refactors into "refactoring sprints." Refactor one method per week, alongside a feature. Micro-doses compound; the codebase improves without anyone noticing, and your reflexes sharpen.</p>
+
+    <h3>8.4 Keep a "patterns I used this quarter" journal</h3>
+
+    <p>At quarter's end, write down every pattern you consciously applied and why. Not for a performance review — for you. Reading it back a year later reveals your evolution. You will notice you used Strategy a lot in year 1, then stopped reaching for it consciously in year 3 because it became reflex.</p>
+
+    <h3>8.5 Teach one pattern to a junior</h3>
+
+    <p>The Feynman technique, applied to LLD. Pick a pattern, explain it to a less-experienced teammate using code from your actual codebase. You will discover gaps in your understanding in the first five minutes.</p>
+
+    <h3>8.6 Read one postmortem per week</h3>
+
+    <p>Public postmortems from Google, Stripe, Cloudflare, GitHub, AWS. Most production incidents are LLD failures in disguise: tight coupling that let a small bug cascade, a missing circuit breaker, a hardcoded timeout, a retry storm from a poorly-isolated component. Read them like mystery novels. The "bug" is the surface; the "why" is architecture.</p>
+
+    <h3>8.7 Spaced repetition for the principles, not the code</h3>
+
+    <p>If you use Anki or a flashcard tool, put the four principles and three smells in it. Do <em>not</em> put pattern implementations in it. The goal is recall of the judgment layer, not of UML.</p>
+
+    <hr>
+
+    <h2>9. The Irreducible Core — What You Can't Forget</h2>
+
+    <p>If the building burned down and you lost every book and every note, this is the one page that would let you rebuild everything. It is small on purpose.</p>
+
+    <div class="callout success">
+      <h3 style="margin-top:0">The Three Laws</h3>
+      <ol>
+        <li><strong>Change together → keep together</strong> (cohesion). Code that changes for the same reason belongs in the same module.</li>
+        <li><strong>Change separately → keep separate</strong> (decoupling). Code that changes for different reasons belongs in different modules.</li>
+        <li><strong>Depend on abstractions, not concretions</strong> (DI). Your business logic should not know what database or HTTP client it uses.</li>
+      </ol>
+
+      <h3>The Three Smells</h3>
+      <ol>
+        <li><strong>God class</strong> — one class knows everything.</li>
+        <li><strong>Shotgun surgery</strong> — one change hits many files.</li>
+        <li><strong>Rigid class</strong> — cannot extend without modifying.</li>
+      </ol>
+
+      <h3>The Three Questions Before Writing Code</h3>
+      <ol>
+        <li><strong>What changes?</strong> → put behind an interface.</li>
+        <li><strong>What doesn't change?</strong> → keep concrete and simple.</li>
+        <li><strong>What is the next likely change?</strong> → prepare <em>only</em> that seam.</li>
+      </ol>
+
+      <h3>The Three Tests of Good Design</h3>
+      <ol>
+        <li>Can I test one piece without the others?</li>
+        <li>Can I add a new case without editing existing code?</li>
+        <li>Can a new teammate understand one file in 5 minutes?</li>
+      </ol>
+    </div>
+
+    <p>Print this. Pin it. Every design decision you make for the rest of your career can be stress-tested against these twelve lines.</p>
+
+    <hr>
+
+    <h2>10. Real-World Application Tour</h2>
+
+    <p>Five scenarios you will actually face. Each shows: the before code, the specific pain it causes, the refactor with its pattern named, and the after code. These are deliberately written in the style of real production Python — not textbook snippets.</p>
+
+    <h3>10.1 "Add Facebook login to our app"</h3>
+
+    <p><strong>Before:</strong></p>
+
+<pre><code># auth/login.py
+def login_with_google(token):
+    resp = requests.get(f"https://oauth2.googleapis.com/tokeninfo?id_token={token}")
+    data = resp.json()
+    if data.get("aud") != GOOGLE_CLIENT_ID:
+        raise AuthError("bad audience")
+    email = data["email"]
+    user = User.query.filter_by(email=email).first()
+    if not user:
+        user = User(email=email, provider="google")
+        db.session.add(user)
+        db.session.commit()
+    return issue_session(user)
+</code></pre>
+
+    <p><strong>Pain.</strong> Adding Facebook means a sibling function <code>login_with_facebook()</code> that duplicates 80% of this. Adding Apple Sign-In duplicates it again. Each provider grows its own quirks, and the user-creation logic ends up pasted in three places.</p>
+
+    <p><strong>Refactor — Strategy + Adapter.</strong> Each provider becomes an OAuth adapter; common flow lives in one place.</p>
+
+<pre><code># auth/oauth.py
+class OAuthProvider(Protocol):
+    def verify_token(self, token: str) -&gt; OAuthIdentity: ...
+
+class GoogleProvider:
+    def verify_token(self, token):
+        resp = requests.get(f"https://oauth2.googleapis.com/tokeninfo?id_token={token}")
+        data = resp.json()
+        if data.get("aud") != GOOGLE_CLIENT_ID:
+            raise AuthError("bad audience")
+        return OAuthIdentity(email=data["email"], provider="google")
+
+class FacebookProvider:
+    def verify_token(self, token):
+        resp = requests.get(f"https://graph.facebook.com/me?access_token={token}&amp;fields=email")
+        data = resp.json()
+        return OAuthIdentity(email=data["email"], provider="facebook")
+
+# auth/login.py
+def login_with_oauth(provider: OAuthProvider, token: str):
+    identity = provider.verify_token(token)
+    user = User.query.filter_by(email=identity.email).first()
+    if not user:
+        user = User(email=identity.email, provider=identity.provider)
+        db.session.add(user)
+        db.session.commit()
+    return issue_session(user)
+</code></pre>
+
+    <p>Adding Apple Sign-In is now one new file. User-creation logic exists exactly once.</p>
+
+    <h3>10.2 "Our API is too slow, add caching"</h3>
+
+    <p><strong>Before:</strong> a well-meaning engineer adds cache reads/writes directly in the service.</p>
+
+<pre><code>class ProductService:
+    def get_product(self, product_id):
+        cached = redis.get(f"product:{product_id}")
+        if cached:
+            return json.loads(cached)
+        product = db.query(Product).get(product_id)
+        redis.setex(f"product:{product_id}", 300, json.dumps(product.to_dict()))
+        return product.to_dict()
+</code></pre>
+
+    <p><strong>Pain.</strong> Every service method now has ten lines of cache plumbing around two lines of business logic. Invalidation logic leaks everywhere. Tests require a Redis instance or a mock of it. When you want to add metrics on cache hit rate, you touch twelve files.</p>
+
+    <p><strong>Refactor — Decorator.</strong> Caching wraps the service; the service remains innocent.</p>
+
+<pre><code>class ProductService:
+    def get_product(self, product_id):
+        return db.query(Product).get(product_id).to_dict()
+
+class CachingProductService:
+    def __init__(self, inner: ProductService, cache, ttl=300):
+        self.inner = inner
+        self.cache = cache
+        self.ttl = ttl
+    def get_product(self, product_id):
+        key = f"product:{product_id}"
+        hit = self.cache.get(key)
+        if hit:
+            return json.loads(hit)
+        result = self.inner.get_product(product_id)
+        self.cache.setex(key, self.ttl, json.dumps(result))
+        return result
+
+# wiring at startup:
+service = CachingProductService(ProductService(), redis_client)
+</code></pre>
+
+    <p>Business logic is testable without Redis. Metrics, stampede protection, tiered caches — all become decorators you stack. Caching can be turned off by not wrapping.</p>
+
+    <h3>10.3 "We need to migrate from SQS to Kafka"</h3>
+
+    <p><strong>Before:</strong></p>
+
+<pre><code># order_service.py
+import boto3
+sqs = boto3.client("sqs")
+
+def place_order(cart):
+    order = Order.create(cart)
+    sqs.send_message(QueueUrl=ORDER_QUEUE_URL,
+                     MessageBody=json.dumps({"order_id": order.id}))
+    return order
+</code></pre>
+
+    <p><strong>Pain.</strong> Forty files import <code>boto3</code>. Migrating to Kafka means touching all of them. Worse, testing order placement requires mocking AWS.</p>
+
+    <p><strong>Refactor — Port and Adapter (aka Repository for messaging).</strong></p>
+
+<pre><code># messaging/bus.py
+class MessageBus(Protocol):
+    def publish(self, topic: str, payload: dict) -&gt; None: ...
+
+class SQSBus:
+    def __init__(self, client, url_for_topic: dict):
+        self.client = client
+        self.urls = url_for_topic
+    def publish(self, topic, payload):
+        self.client.send_message(QueueUrl=self.urls[topic], MessageBody=json.dumps(payload))
+
+class KafkaBus:
+    def __init__(self, producer):
+        self.producer = producer
+    def publish(self, topic, payload):
+        self.producer.send(topic, json.dumps(payload).encode())
+
+# order_service.py
+class OrderService:
+    def __init__(self, bus: MessageBus):
+        self.bus = bus
+    def place_order(self, cart):
+        order = Order.create(cart)
+        self.bus.publish("orders.placed", {"order_id": order.id})
+        return order
+</code></pre>
+
+    <p>Migrating to Kafka is <em>one line</em> in <code>main.py</code>. Tests use an <code>InMemoryBus</code>. No change in forty files.</p>
+
+    <h3>10.4 "Our logs are unreadable"</h3>
+
+    <p><strong>Before:</strong> logs are free-form <code>print</code>s and raw <code>logger.info()</code> calls scattered across services, some with request IDs, some without, some JSON, some plain.</p>
+
+<pre><code>logger.info(f"User {user_id} placed order {order.id} total {order.total}")
+print("checkout: cart size", len(cart.items))
+logger.info(json.dumps({"event": "payment_ok", "order": order.id}))
+</code></pre>
+
+    <p><strong>Pain.</strong> On-call engineers cannot parse logs. Correlation across services is impossible because request IDs are inconsistent. Every developer invents their own shape.</p>
+
+    <p><strong>Refactor — Strategy for formatters + Decorator for enrichment.</strong></p>
+
+<pre><code># logging/formatters.py
+class LogFormatter(Protocol):
+    def format(self, record: dict) -&gt; str: ...
+
+class JsonFormatter:
+    def format(self, record): return json.dumps(record)
+
+class PlainFormatter:
+    def format(self, record):
+        return f"[{record['level']}] {record['event']} {record.get('meta', '')}"
+
+# logging/enrichers.py
+class RequestContextEnricher:
+    def __init__(self, inner): self.inner = inner
+    def log(self, event, **fields):
+        fields["request_id"] = current_request_id()
+        fields["user_id"] = current_user_id()
+        self.inner.log(event, **fields)
+
+# usage
+log = RequestContextEnricher(StructuredLogger(JsonFormatter()))
+log.log("order_placed", order_id=order.id, total=order.total)
+</code></pre>
+
+    <p>Consistency becomes automatic. Switching between human-readable dev logs and JSON production logs is a one-line change at startup.</p>
+
+    <h3>10.5 "Every developer writes their own retry logic"</h3>
+
+    <p><strong>Before:</strong> three services, three retry implementations, each subtly wrong.</p>
+
+<pre><code># Service A
+for i in range(3):
+    try: return call()
+    except: time.sleep(1)
+raise
+
+# Service B
+try: return call()
+except:
+    try: return call()
+    except: return call()
+
+# Service C — the "clever" one
+while True:
+    try: return call()
+    except: pass  # forever!
+</code></pre>
+
+    <p><strong>Pain.</strong> Inconsistent behaviour. Service C once retried through a 6-hour outage and masked the real problem. No central place to add jitter, exponential backoff, or circuit breaking.</p>
+
+    <p><strong>Refactor — Decorator packaged as a shared utility.</strong></p>
+
+<pre><code># common/retry.py
+def with_retry(attempts=3, backoff=0.5, jitter=0.2, on=(TransientError,)):
+    def deco(fn):
+        @functools.wraps(fn)
+        def wrapped(*args, **kwargs):
+            for i in range(attempts):
+                try:
+                    return fn(*args, **kwargs)
+                except on as e:
+                    if i == attempts - 1:
+                        raise
+                    sleep_for = backoff * (2 ** i) + random.uniform(0, jitter)
+                    time.sleep(sleep_for)
+        return wrapped
+    return deco
+
+# usage everywhere
+@with_retry(attempts=5, on=(TransientError, TimeoutError))
+def fetch_inventory(product_id): ...
+</code></pre>
+
+    <p>Upgrade the retry policy once, propagate everywhere. Add a circuit breaker later as <em>another</em> decorator. DRY paid in full.</p>
+
+    <hr>
+
+    <h2>Final Callout — The Honest Truth About Memorization</h2>
+
+    <div class="callout success">
+      <p>You will forget the syntactic details of most patterns. You will forget whether a Visitor uses double dispatch and whether a Flyweight stores intrinsic or extrinsic state and which interface the Bridge bridges. That is fine. Those details are a <em>web search away</em>, forever.</p>
+      <p>What you will <em>not</em> forget — what will become as automatic as breathing after a few years of honest practice — is a <strong>gut feeling</strong>. You will open a file and your stomach will tighten because one class imports too many things. You will see a constructor with nine arguments and feel tired before reading the body. You will spot a <code>TODO</code> from 2019 next to an <code>if provider == "stripe"</code> branch and know, in a single glance, the shape of the refactor.</p>
+      <p>That gut feeling is the real skill. Patterns are just labels we put on things that reduce the hurt. Principles are the physics of why the hurt exists in the first place. Learn the physics; the vocabulary follows.</p>
+      <p>You do not graduate from LLD. You just get quieter about it — and your codebase gets easier for everyone who comes after you. That is the whole point.</p>
+    </div>
+
+    <div class="chapter-nav">
+      <a href="08-real-code.html"><div class="label">← Previous</div><div class="title">Chapter 8: Real Company Code</div></a>
+      <a class="next" href="../hld/index.html"><div class="label">Next →</div><div class="title">Book II: HLD</div></a>
+    </div>
+  </main>
+</div>
+<script src="../assets/js/nav.js"></script>
+</body>
+</html>

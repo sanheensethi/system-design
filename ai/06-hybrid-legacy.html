@@ -1,0 +1,582 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Hybrid &amp; Legacy Integration — Book III · AI System Design</title>
+<link rel="stylesheet" href="../assets/css/style.css">
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">System Design Books</div>
+    <div class="brand-sub">by Sanheen · Progressive Learning</div>
+    <div class="nav-section">
+      <h3>Home</h3>
+      <a href="../index.html">Overview</a>
+    </div>
+    <div class="nav-section">
+      <h3>Book I — Low Level Design</h3>
+      <a href="../lld/index.html">LLD Index</a>
+    </div>
+    <div class="nav-section">
+      <h3>Book II — High Level Design</h3>
+      <a href="../hld/index.html">HLD Index</a>
+    </div>
+    <div class="nav-section">
+      <h3>Book III — AI System Design</h3>
+      <a href="index.html">AI Index</a>
+      <a href="01-foundations.html">1. AI Foundations</a>
+      <a href="02-building-blocks.html">2. AI Building Blocks</a>
+      <a href="03-rag.html">3. RAG Systems</a>
+      <a href="04-llm-serving.html">4. LLM Serving</a>
+      <a href="05-agents.html">5. Agent Architectures</a>
+      <a href="06-hybrid-legacy.html">6. Hybrid &amp; Legacy</a>
+      <a href="07-war-room.html">7. AI War Room</a>
+      <a href="08-real-architectures.html">8. Real AI Architectures</a>
+    </div>
+  </aside>
+  <main class="main">
+    <div class="breadcrumb"><a href="../index.html">Home</a> / <a href="index.html">Book III · AI</a> / Chapter 6</div>
+    <h1>Chapter 6: Hybrid &amp; Legacy Integration</h1>
+
+    <p class="lead">Nobody gets to build AI on a blank screen. Your company has a 10-year-old Rails monolith, an Oracle database you're afraid of, three SOAP endpoints, and a compliance team. The job is not "build an AI product." The job is "make the thing you already have smarter without breaking it." This chapter is the playbook.</p>
+
+    <div class="callout callout-warn">
+      <strong>MIT NANDA study, 2025:</strong> roughly <strong>95% of enterprise GenAI pilots produced no measurable P&amp;L impact</strong>. The failure mode is almost never model capability. It is integration, governance, and operations — the exact set of problems this chapter is about.
+    </div>
+
+    <h2>1. Why integration is the hard problem</h2>
+
+    <p>Model quality has stopped being the bottleneck. By 2026 a mid-tier model is good enough for the vast majority of enterprise use cases. The bottleneck is everything around it: getting fresh data in, getting outputs into systems of record, handling the 5% of cases where the model is confidently wrong, proving compliance, and doing all of this without a 6-month rewrite of the monolith.</p>
+
+    <table>
+      <thead><tr><th>Sounds like an AI problem</th><th>Actually is</th></tr></thead>
+      <tbody>
+        <tr><td>"The answers aren't accurate"</td><td>Stale RAG index; CDC pipeline broken</td></tr>
+        <tr><td>"It's hallucinating customer data"</td><td>No schema validation on tool outputs</td></tr>
+        <tr><td>"Users don't trust it"</td><td>No audit trail; no way to explain a decision</td></tr>
+        <tr><td>"It's too expensive"</td><td>No per-tenant budget; no model routing</td></tr>
+        <tr><td>"Legal said no"</td><td>No PII redaction at the boundary; no data-residency story</td></tr>
+        <tr><td>"It works in demo, fails in prod"</td><td>Legacy quirks the LLM never saw at eval time</td></tr>
+      </tbody>
+    </table>
+
+    <h2>2. The core challenge: probabilistic meets deterministic</h2>
+
+    <p>Legacy systems were designed for determinism. A SQL query returns the same rows given the same inputs. A REST endpoint validates against a schema. An accounting ledger either balances or it doesn't.</p>
+
+    <p>LLMs are <strong>probabilistic</strong>. Same input can produce different output. Sometimes the output looks structurally correct but is semantically nonsense — a valid JSON object with a hallucinated customer ID. This is not a bug you can patch with a prompt. It is the nature of the tool.</p>
+
+    <div class="diagram"><pre>
+┌──────────────────┐         ┌──────────────────┐
+│   AI WORLD       │         │  LEGACY WORLD    │
+│                  │         │                  │
+│ • Probabilistic  │         │ • Deterministic  │
+│ • Natural lang   │   vs    │ • Rigid schemas  │
+│ • Rich context   │         │ • Narrow APIs    │
+│ • Best-effort    │         │ • All-or-nothing │
+│ • Ever-changing  │         │ • Stable for     │
+│                  │         │     decades      │
+└────────┬─────────┘         └────────┬─────────┘
+         │                            │
+         │     ACL (validate, map,    │
+         └──── sanitize, bound) ──────┘
+</pre></div>
+
+    <p>Every bridge you build between these two worlds needs to validate, bound, and audit. Never trust the model's output to land directly in a system of record.</p>
+
+    <h2>3. Strangler Fig pattern for AI</h2>
+
+    <p>The Strangler Fig — named by Martin Fowler after the tree — is the canonical pattern for replacing a legacy system piece by piece. You put a routing layer (the "facade") in front of the monolith. New requests that benefit from AI go to a new service. Everything else passes through to the legacy system unchanged. Over time, the new service strangles the old one.</p>
+
+    <div class="diagram"><pre>
+BEFORE                              DURING                               AFTER
+
+  user                                user                                 user
+   │                                    │                                    │
+   ▼                                    ▼                                    ▼
+┌─────────────┐                ┌─────────────────┐                ┌──────────────────┐
+│  Monolith   │                │  Routing facade │                │  AI-native svc   │
+│  (all logic)│                └───┬─────────┬───┘                └──────────────────┘
+└─────────────┘                    │         │
+                                   ▼         ▼
+                         ┌─────────────┐ ┌─────────────┐
+                         │  Monolith   │ │  AI service │
+                         └─────────────┘ └─────────────┘
+</pre></div>
+
+    <p><strong>Why it works for AI.</strong> AI launches are risky. The Strangler Fig gives you <em>reversibility</em>: if the AI route misbehaves, you flip the routing rule and traffic goes back to the legacy path, instantly. No deploy, no rollback data migration.</p>
+
+    <h3>Routing rules that matter</h3>
+    <ul>
+      <li><strong>Tenant-scoped.</strong> Route enterprise tenant X to legacy, tenant Y to AI.</li>
+      <li><strong>Endpoint-scoped.</strong> Only <code>/summarize</code> is AI; the rest go to the monolith.</li>
+      <li><strong>User-scoped.</strong> Internal beta users get AI; everyone else stays on legacy.</li>
+      <li><strong>Traffic-scoped.</strong> 1% of requests get AI, 99% go to legacy (and you compare).</li>
+    </ul>
+
+    <h2>4. Anti-Corruption Layer (ACL)</h2>
+
+    <p>Eric Evans' ACL is the single most useful pattern when connecting AI to legacy. It is a translation layer that keeps each side's model clean. The AI world does not leak into the legacy schema; legacy cruft does not pollute the AI prompts.</p>
+
+    <div class="diagram"><pre>
+┌────────────────┐   rich context,   ┌─────────────────┐   strict schema,  ┌──────────────────┐
+│   AI service   │──────NL intent───▶│      ACL        │──── typed DTO────▶│   Legacy API     │
+│                │                   │                 │                   │                  │
+│   LLM output   │◀────summary text──│  validate       │◀─── legacy JSON ──│                  │
+│                │                   │  sanitize       │                   │                  │
+│                │                   │  redact PII     │                   │                  │
+│                │                   │  business rules │                   │                  │
+└────────────────┘                   └─────────────────┘                   └──────────────────┘
+</pre></div>
+
+    <h3>Every ACL enforces, at minimum</h3>
+    <ol>
+      <li><strong>Schema validation.</strong> LLM output parsed into a strict Pydantic / JSON-Schema / protobuf type. Parse-failure is a first-class error, not a warning.</li>
+      <li><strong>Business rule checks.</strong> Refund amount ≤ order amount. Discount ≤ 30%. Date not in the past. Enum values in the allowed set. <em>Belt and suspenders:</em> even if the prompt told the model the rule, check it again here.</li>
+      <li><strong>Sanity bounds.</strong> If the model suggests a quantity of 10,000 when the average order is 2, reject and escalate.</li>
+      <li><strong>PII redaction.</strong> Strip/mask before the call goes out; re-hydrate after.</li>
+      <li><strong>Audit record.</strong> Every call in and out is logged with user, input, output, verdict.</li>
+    </ol>
+
+    <pre><code>class RefundDecision(BaseModel):
+    order_id: str = Field(pattern=r"^ORD-\d{8}$")
+    amount_cents: int = Field(ge=0, le=50_000_00)   # never over $50k
+    reason_code: Literal["defective","wrong_item","not_received","other"]
+    notes: str = Field(max_length=500)
+
+def acl_issue_refund(llm_output: str, order: Order, user: User):
+    decision = RefundDecision.model_validate_json(llm_output)
+    if decision.order_id != order.id:
+        raise ACLViolation("order id mismatch")
+    if decision.amount_cents &gt; order.total_cents:
+        raise ACLViolation("refund exceeds order total")
+    if decision.amount_cents &gt; user.refund_authority_cents:
+        return hitl_queue.enqueue(decision, user)
+    audit.log("refund_decision", user, decision)
+    return legacy_billing_api.refund(**decision.model_dump())</code></pre>
+
+    <h2>5. Adapter patterns for LLM integration</h2>
+
+    <h3>5a. Sidecar inference</h3>
+    <div class="diagram"><pre>
+            ┌────────────────┐
+ request ──▶│ Legacy service │──▶ response
+            └────────┬───────┘
+                     │ (events / copy of output)
+                     ▼
+            ┌────────────────┐
+            │  AI sidecar    │──▶ enriched output
+            └────────────────┘    (additional fields,
+                                   same response shape)
+</pre></div>
+    <p>Legacy runs untouched. AI reads the same input/output and adds value: summaries, classifications, smart suggestions. If the AI fails, the base response still works. Lowest risk, first thing to try.</p>
+
+    <h3>5b. Async enrichment queue</h3>
+    <div class="diagram"><pre>
+ legacy DB ── CDC ──▶ Kafka ──▶ AI worker ──▶ enrichment table
+                                                   │
+                                                   ▼
+                                            (joined back at read time)
+</pre></div>
+    <p>Events flow out of the legacy system (change data capture). AI workers process at their own pace, write enrichments back to a separate table. Handles bursts gracefully; decouples AI latency from request path.</p>
+
+    <h3>5c. LLM-as-middleware</h3>
+    <div class="diagram"><pre>
+ user ──▶ "I want to cancel my add-on from last month"
+             │
+             ▼
+     ┌─────────────────┐
+     │  LLM translator │  → extracts { action:cancel, resource:addon,
+     └───────┬─────────┘                 period:2026-03 }
+             ▼
+     ┌─────────────────┐
+     │  Legacy API     │  (needs structured args, always did)
+     └─────────────────┘
+</pre></div>
+    <p>The LLM translates fuzzy natural-language intent into the rigid arguments the legacy API already accepts. You don't touch the legacy API; you put a smart translator in front of it. This is the single highest-ROI pattern for adding AI to an existing enterprise app.</p>
+
+    <h3>5d. Shadow mode</h3>
+    <div class="diagram"><pre>
+             ┌─────────────────┐   real response  ┌──────┐
+ request ──▶│ Legacy service  │────────────────▶│ user │
+             └────────┬────────┘                  └──────┘
+                      │ (also)
+                      ▼
+             ┌─────────────────┐   shadow response
+             │  AI service     │────────▶ log only, never shown
+             └─────────────────┘
+</pre></div>
+    <p>Run the AI in parallel with the real system. Log its outputs. Compare offline. Use this to measure quality <em>before</em> you put AI in the hot path. Critical for regulated domains (healthcare, finance) where the first real user-facing rollout has to have proof behind it.</p>
+
+    <h2>6. Feature-flag driven rollout</h2>
+
+    <p>Never deploy AI as a big-bang switch. Rollout is phased, measured, and auto-reversible.</p>
+
+    <div class="diagram"><pre>
+  1%          10%          50%          100%
+   │           │            │             │
+   ▼           ▼            ▼             ▼
+┌─────┐    ┌──────┐    ┌────────┐    ┌────────┐
+│shadow│──▶│canary│──▶│ broad  │──▶│  full  │
+└─────┘    └──────┘    └────────┘    └────────┘
+   │          │            │             │
+   └── auto-rollback on regression ──────┘
+
+  Regression signals:
+   • p50/p95 latency up &gt; X%
+   • Cost per request up &gt; X%
+   • Quality score down &gt; X% (eval set)
+   • User feedback (thumbs-down rate)
+   • Support ticket volume
+   • Error rate
+</pre></div>
+
+    <p>Use any flagging system that supports percentage rollouts and tenant targeting: LaunchDarkly, Statsig, Unleash, OpenFeature. Wire the flag to a kill-switch so a human can freeze AI traffic in one click during an incident.</p>
+
+    <h2>7. A/B testing AI features (without ground truth)</h2>
+
+    <p>Unlike button-color tests, AI features often have no known-correct answer. You measure indirectly.</p>
+
+    <table>
+      <thead><tr><th>Metric</th><th>Signal</th><th>Caveat</th></tr></thead>
+      <tbody>
+        <tr><td>Task completion rate</td><td>Did the user finish the flow?</td><td>Good proxy; slow to detect regressions</td></tr>
+        <tr><td>Time-to-completion</td><td>Faster = better UX</td><td>Faster can also mean users gave up</td></tr>
+        <tr><td>Edit distance on suggestions</td><td>How much did the user change the AI output?</td><td>Low distance = trust or laziness</td></tr>
+        <tr><td>Thumbs up / thumbs down</td><td>Direct</td><td>&lt; 1% of users click; biased sample</td></tr>
+        <tr><td>Retention</td><td>Do users come back?</td><td>Takes weeks</td></tr>
+        <tr><td>Offline eval score</td><td>Held-out golden set</td><td>Can drift from real traffic</td></tr>
+        <tr><td>LLM-as-judge score</td><td>Second model grades output</td><td>Correlated failures; judge drift</td></tr>
+      </tbody>
+    </table>
+
+    <p>Build a composite score. Block rollout if <em>any</em> primary metric regresses beyond threshold.</p>
+
+    <h2>8. Data pipeline integration</h2>
+
+    <p>The #1 reason RAG and AI features go stale is that nobody owns the pipeline that keeps data fresh. Your AI system's quality is a function of your data platform's freshness.</p>
+
+    <div class="diagram"><pre>
+┌────────────┐   binlog/WAL   ┌──────────┐  transform  ┌──────────┐  embed  ┌──────────────┐
+│ Legacy DB  │───── CDC ─────▶│  Kafka   │────────────▶│  Worker  │────────▶│ Vector store │
+│ (Postgres, │   (Debezium)   └──────────┘             │ (chunker)│         └──────────────┘
+│  Oracle,   │                                         └──────────┘                │
+│  SQL Srv)  │                                                                     ▼
+└────────────┘                                                             RAG retrieval
+</pre></div>
+
+    <p>Key details:</p>
+    <ul>
+      <li><strong>CDC, not polling.</strong> Debezium / AWS DMS / Airbyte CDC — you want to see every update, not a daily dump.</li>
+      <li><strong>Idempotent upserts.</strong> Vector store writes keyed by source row id, so re-processing is safe.</li>
+      <li><strong>Delete propagation.</strong> When legacy deletes a row, your vector store must drop the embeddings. This is the step most teams forget; it causes "the AI keeps referring to customers we deleted" bugs.</li>
+      <li><strong>Backfill path.</strong> You will need to re-embed everything at least once (model change, chunking change). Plan for it on day one.</li>
+      <li><strong>Freshness SLO.</strong> "Edits in legacy are visible to AI within 5 minutes." Measured, alerted.</li>
+    </ul>
+
+    <h2>9. Legacy monolith + AI service pattern</h2>
+
+    <p>The cleanest shape for adding AI to a monolith is to stand up a separate AI service and call it from the monolith over HTTP (or a message bus). Not because microservices are better — because the AI service has different runtime characteristics (GPUs, different scaling, different deploy cadence, different language) and coupling them into the monolith makes both worse.</p>
+
+    <div class="diagram"><pre>
+┌────────────────────────────┐          ┌────────────────────────────┐
+│      LEGACY MONOLITH       │          │      AI SERVICE            │
+│                            │   HTTP   │                            │
+│  OrderService ──── calls ──┼─────────▶│  /summarize                │
+│  CatalogService ── calls ──┼─────────▶│  /classify                 │
+│  SupportService ── calls ──┼─────────▶│  /extract                  │
+│                            │          │                            │
+│  (circuit breaker,         │          │  (GPU pool, LLM providers, │
+│   timeout, fallback to     │          │   RAG, vector DB)          │
+│   heuristic on failure)    │          │                            │
+└────────────────────────────┘          └────────────────────────────┘
+</pre></div>
+
+    <h3>Non-negotiables at the boundary</h3>
+    <ul>
+      <li><strong>Timeout</strong> shorter than the monolith's request timeout. If the LLM provider is slow, the monolith must not die with it.</li>
+      <li><strong>Circuit breaker.</strong> When the AI service or upstream provider errors exceed a threshold, open the breaker. Monolith falls back to non-AI path.</li>
+      <li><strong>Fallback.</strong> Every AI call has a non-AI path. <em>"AI-enhanced search"</em> falls back to Elasticsearch. <em>"AI summary"</em> falls back to the first 200 characters.</li>
+      <li><strong>Retry with jitter</strong> only on idempotent calls.</li>
+      <li><strong>Bulkhead.</strong> AI calls run on a separate thread pool / connection pool so they can't starve the monolith's request handlers.</li>
+    </ul>
+
+    <h2>10. Reverse integration — AI calling legacy</h2>
+
+    <p>The inverse of the previous pattern: your agent needs to call a 15-year-old SOAP service or a REST API that returns XML. Do not teach the LLM about XML. Wrap the legacy API in an MCP server or a clean OpenAPI-described tool.</p>
+
+    <div class="diagram"><pre>
+           agent tool call (JSON)
+                  │
+                  ▼
+       ┌──────────────────────┐
+       │  Tool wrapper / MCP  │   ← typed, idempotent, rate-limited
+       └──────────┬───────────┘
+                  │ SOAP / XML / ancient REST
+                  ▼
+       ┌──────────────────────┐
+       │   Legacy service     │
+       └──────────────────────┘
+</pre></div>
+
+    <ul>
+      <li><strong>Rate limiting.</strong> Legacy systems have quotas the LLM does not know about. Enforce them in the wrapper, not the prompt.</li>
+      <li><strong>Idempotency.</strong> Old services often are not idempotent. The wrapper handles dedup with request keys.</li>
+      <li><strong>Normalize errors.</strong> SOAP faults become structured JSON errors the model can act on.</li>
+      <li><strong>Cache aggressive reads.</strong> If the agent will call <code>getCustomerProfile</code> ten times per session, cache it per session.</li>
+    </ul>
+
+    <h2>11. Auth and identity integration</h2>
+
+    <p>Your AI features run in the user's security context, not a service account. A customer-support agent should only see the caller's own data; a sales AI should respect territory ACLs; a healthcare AI must honor record-level consent.</p>
+
+    <div class="diagram"><pre>
+ user ──SSO──▶ legacy ─── JWT (user id, roles, tenant) ────▶ AI service
+                                                              │
+                                                              ▼
+                                               propagate JWT to every
+                                               downstream tool call; tool
+                                               enforces ACL the same way
+                                               the legacy API always did
+</pre></div>
+
+    <ul>
+      <li>Never use a shared "AI service account" that has superuser access. The AI will leak other users' data through retrieval.</li>
+      <li>The vector store needs row-level security too. Tag every embedding with tenant/owner; filter at query time.</li>
+      <li>PII handling — classify fields; mask before the LLM call where possible; log access.</li>
+      <li>Data residency — a EU-tenant's data never gets embedded in a US region. The router must know.</li>
+    </ul>
+
+    <h2>12. Database integration patterns</h2>
+
+    <table>
+      <thead><tr><th>Pattern</th><th>Setup</th><th>Best for</th><th>Trade-off</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>Read-only AI view</td>
+          <td>Materialized view or replica with embeddings alongside</td>
+          <td>Search, recommendations</td>
+          <td>Eventual consistency with source</td>
+        </tr>
+        <tr>
+          <td>AI as a column</td>
+          <td>Generated summary/classification stored in main table</td>
+          <td>Lists, cards, ranking</td>
+          <td>Backfills hurt; regenerate on change</td>
+        </tr>
+        <tr>
+          <td>Separate AI DB, synced by events</td>
+          <td>Dedicated store (vector + metadata) updated via CDC</td>
+          <td>Large-scale semantic search</td>
+          <td>Operational overhead of two stores</td>
+        </tr>
+        <tr>
+          <td>In-DB vector extension</td>
+          <td>pgvector / Mongo Atlas Vector / Redis VSS</td>
+          <td>Small to mid scale; one system to operate</td>
+          <td>Scale ceiling; mixes workloads</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div class="callout callout-info">
+      <strong>Default in 2026.</strong> Start with pgvector in your existing Postgres. You probably don't need a dedicated vector DB until your index crosses ~10M vectors or you need cross-tenant strict isolation.
+    </div>
+
+    <h2>13. Compatibility with old APIs</h2>
+
+    <p>A powerful, under-used pattern: <em>keep the legacy API contract; replace the internals with AI.</em></p>
+
+    <div class="diagram"><pre>
+ Client ──▶ POST /v1/categorize_ticket
+              body: { "ticket_text": "..." }
+              ↓
+              returns: { "category": "billing", "confidence": 0.92 }
+
+ Before:  if/else rules + keyword matching
+ After :  LLM classifier behind the SAME endpoint
+</pre></div>
+
+    <p>Clients don't change. Mobile apps don't redeploy. Partners don't renegotiate contracts. You quietly swap the engine. This is how real enterprise AI migrations happen — almost nobody rewrites client code to call a new AI-flavored endpoint.</p>
+
+    <h2>14. Rollback strategies (and why AI rollback is different)</h2>
+
+    <p>Code rollback is solved. AI rollback is not, because AI changes the <em>data</em> it touches. A bad refund cannot be un-refunded by redeploying the old prompt. A wrong classification stored in a customer record stays wrong.</p>
+
+    <table>
+      <thead><tr><th>Change type</th><th>Reversible?</th><th>Strategy</th></tr></thead>
+      <tbody>
+        <tr><td>Prompt change</td><td>Yes</td><td>Version prompts; flip flag</td></tr>
+        <tr><td>Model change</td><td>Yes</td><td>Route to previous model</td></tr>
+        <tr><td>Tool added</td><td>Yes</td><td>Remove from allowlist</td></tr>
+        <tr><td>Writes to system of record</td><td>Sometimes</td><td>Shadow write first; audit table; compensating transactions</td></tr>
+        <tr><td>Emails / webhooks / money movement</td><td>No</td><td>HITL gate; idempotency; you can't un-send</td></tr>
+      </tbody>
+    </table>
+
+    <h3>Key techniques</h3>
+    <ul>
+      <li><strong>Shadow writes.</strong> New path writes to a shadow table for a week before it writes to the real one. Audit diffs humans review.</li>
+      <li><strong>Dual-run comparison.</strong> Old and new paths both compute, store both, compare offline. Cut over only when divergence is below threshold.</li>
+      <li><strong>Compensating transactions.</strong> Every write-side action has a known inverse (refund reversal, record restore from audit log). Design these <em>before</em> you ship.</li>
+      <li><strong>Time-bounded blast radius.</strong> Enable on a narrow segment; watch for a week; expand.</li>
+    </ul>
+
+    <h2>15. Governance and audit</h2>
+
+    <p>Regulated industries (finance, healthcare, insurance, government) cannot ship AI without a defensible paper trail. Even unregulated companies get there the first time a support case escalates to legal.</p>
+
+    <ul>
+      <li><strong>Log every LLM call.</strong> Model, prompt version, input (hashed or redacted if sensitive), output, tokens, cost, user, tenant, trace id.</li>
+      <li><strong>Version every prompt.</strong> Prompts are code. Tag them; diff them; know which version produced which decision.</li>
+      <li><strong>Decision records.</strong> For any AI decision that affected a user, store: inputs, retrieved context, model version, prompt version, output, user-visible explanation.</li>
+      <li><strong>Right to explanation (GDPR Art. 22, EU AI Act).</strong> For automated decisions you must be able to explain, in plain language, why. Canned templates populated from the decision record.</li>
+      <li><strong>Right to erasure.</strong> If a user deletes their account, their data must leave your embeddings too. CDC delete propagation must be tested.</li>
+      <li><strong>Model cards and data sheets.</strong> For every model in production: capabilities, known limitations, training data provenance, evaluation results. Internal, but mandatory when regulators ask.</li>
+      <li><strong>Access logs on vector stores.</strong> Who queried what, when. Treat this like a database.</li>
+    </ul>
+
+    <h2>16. Cost containment</h2>
+
+    <div class="diagram"><pre>
+ request ──▶ API gateway
+              │
+              ├─ per-tenant rate limit (RPS, tokens/min)
+              ├─ per-tenant daily $ budget
+              ├─ per-feature $ budget
+              ▼
+           Model router
+              │
+              ├─ cheap model (Haiku / mini) for easy queries
+              ├─ mid model for typical
+              └─ frontier model for hard ones (opt-in / escalated)
+              ▼
+           Provider
+</pre></div>
+
+    <ul>
+      <li><strong>Per-team and per-tenant budgets.</strong> Hard caps, not just alerts. A runaway loop must die at the gateway, not at the bill.</li>
+      <li><strong>Throttle at the gateway.</strong> Do not trust every caller to respect quotas. The gateway enforces them centrally.</li>
+      <li><strong>Tiered routing.</strong> A simple classifier (or the first small-model call) decides which tier handles the full request. Can cut cost 5–10x with minimal quality loss.</li>
+      <li><strong>Caching.</strong> Prompt-level cache for repeated system prompts; semantic cache for near-duplicate user queries. Save 30–70% on some workloads.</li>
+      <li><strong>Batching.</strong> For non-interactive workloads, batch APIs (OpenAI/Anthropic batch) give ~50% discount with 24h SLA.</li>
+      <li><strong>Kill-switch.</strong> One flag disables all non-essential AI calls globally. You will need it.</li>
+    </ul>
+
+    <h2>17. Worked example: AI in a 10-year-old e-commerce monolith</h2>
+
+    <p><strong>Scenario.</strong> Retailer runs a Ruby on Rails monolith on MySQL, 2M SKUs, 50M customers, ~400 engineers. Leadership wants "AI everywhere" in 12 months. You have a team of 6.</p>
+
+    <h3>Phase 0: Inventory (weeks 1–2)</h3>
+    <ul>
+      <li>List every place AI could plausibly help: search, product descriptions, support tickets, review summarization, fraud review, merchandising, returns triage.</li>
+      <li>Score each on: business impact, data availability, reversibility, regulatory risk.</li>
+      <li>Pick two with highest impact × lowest risk. Defer the rest. <strong>Candidates:</strong> (1) AI-powered product search, (2) support ticket auto-categorization + draft reply.</li>
+    </ul>
+
+    <h3>Phase 1: Non-invasive wins (months 1–2)</h3>
+    <div class="diagram"><pre>
+Monolith ── unchanged ──▶ MySQL
+    │
+    │ new: call out to AI service for /search and /ticket_categorize
+    ▼
+AI service (new) ──▶ vector store (pgvector) ──▶ product embeddings (CDC from MySQL)
+                 ──▶ LLM classifier (cheap model) for tickets
+                 ──▶ Observability (Langfuse) + cost logs
+</pre></div>
+    <ul>
+      <li>Same API contracts as legacy endpoints. Flag-gated 1% rollout. Shadow mode for 2 weeks.</li>
+      <li>ACL around every write (none yet — both features are read-only).</li>
+      <li>KPIs: search click-through rate, ticket first-response time.</li>
+    </ul>
+
+    <h3>Phase 2: Write-side with guardrails (months 3–5)</h3>
+    <ul>
+      <li>Draft reply generation for support: LLM drafts, human agent approves. HITL is the headline feature, not a limitation — sell it to the ops team that way.</li>
+      <li>Refunds under $20 fully automated via an agent with a strict ACL (Section 4 example). Above $20 drafts only.</li>
+      <li>Audit logs wired to compliance's SIEM.</li>
+      <li>Per-team budgets in the gateway; cost dashboard in Grafana.</li>
+    </ul>
+
+    <h3>Phase 3: Strangler expansion (months 6–9)</h3>
+    <ul>
+      <li>Routing facade in front of the monolith for specific endpoints. New AI-native flows live in their own service.</li>
+      <li>CDC pipeline hardened: freshness SLO of 5 min, delete propagation verified with a weekly chaos job.</li>
+      <li>Personalized product descriptions (sidecar pattern) — LLM generates variants, published behind an A/B test.</li>
+    </ul>
+
+    <h3>Phase 4: Agentic features (months 9–12)</h3>
+    <ul>
+      <li>Returns-triage agent that cross-references order, product reviews, customer history, and policy to propose resolution (replace, refund, deny). HITL above $50.</li>
+      <li>Durable execution (Temporal) because returns can span days (waiting for the return shipment).</li>
+      <li>Eval set: 500 golden returns scored monthly. Block prompt changes that regress by &gt; 1pp.</li>
+    </ul>
+
+    <div class="callout callout-info">
+      <strong>What made it work.</strong> Nothing on the list required the monolith to change. Every new capability landed as a sidecar, a flag, or a same-contract endpoint swap. Rollback was always one flag flip away. The monolith team barely noticed.
+    </div>
+
+    <h2>18. Worked example: Migrating from classical ML to LLM</h2>
+
+    <p><strong>Scenario.</strong> An insurance company has a gradient-boosted model that routes incoming claim emails to the right queue. It was accurate (F1 0.87) when it shipped in 2020; concept drift has dropped it to 0.74. The team wants to replace it with an LLM classifier.</p>
+
+    <h3>Step 1: Preserve the eval harness</h3>
+    <p>The classical model already has a golden set and a scoring pipeline. <strong>Do not throw this away.</strong> The eval harness is more valuable than the model. Wire the LLM behind the same interface it scores.</p>
+
+    <div class="diagram"><pre>
+              ┌────────────────────────┐
+              │   Eval harness (2020)  │
+              │   inputs → labels      │
+              └──────┬────────┬────────┘
+                     │        │
+                     ▼        ▼
+              ┌──────────┐ ┌──────────┐
+              │ Old GBDT │ │ New LLM  │
+              └──────────┘ └──────────┘
+                     │        │
+                     └────┬───┘
+                          ▼
+                metrics side-by-side
+</pre></div>
+
+    <h3>Step 2: Parallel run (shadow mode)</h3>
+    <ul>
+      <li>LLM classifier runs on 100% of real traffic but its output is logged, not used.</li>
+      <li>Compare: accuracy on labeled subset, agreement rate with old model, latency, cost per decision.</li>
+      <li>Find systematic disagreements. Review them by hand. They usually reveal either (a) old-model errors the LLM got right, or (b) LLM hallucinations the eval set missed.</li>
+    </ul>
+
+    <h3>Step 3: Expand the eval set</h3>
+    <p>Disagreements between old and new are the most valuable new labels you can add. Human-label them, grow the eval set by 30–50%, re-score both models on the expanded set.</p>
+
+    <h3>Step 4: Gated cut-over</h3>
+    <ul>
+      <li>1% of live traffic served by LLM, human-review sample weekly.</li>
+      <li>10%, 50%, 100% over 4–8 weeks with auto-rollback on F1 regression.</li>
+      <li>Old GBDT stays hot-standby for 90 days. If the LLM provider has an outage, the router falls back to GBDT.</li>
+    </ul>
+
+    <h3>Step 5: Long-term evolution</h3>
+    <p>LLMs drift too — provider updates a model, your numbers move. Run the eval set nightly against whatever is in production. Alarm on regression. The eval harness you inherited from the GBDT era is now the load-bearing piece of your AI ops stack; invest in it.</p>
+
+    <div class="callout callout-warn">
+      <strong>Don't skip the eval harness.</strong> Teams that replaced "old ML" with "new LLM" without a scoring pipeline spent 6–18 months in vibes-based iteration. The ones who kept and expanded their eval harness shipped in weeks.
+    </div>
+
+    <h2>Closing</h2>
+
+    <p>Integration is where AI meets reality. The patterns in this chapter — Strangler Fig, ACL, sidecars, shadow mode, feature flags, CDC pipelines, rollback rails, governance logs — are older than LLMs. They come from two decades of shipping complex software into messy enterprises. AI did not invalidate them. It made them mandatory.</p>
+
+    <p>The teams that ship successful AI inside real companies are not the teams with the flashiest models. They are the teams that treat AI as another subsystem that must be integrated, governed, evaluated, and rolled back — same as everything else.</p>
+
+    <div class="chapter-nav">
+      <a href="05-agents.html"><div class="label">← Previous</div><div class="title">Agent Architectures</div></a>
+      <a class="next" href="07-war-room.html"><div class="label">Next →</div><div class="title">AI War Room</div></a>
+    </div>
+  </main>
+</div>
+<script src="../assets/js/nav.js"></script>
+</body>
+</html>

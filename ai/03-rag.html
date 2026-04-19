@@ -1,0 +1,667 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RAG Systems — Book III · AI System Design</title>
+<link rel="stylesheet" href="../assets/css/style.css">
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">System Design Books</div>
+    <div class="brand-sub">by Sanheen · Progressive Learning</div>
+    <div class="nav-section">
+      <h3>Home</h3>
+      <a href="../index.html">Overview</a>
+    </div>
+    <div class="nav-section">
+      <h3>Book I — Low Level Design</h3>
+      <a href="../lld/index.html">LLD Index</a>
+    </div>
+    <div class="nav-section">
+      <h3>Book II — High Level Design</h3>
+      <a href="../hld/index.html">HLD Index</a>
+    </div>
+    <div class="nav-section">
+      <h3>Book III — AI System Design</h3>
+      <a href="index.html">AI Index</a>
+      <a href="01-foundations.html">1. AI Foundations</a>
+      <a href="02-building-blocks.html">2. AI Building Blocks</a>
+      <a href="03-rag.html">3. RAG Systems</a>
+      <a href="04-llm-serving.html">4. LLM Serving</a>
+      <a href="05-agents.html">5. Agent Architectures</a>
+      <a href="06-hybrid-legacy.html">6. Hybrid & Legacy</a>
+      <a href="07-war-room.html">7. AI War Room</a>
+      <a href="08-real-architectures.html">8. Real AI Architectures</a>
+    </div>
+  </aside>
+  <main class="main">
+    <div class="breadcrumb"><a href="../index.html">Home</a> / <a href="index.html">Book III · AI</a> / Chapter 3</div>
+    <h1>Chapter 3: RAG Systems — Progressive Design</h1>
+
+    <p class="lede">Retrieval-Augmented Generation is the single most deployed LLM pattern in 2026. It sounds trivial — "fetch some docs, stuff them into the prompt, ask the model" — and a weekend hack gets you 60% of the way there. The last 40% is where companies spend millions. This chapter builds a production RAG system over six versions, each fixing concrete problems the previous version had. By v6 you will understand why Anthropic's Contextual Retrieval matters, why reranking beats better embeddings, and when you should not use RAG at all.</p>
+
+    <div class="callout">
+      <strong>Running problem:</strong> A Fortune-500 company wants an internal Q&amp;A assistant over <strong>10 million documents</strong> — engineering wikis, Jira tickets, Slack exports, PDFs, and Google Docs. Employees ask "how does our billing pipeline handle refunds in the EU?" and expect a correct, cited answer in under 3 seconds. Hallucinations must be below 2%. Let's build it.
+    </div>
+
+    <h2>Why RAG exists at all</h2>
+
+    <p>Three hard facts about LLMs drive the entire RAG pattern:</p>
+    <ol>
+      <li><strong>Training data is frozen.</strong> A model trained in Q3 2025 does not know about your company's launch in January 2026.</li>
+      <li><strong>Context windows cost money and attention.</strong> Even with 2M-token windows available in 2026, stuffing 10M docs into context is (a) $$$ per query and (b) demonstrably worse at recall than targeted retrieval. "Lost in the middle" is still real.</li>
+      <li><strong>Fine-tuning does not teach facts well.</strong> Fine-tuning shifts style and format. Teaching new factual knowledge via fine-tuning is unreliable and forgets old facts.</li>
+    </ol>
+
+    <p>RAG solves all three by turning "what does the model know" into "what can the model look up right now". Your index is mutable. Facts can be updated by re-indexing. Citations become possible. Auditability becomes possible. This is why every serious enterprise LLM deployment starts with RAG, not fine-tuning.</p>
+
+    <hr>
+
+    <h2>v1: Naive RAG — the weekend hack</h2>
+
+    <p>The minimum viable RAG. It works. It is also wrong in a dozen subtle ways that will bite you in production.</p>
+
+    <div class="diagram"><pre>
+             +-----------+        +------------+        +--------+
+  ingest --> | chunk 500 | -----> | embed ada  | -----> |Pinecone|
+             +-----------+        +------------+        +--------+
+                                                             |
+  query --> embed --> top-5 vectors --> stuff into prompt -->| LLM
+                                                             |
+                                                          answer
+</pre></div>
+
+    <h3>Code (v1)</h3>
+
+    <pre><code>import openai, pinecone, tiktoken
+
+enc = tiktoken.get_encoding("cl100k_base")
+index = pinecone.Index("kb-v1")
+
+# ---- INGEST ----
+def chunk_fixed(text, size=500):
+    toks = enc.encode(text)
+    return [enc.decode(toks[i:i+size]) for i in range(0, len(toks), size)]
+
+def ingest(doc_id, text):
+    for i, chunk in enumerate(chunk_fixed(text)):
+        emb = openai.embeddings.create(
+            model="text-embedding-3-small", input=chunk
+        ).data[0].embedding
+        index.upsert([(f"{doc_id}:{i}", emb, {"text": chunk})])
+
+# ---- QUERY ----
+def answer(q):
+    qemb = openai.embeddings.create(
+        model="text-embedding-3-small", input=q
+    ).data[0].embedding
+    hits = index.query(vector=qemb, top_k=5, include_metadata=True)
+    ctx = "\n\n".join(h["metadata"]["text"] for h in hits["matches"])
+    prompt = f"Context:\n{ctx}\n\nQuestion: {q}\nAnswer:"
+    return openai.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role":"user","content":prompt}]
+    ).choices[0].message.content
+</code></pre>
+
+    <h3>Capacity math (v1)</h3>
+    <table>
+      <tr><th>Metric</th><th>Value</th></tr>
+      <tr><td>Docs</td><td>10M, avg 4K tokens each = 40B tokens</td></tr>
+      <tr><td>Chunks</td><td>40B / 500 = 80M chunks</td></tr>
+      <tr><td>Embedding cost (ingest)</td><td>40B tokens × $0.02/1M = $800</td></tr>
+      <tr><td>Vector storage</td><td>80M × 1536 dims × 4 bytes = 492 GB</td></tr>
+      <tr><td>Pinecone serverless</td><td>~$70/month/100M vectors + query cost</td></tr>
+      <tr><td>Per-query cost</td><td>$0.00001 embed + $0.0004 search + $0.003 LLM = ~$0.003</td></tr>
+    </table>
+
+    <h3>What breaks (v1)</h3>
+    <div class="callout danger">
+      <ul>
+        <li><strong>Mid-sentence cuts.</strong> Fixed 500-token chunks split a sentence, a table row, a code block. The chunk that contains the answer is unreadable.</li>
+        <li><strong>Hallucinations from irrelevant chunks.</strong> Top-5 always returns 5 chunks, even if none are relevant. The LLM dutifully answers from garbage.</li>
+        <li><strong>No metadata.</strong> You cannot filter by source, recency, permissions, team. An intern's 2019 draft ranks equal to the official 2026 policy.</li>
+        <li><strong>Query-document asymmetry.</strong> "How do refunds work?" is 6 tokens. A chunk is 500 tokens. Cosine similarity with dense embeddings systematically rewards generic chunks over specific ones.</li>
+        <li><strong>Acronyms, product names, error codes.</strong> "E1042" in a query will not match the chunk that documents it — embeddings smooth rare tokens toward their semantic neighborhood.</li>
+      </ul>
+    </div>
+
+    <hr>
+
+    <h2>v2: Better chunking + metadata</h2>
+
+    <p>First real upgrade. Still single-retriever, still no rerank, but we fix the most visible quality bugs.</p>
+
+    <div class="diagram"><pre>
+                    +----------------+
+  raw doc --------> | recursive split|   (respect \n\n > \n > . > space)
+                    +----------------+
+                            |
+                            v
+                    +----------------+
+                    | attach metadata|   source, page, date, team, acl
+                    +----------------+
+                            |
+                            v
+                    +----------------+
+                    | embed + upsert |
+                    +----------------+
+</pre></div>
+
+    <h3>Recursive character splitter</h3>
+
+    <pre><code>from langchain.text_splitter import RecursiveCharacterTextSplitter
+
+splitter = RecursiveCharacterTextSplitter(
+    chunk_size=800,       # tokens, not chars — use length_function=enc.encode
+    chunk_overlap=100,    # 10-15% overlap so concepts crossing a boundary survive
+    separators=["\n\n", "\n", ". ", " ", ""],  # try each in order
+    length_function=lambda s: len(enc.encode(s)),
+)
+
+def ingest_v2(doc):
+    chunks = splitter.split_text(doc["text"])
+    for i, ch in enumerate(chunks):
+        meta = {
+            "text": ch,
+            "source": doc["source"],
+            "page": doc.get("page"),
+            "updated_at": doc["updated_at"],   # epoch
+            "team": doc["team"],
+            "acl": doc["acl"],                 # list of groups
+            "doc_id": doc["id"],
+            "chunk_ix": i,
+        }
+        emb = embed(ch)
+        index.upsert([(f"{doc['id']}:{i}", emb, meta)])
+</code></pre>
+
+    <h3>Semantic chunking — and why fixed-size usually wins</h3>
+
+    <p>Semantic chunking splits where the embedding similarity between adjacent sentences drops below a threshold. In theory: each chunk is a coherent idea. In practice, three things go wrong:</p>
+
+    <ul>
+      <li>Variable chunk sizes break batching and cost predictability — one "chunk" ends up 3K tokens, another 80 tokens.</li>
+      <li>The split point is itself an embedding call. You pay ~2× ingest cost.</li>
+      <li>Evaluations show 2-4% recall improvement at best, often zero, and sometimes negative on technical docs where a single idea spans sections.</li>
+    </ul>
+
+    <p>Rule of thumb: recursive-character with overlap is the sane default. Reach for semantic chunking only for narrative prose (books, essays, legal contracts where section boundaries are meaningful).</p>
+
+    <h3>Late chunking (2024, still underused)</h3>
+    <p>Embed the entire document first with a long-context embedder (Jina v3, Nomic), <em>then</em> mean-pool over token ranges to produce chunk embeddings. Every chunk embedding is conditioned on the whole document's context. Pronouns resolve. "The service" means something. It requires a long-context embedder but often beats contextual retrieval (v6) without the extra LLM cost.</p>
+
+    <h3>Tradeoffs</h3>
+    <table>
+      <tr><th>Strategy</th><th>Cost</th><th>Recall</th><th>When</th></tr>
+      <tr><td>Fixed size</td><td>lowest</td><td>baseline</td><td>never, unless you are prototyping</td></tr>
+      <tr><td>Recursive + overlap</td><td>low</td><td>+5-8%</td><td>default</td></tr>
+      <tr><td>Semantic</td><td>2×</td><td>+0-4%</td><td>prose, contracts</td></tr>
+      <tr><td>Late chunking</td><td>low (but long-ctx embedder)</td><td>+8-15%</td><td>docs with many references</td></tr>
+      <tr><td>Structure-aware (HTML/MD)</td><td>low</td><td>+10-20%</td><td>when docs have real structure</td></tr>
+    </table>
+
+    <hr>
+
+    <h2>v3: Hybrid search (the critical 2026 upgrade)</h2>
+
+    <p>If you only remember one thing from this chapter: <strong>pure dense retrieval is not enough</strong>. Every serious RAG system in 2026 runs BM25 and dense vectors in parallel and fuses.</p>
+
+    <p>Why? Dense embeddings are great at semantic similarity ("how do I cancel" matches "refund process") but weak on exact-match tokens — product names, error codes, SKUs, person names, version numbers. BM25 is the exact opposite. They are complementary, not competing.</p>
+
+    <div class="diagram"><pre>
+                    +-------------+
+            query-->|  BM25 (ES)  |---> top-100 ids -----+
+                    +-------------+                       |
+                                                          v
+                                                   +--------------+
+                                                   | RRF fusion   |--> top-50
+                                                   +--------------+
+                                                          ^
+                    +-------------+                       |
+            query-->| dense (pc)  |---> top-100 ids ------+
+                    +-------------+
+</pre></div>
+
+    <h3>Reciprocal Rank Fusion</h3>
+
+    <pre><code>def rrf(ranked_lists, k=60):
+    """ranked_lists: list[list[doc_id]]  (best first)"""
+    scores = {}
+    for lst in ranked_lists:
+        for rank, doc_id in enumerate(lst):
+            scores[doc_id] = scores.get(doc_id, 0) + 1.0 / (k + rank + 1)
+    return sorted(scores, key=scores.get, reverse=True)
+
+def hybrid_retrieve(q, top=50):
+    bm25_hits = es.search(index="kb", query={"match": {"text": q}}, size=100)
+    bm25_ids  = [h["_id"] for h in bm25_hits["hits"]["hits"]]
+
+    qemb = embed(q)
+    dense_hits = index.query(vector=qemb, top_k=100)
+    dense_ids  = [m["id"] for m in dense_hits["matches"]]
+
+    return rrf([bm25_ids, dense_ids])[:top]
+</code></pre>
+
+    <p>RRF is parameter-free (k=60 is the classical default from Cormack 2009). No score normalization needed, no hyperparameter tuning. It just works. Weighted linear fusion (0.5 × bm25 + 0.5 × dense) can beat RRF by 1-2% if you tune, but requires score calibration per index.</p>
+
+    <h3>Real numbers</h3>
+    <div class="callout success">
+      Anthropic's own RAG benchmark (Contextual Retrieval blog, 2024) and every reproduction since shows hybrid search cuts retrieval failure rate by <strong>15-30%</strong> versus pure dense. MSMARCO, BEIR, and internal enterprise benchmarks all agree. This is the single highest-ROI upgrade in RAG.
+    </div>
+
+    <h3>Capacity cost</h3>
+    <p>You now pay for two indexes. Elasticsearch for 80M docs is ~400GB on disk, maybe 8 × r6g.xlarge nodes = $1,500/month. Query latency +15-40ms. Worth it every time.</p>
+
+    <hr>
+
+    <h2>v4: Reranking — the shockingly high leverage step</h2>
+
+    <p>Retrieve 100 candidates with hybrid search. Then run a <strong>cross-encoder</strong> — a model that takes (query, chunk) pairs and scores them jointly — over those 100. Keep the top 5 for the LLM.</p>
+
+    <div class="diagram"><pre>
+   query --> hybrid --> 100 chunks --> cross-encoder rerank --> 5 chunks --> LLM
+                         (cheap)           (~80ms for 100)       (precise)
+</pre></div>
+
+    <h3>Why rerankers crush "just buy a better embedder"</h3>
+
+    <p>Bi-encoders (embedders) encode the query and the document independently. They have to compress everything about a chunk into a single vector before seeing the query. Cross-encoders see the query and chunk together in one forward pass — they can attend to the exact overlap, the specific phrase that matters. A cross-encoder with 100M parameters routinely beats a bi-encoder with 7B parameters on ranking quality.</p>
+
+    <p>The reason we still use bi-encoders for first-stage retrieval: you cannot run a cross-encoder over 80M chunks. You run it over 100 survivors.</p>
+
+    <h3>Code</h3>
+
+    <pre><code>import cohere
+co = cohere.Client()
+
+def rerank(q, chunks, top_n=5):
+    # Cohere Rerank 3.5 (2025): multilingual, 4096 tokens, ~80ms for 100 docs
+    r = co.rerank(
+        model="rerank-3.5",
+        query=q,
+        documents=[c["text"] for c in chunks],
+        top_n=top_n,
+    )
+    return [chunks[res.index] for res in r.results]
+
+# Open-source alternative:
+# from sentence_transformers import CrossEncoder
+# ce = CrossEncoder("BAAI/bge-reranker-v2-m3")  # multilingual, strong
+# scores = ce.predict([(q, c["text"]) for c in chunks])
+</code></pre>
+
+    <h3>Quality lift</h3>
+    <table>
+      <tr><th>Stage</th><th>nDCG@5 on BEIR</th><th>Latency</th></tr>
+      <tr><td>Dense only</td><td>0.48</td><td>30 ms</td></tr>
+      <tr><td>Hybrid</td><td>0.54</td><td>50 ms</td></tr>
+      <tr><td>Hybrid + rerank</td><td>0.62</td><td>130 ms</td></tr>
+      <tr><td>Hybrid + rerank + query decomp</td><td>0.66</td><td>400 ms</td></tr>
+    </table>
+
+    <p>Going from 0.48 → 0.62 is the difference between "this product is interesting but unreliable" and "we can sell this." It costs you ~80ms. Always rerank.</p>
+
+    <h3>What breaks</h3>
+    <div class="callout warn">
+      Cross-encoders are context-length limited (usually 4096-8192 tokens). If your first-stage retrieved chunks are huge, you lose the tail. Chunk to the reranker's context, not the LLM's. Also: Cohere Rerank is a managed API — budget ~$2 per 1K queries and have a self-hosted bge-reranker fallback for outages.
+    </div>
+
+    <hr>
+
+    <h2>v5: Multi-stage retrieval</h2>
+
+    <p>Until now, we treated "retrieval" as one step. The user asks one question; we issue one query. Real questions are not like that.</p>
+
+    <p>"How does our billing pipeline handle refunds in the EU, and what changed in 2025?" needs:</p>
+    <ul>
+      <li>the billing pipeline architecture,</li>
+      <li>refund rules in the EU,</li>
+      <li>the 2025 changelog.</li>
+    </ul>
+    <p>A single retrieval over that whole sentence gets a soup of weakly-relevant chunks. You need to decompose.</p>
+
+    <h3>Query decomposition</h3>
+
+    <pre><code>DECOMP_PROMPT = """Break this question into 1-4 independent search queries.
+Output JSON list of strings. Question: {q}"""
+
+def decompose(q):
+    r = llm(DECOMP_PROMPT.format(q=q), model="haiku")   # cheap model
+    return json.loads(r)
+
+def multi_retrieve(q):
+    sub_qs = decompose(q)               # ["billing pipeline refunds", "EU refund rules", "2025 billing changes"]
+    all_chunks = []
+    for sq in sub_qs:
+        all_chunks += rerank(sq, hybrid_retrieve(sq, top=50), top_n=5)
+    # dedupe by chunk_id, keep best rank
+    return dedupe_best(all_chunks)[:8]
+</code></pre>
+
+    <h3>HyDE — Hypothetical Document Embeddings</h3>
+
+    <p>Queries and documents live in different "regions" of embedding space. "What is the refund policy?" looks nothing like "Refunds are processed within 14 business days per EU Directive 2011/83/EU...". HyDE fixes this asymmetry: have the LLM <em>write a fake answer first</em>, then embed that fake answer and search with it.</p>
+
+    <pre><code>HYDE_PROMPT = "Write a one-paragraph passage that would answer: {q}"
+
+def hyde_retrieve(q):
+    fake = llm(HYDE_PROMPT.format(q=q), model="haiku", max_tokens=200)
+    return index.query(vector=embed(fake), top_k=50)
+</code></pre>
+
+    <p>HyDE typically buys 3-8% recall for short queries, and is a net loss for long detailed queries (which already look document-shaped). Use it selectively — e.g., when query length &lt; 15 tokens.</p>
+
+    <h3>Parent-child chunking</h3>
+
+    <p>Retrieve on <em>small</em> chunks (200 tokens — high precision), but give the LLM the <em>parent</em> chunk (1500 tokens — high context). Two indexes, linked by parent_id.</p>
+
+    <pre><code>def ingest_parent_child(doc):
+    parents = recursive_split(doc.text, size=1500, overlap=0)
+    for p_ix, parent in enumerate(parents):
+        parent_id = f"{doc.id}:p{p_ix}"
+        store_parent(parent_id, parent)                 # KV store, not vector
+        for c_ix, child in enumerate(recursive_split(parent, size=200, overlap=20)):
+            index.upsert([(f"{doc.id}:p{p_ix}:c{c_ix}",
+                          embed(child),
+                          {"parent_id": parent_id, "text": child})])
+
+def retrieve_parent_child(q, top=5):
+    child_hits = rerank(q, hybrid_retrieve(q), top_n=top)
+    parent_ids = {h["parent_id"] for h in child_hits}   # dedupe
+    return [load_parent(pid) for pid in parent_ids]
+</code></pre>
+
+    <p>Best-in-class for technical docs. A small chunk containing the exact error code retrieves, but the LLM sees the whole troubleshooting section.</p>
+
+    <hr>
+
+    <h2>v6: Contextual &amp; Agentic RAG</h2>
+
+    <h3>Contextual Retrieval (Anthropic, 2024)</h3>
+
+    <p>Before embedding each chunk, prepend 50-100 tokens of LLM-generated context that situates the chunk in its document. Chunk goes from "The error code is E1042 which indicates..." to "[This chunk is from the 2026 Billing Runbook, section 'EU refunds'. Context: discusses failure modes during refund processing.] The error code is E1042 which indicates...".</p>
+
+    <pre><code>CTX_PROMPT = """&lt;document&gt;{doc}&lt;/document&gt;
+&lt;chunk&gt;{chunk}&lt;/chunk&gt;
+Write a short (50-100 token) context situating this chunk in the document. Only the context, no preamble."""
+
+def contextual_ingest(doc):
+    # Use prompt caching on the &lt;document&gt; so you pay once per doc, not once per chunk
+    for chunk in recursive_split(doc.text):
+        ctx = llm(CTX_PROMPT.format(doc=doc.text, chunk=chunk),
+                  model="haiku", cache_document=True)
+        enriched = f"{ctx}\n\n{chunk}"
+        index.upsert([(..., embed(enriched), {"text": chunk, "ctx": ctx})])
+</code></pre>
+
+    <div class="callout success">
+      Anthropic's reported numbers: contextual retrieval alone cuts retrieval failure rate by ~35%. Combined with reranking and hybrid, they report up to 67% reduction versus naive. The catch: it costs money at ingest — ~$1 per 1M tokens of source, but prompt caching brings it to ~$0.10 per 1M. For our 10M × 4K = 40B token corpus: ~$4,000 one-time ingest cost. Worth it.
+    </div>
+
+    <h3>Agentic RAG</h3>
+
+    <p>Instead of a fixed pipeline (retrieve → rerank → answer), let an LLM decide:</p>
+    <ul>
+      <li>Do I need to retrieve at all? ("What is 2+2" — no.)</li>
+      <li>What query should I use? (Rewrite the user's ambiguous question.)</li>
+      <li>Is this chunk enough, or do I need more? (If yes, issue a follow-up retrieval.)</li>
+      <li>Do the retrieved docs actually answer the question? (If no, escalate.)</li>
+    </ul>
+
+    <div class="diagram"><pre>
+  user --> [LLM: need retrieval?] --no--> answer
+                 |yes
+                 v
+           [LLM: generate query]
+                 |
+                 v
+           retrieve --> rerank
+                 |
+                 v
+           [LLM: is this enough?] --no--> refine query --+
+                 |yes                                     |
+                 v                                        |
+              answer &lt;-------------------------------+-<--+
+</pre></div>
+
+    <h3>Self-correcting RAG (CRAG, 2024)</h3>
+
+    <p>A lightweight retrieval evaluator scores each retrieved chunk as {correct, ambiguous, incorrect}. If correct → use. If ambiguous → also run web search. If incorrect → drop and fall back to web search + decompose. Published results: +5-10% on knowledge QA benchmarks; robust to noisy retrieval.</p>
+
+    <p>Agentic RAG costs 3-10× more per query (multiple LLM calls). Use it for high-value queries only. Route trivial queries through non-agentic v4.</p>
+
+    <hr>
+
+    <h2>Chunking strategies — full comparison</h2>
+
+    <table>
+      <tr><th>Strategy</th><th>Precision</th><th>Recall</th><th>Ingest cost</th><th>Latency</th><th>Complexity</th></tr>
+      <tr><td>Fixed 500</td><td>low</td><td>baseline</td><td>$</td><td>fast</td><td>trivial</td></tr>
+      <tr><td>Recursive + overlap</td><td>med</td><td>+5-8%</td><td>$</td><td>fast</td><td>trivial</td></tr>
+      <tr><td>Semantic (breakpoint)</td><td>med</td><td>+0-4%</td><td>$$</td><td>slower</td><td>med</td></tr>
+      <tr><td>Structure-aware (MD/HTML)</td><td>high</td><td>+10-20%</td><td>$</td><td>fast</td><td>med</td></tr>
+      <tr><td>Parent-child</td><td>high</td><td>high</td><td>$$</td><td>fast</td><td>med</td></tr>
+      <tr><td>Late chunking</td><td>high</td><td>+8-15%</td><td>$</td><td>fast</td><td>med</td></tr>
+      <tr><td>Contextual (Anthropic)</td><td>high</td><td>+20-35%</td><td>$$$$</td><td>fast at query</td><td>high</td></tr>
+    </table>
+
+    <hr>
+
+    <h2>Evaluation — you cannot ship what you cannot measure</h2>
+
+    <p>The #1 failure mode of corporate RAG projects: no eval set. Teams tune for "it felt good on my 5 test questions." Here is the minimum viable eval.</p>
+
+    <h3>Build a golden set (100-300 questions)</h3>
+
+    <ol>
+      <li>Sample 300 real user questions from logs (or ask SMEs to write them).</li>
+      <li>For each: SME writes a reference answer AND labels the 1-3 chunks that <em>must</em> appear in context.</li>
+      <li>Split 80/20 train/holdout. Never tune on holdout.</li>
+    </ol>
+
+    <h3>Ragas metrics</h3>
+
+    <table>
+      <tr><th>Metric</th><th>Measures</th><th>How</th></tr>
+      <tr><td>Context recall</td><td>Did we retrieve the needed chunks?</td><td>% of reference chunks in retrieved set</td></tr>
+      <tr><td>Context precision</td><td>Of what we retrieved, how much is useful?</td><td>LLM judges each chunk vs question</td></tr>
+      <tr><td>Faithfulness</td><td>Is the answer supported by the retrieved context?</td><td>LLM decomposes answer into claims, checks each</td></tr>
+      <tr><td>Answer relevance</td><td>Does the answer address the question?</td><td>LLM generates fake Qs from answer, cosine with original Q</td></tr>
+      <tr><td>Noise sensitivity</td><td>Does adding irrelevant chunks break the answer?</td><td>Inject garbage, compare</td></tr>
+    </table>
+
+    <h3>Track over time</h3>
+    <pre><code># CI/CD gate: any PR that drops context_recall &gt; 2% fails
+pytest tests/rag_eval.py --min-recall 0.85 --min-faithfulness 0.92
+</code></pre>
+
+    <hr>
+
+    <h2>Cost analysis — real numbers for 10M docs</h2>
+
+    <table>
+      <tr><th>Line item</th><th>One-time</th><th>Recurring</th></tr>
+      <tr><td>Embedding (40B tokens @ text-embedding-3-small)</td><td>$800</td><td></td></tr>
+      <tr><td>Contextual context generation (Haiku + prompt cache)</td><td>$4,000</td><td></td></tr>
+      <tr><td>Pinecone serverless (80M vectors)</td><td></td><td>$560/mo</td></tr>
+      <tr><td>Elasticsearch cluster (hybrid search)</td><td></td><td>$1,500/mo</td></tr>
+      <tr><td>Cohere Rerank 3.5 @ 100k queries/day</td><td></td><td>$6,000/mo</td></tr>
+      <tr><td>LLM generation (Sonnet, 100k q/d, 2k in / 400 out)</td><td></td><td>$18,000/mo</td></tr>
+      <tr><td>Re-index delta (5% docs change monthly)</td><td></td><td>$240/mo</td></tr>
+      <tr><td><strong>Total</strong></td><td><strong>$4,800</strong></td><td><strong>~$26,300/mo</strong></td></tr>
+    </table>
+
+    <p>Per-query fully loaded: ~$0.009. At 100K queries/day that's 3M/month → $27k/month → ~$0.009/query. The reranker and the LLM dominate. Optimizations that help:</p>
+    <ul>
+      <li>Self-host bge-reranker on one L4 GPU: saves $6k/mo, adds +30ms latency.</li>
+      <li>Route 60% of simple queries to Haiku instead of Sonnet: saves ~$9k/mo.</li>
+      <li>Semantic cache (see next section): saves another 20-30%.</li>
+    </ul>
+
+    <hr>
+
+    <h2>Caching strategies</h2>
+
+    <h3>Exact query cache</h3>
+    <p>Hash(query + permissions_bucket) → answer. TTL of minutes to hours. Trivially safe. Catches the 15-25% of queries that are literal duplicates (popular FAQ, redirects from UI).</p>
+
+    <h3>Semantic cache</h3>
+    <p>Embed the query. If a cached query has cosine similarity &gt; 0.97 with it, return the cached answer.</p>
+
+    <pre><code>def semantic_cache_lookup(q, threshold=0.97):
+    qemb = embed(q)
+    hit = cache_index.query(vector=qemb, top_k=1)
+    if hit and hit[0].score &gt;= threshold:
+        return hit[0].metadata["answer"]
+    return None
+</code></pre>
+
+    <div class="callout danger">
+      <strong>Semantic cache is dangerous.</strong> "How do I cancel?" and "How do I NOT cancel?" have cosine 0.94. Threshold too low = wrong answers. Safe use:
+      <ul>
+        <li>Only for known-safe query classes (FAQs tagged by humans).</li>
+        <li>Include the retrieval result set hash in the cache key, not just the query — if retrieved chunks changed, don't reuse.</li>
+        <li>Never cache across permission boundaries. Ever.</li>
+        <li>Threshold 0.97+ minimum, 0.99 for anything user-facing without review.</li>
+      </ul>
+    </div>
+
+    <h3>KV cache / prompt cache at the LLM</h3>
+    <p>Different layer: Anthropic's prompt caching, OpenAI's automatic prompt cache. Cache the system prompt + the retrieved context prefix. Saves 50-90% of input tokens if you keep chunk order stable across retries. Basically free quality, no correctness risk. Always on.</p>
+
+    <hr>
+
+    <h2>Production tips the blog posts skip</h2>
+
+    <h3>Reindexing strategy</h3>
+    <p>You will want to change your embedding model. You cannot do that online — old and new embeddings do not live in the same space. Options:</p>
+    <ul>
+      <li><strong>Shadow index.</strong> Build the new index alongside the old one. Run A/B for a week. Cut over.</li>
+      <li><strong>Namespace versioning.</strong> Every embedding has a model_version tag. Query routes to the current version. Old versions decay as docs update.</li>
+      <li><strong>Cost</strong>: re-embedding 40B tokens is $800-8000 depending on model. Plan quarterly, not monthly.</li>
+    </ul>
+
+    <h3>Handling updates</h3>
+    <p>Doc updated → delete all chunks with that doc_id, re-chunk, re-embed, upsert. Easy for single-owner docs. Hard for derived/joined docs.</p>
+    <p>Use a doc-level content hash. If unchanged, skip. Track last_indexed_at in the source-of-truth DB. CDC pipeline (Debezium / Fivetran) → Kafka → indexer worker.</p>
+
+    <h3>Stale-while-revalidate</h3>
+    <p>Serving stale retrieval is usually fine for a few minutes; serving a stale answer is not always fine (pricing, policy). Mark chunks with updated_at; LLM instruction: "If the retrieved content has updated_at &gt; 30 days old and the question is about current policy, say so."</p>
+
+    <h3>Permissions</h3>
+    <p>Enforce at retrieval, not at answer time. Pre-filter by user's ACL groups in the vector query. Never rely on "the LLM will know not to answer." It will answer. Every time.</p>
+
+    <h3>Source citations</h3>
+    <p>Include a doc_id and a short quote in every answer. Users learn to trust the system only after they click through 5-10 citations and verify.</p>
+
+    <pre><code>SYS_PROMPT = """Answer using ONLY the numbered sources. After every claim, cite like [3].
+If the sources do not contain the answer, say "I don't have enough information."
+Do not use prior knowledge."""
+</code></pre>
+
+    <h3>Abstention / "I don't know"</h3>
+    <p>Train your evaluators to reward abstention on unanswerable questions more than they reward fluent-but-wrong answers. The #1 reliability win.</p>
+
+    <hr>
+
+    <h2>RAG vs Fine-tuning vs Long-context — when to pick each</h2>
+
+    <table>
+      <tr><th>Dimension</th><th>RAG</th><th>Fine-tuning</th><th>Long-context</th></tr>
+      <tr><td>Facts change daily?</td><td>YES — best</td><td>NO — costly</td><td>YES (but expensive)</td></tr>
+      <tr><td>Style/format change</td><td>partial</td><td>YES — best</td><td>partial (few-shot)</td></tr>
+      <tr><td>Latency</td><td>+100-500ms</td><td>0</td><td>highest (prefill large)</td></tr>
+      <tr><td>Per-query cost</td><td>low</td><td>lowest</td><td>very high</td></tr>
+      <tr><td>Attribution / citations</td><td>built-in</td><td>impossible</td><td>weak</td></tr>
+      <tr><td>Audit / compliance</td><td>great</td><td>opaque</td><td>weak</td></tr>
+      <tr><td>Corpus size ceiling</td><td>~billions of chunks</td><td>whatever trains</td><td>~2M tokens (2026)</td></tr>
+      <tr><td>Hallucination control</td><td>best — abstain on empty</td><td>model-dependent</td><td>lost-in-middle risk</td></tr>
+      <tr><td>Update speed</td><td>seconds</td><td>hours to days</td><td>instant</td></tr>
+      <tr><td>Best for</td><td>enterprise KB, support, docs</td><td>tone, JSON format, domain jargon</td><td>one-shot analysis of a single long doc</td></tr>
+    </table>
+
+    <div class="callout success">
+      <strong>Decision rule (2026):</strong>
+      <ul>
+        <li>Corpus changes and you need citations → <strong>RAG</strong>.</li>
+        <li>Domain-specific <em>style</em> (legal writing, medical tone) + public knowledge → <strong>fine-tune</strong> on top of a base model.</li>
+        <li>Both? RAG for facts, LoRA adapter for style. That is the 2026 enterprise default.</li>
+        <li>Single 200-page contract to analyze once → <strong>long-context</strong>, don't build infra.</li>
+        <li>Everything you thought needed fine-tuning probably needs better RAG first.</li>
+      </ul>
+    </div>
+
+    <hr>
+
+    <h2>Final architecture (v6, production)</h2>
+
+    <div class="diagram"><pre>
+                   +-------+
+                   | user  |
+                   +---+---+
+                       |
+                       v
+              +------------------+     +---------+
+              | Gateway / ACL    |---->|sem-cache|
+              +--------+---------+     +----+----+
+                       |                    |hit
+                       v                    v
+              +------------------+      answer
+              | Agentic planner  |
+              | (LLM: decompose) |
+              +--------+---------+
+                       |
+             +---------+----------+
+             |                    |
+             v                    v
+     +-------------+      +-------------+
+     | BM25 (ES)   |      | Dense (Pc)  |
+     +------+------+      +------+------+
+            |                    |
+            +--------+-----------+
+                     v
+                +---------+
+                |  RRF    |
+                +----+----+
+                     v
+             +----------------+
+             | Cross-encoder  |
+             | rerank top 100 |
+             +-------+--------+
+                     |
+                     v  (top-5 children → fetch parents)
+             +----------------+
+             | Parent lookup  |
+             +-------+--------+
+                     |
+                     v
+             +----------------+
+             | LLM generate   |
+             | + citations    |
+             +-------+--------+
+                     |
+                     v
+             +----------------+
+             | Faithfulness   |
+             | check (online) |
+             +-------+--------+
+                     |
+                     v
+                   answer
+</pre></div>
+
+    <p>Each stage has an SLO. Each stage has an eval. Each stage can fail open or fail closed. This is the shape of a serious RAG system in 2026. In the next chapter, we look at what happens <em>inside</em> that LLM generate box — how you actually serve a 70B-parameter model to thousands of concurrent users without going bankrupt.</p>
+
+    <div class="chapter-nav">
+      <a href="02-building-blocks.html"><div class="label">← Previous</div><div class="title">AI Building Blocks</div></a>
+      <a class="next" href="04-llm-serving.html"><div class="label">Next →</div><div class="title">LLM Serving Infrastructure</div></a>
+    </div>
+  </main>
+</div>
+<script src="../assets/js/nav.js"></script>
+</body>
+</html>

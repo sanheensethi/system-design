@@ -1,0 +1,715 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Real AI Architectures — Book III · AI System Design</title>
+<link rel="stylesheet" href="../assets/css/style.css">
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">System Design Books</div>
+    <div class="brand-sub">by Sanheen · Progressive Learning</div>
+    <div class="nav-section">
+      <h3>Home</h3>
+      <a href="../index.html">Overview</a>
+    </div>
+    <div class="nav-section">
+      <h3>Book I — Low Level Design</h3>
+      <a href="../lld/index.html">LLD Index</a>
+    </div>
+    <div class="nav-section">
+      <h3>Book II — High Level Design</h3>
+      <a href="../hld/index.html">HLD Index</a>
+    </div>
+    <div class="nav-section">
+      <h3>Book III — AI System Design</h3>
+      <a href="index.html">AI Index</a>
+      <a href="01-foundations.html">1. AI Foundations</a>
+      <a href="02-building-blocks.html">2. AI Building Blocks</a>
+      <a href="03-rag.html">3. RAG Systems</a>
+      <a href="04-llm-serving.html">4. LLM Serving</a>
+      <a href="05-agents.html">5. Agent Architectures</a>
+      <a href="06-hybrid-legacy.html">6. Hybrid & Legacy</a>
+      <a href="07-war-room.html">7. AI War Room</a>
+      <a href="08-real-architectures.html">8. Real AI Architectures</a>
+    </div>
+  </aside>
+  <main class="main">
+    <div class="breadcrumb"><a href="../index.html">Home</a> / <a href="index.html">Book III · AI</a> / Chapter 8</div>
+    <h1>Chapter 8: Real AI Architectures (2026)</h1>
+
+    <p class="lead">Every system below is shipping to real users today. Numbers are drawn from public engineering blogs, filings, conference talks, and public APIs as of early 2026. Where sources disagree I've favored the more conservative estimate. Names are case studies, not endorsements — the point is to see recurring <em>patterns</em>, so that the next one you build stands on shoulders rather than shins.</p>
+
+    <hr>
+
+    <h2>1. ChatGPT / OpenAI</h2>
+
+    <p>The consumer-facing frontier of LLM serving. Roughly 700M weekly active users in late 2025, running on a custom inference stack built primarily on Azure infrastructure with a mix of NVIDIA H100/H200 and some first-party silicon.</p>
+
+    <h3>Scale</h3>
+    <ul>
+      <li><strong>Users:</strong> ~700M weekly active, ~3B messages/day.</li>
+      <li><strong>QPS:</strong> peaks above 30K prompts/second globally.</li>
+      <li><strong>Cost scale:</strong> GPU compute alone estimated in the multi-billions/year.</li>
+    </ul>
+
+    <h3>Architecture</h3>
+    <div class="diagram">
+<pre>
+  user -> edge (Cloudflare-like) -> router
+                                      |
+            +-------------------------+---------------------------+
+            |                         |                           |
+       free tier router          plus/pro router              api router
+            |                         |                           |
+     GPT-4o-mini / 4.1           GPT-5 / GPT-5-thinking      per-SKU pool
+            |                         |                           |
+                +-- shared inference fleet (vLLM-like) ----+
+                            |
+                    memory service (user-scoped)
+                    tools: web, code interpreter, images
+                    safety: moderation + output classifier
+</pre>
+    </div>
+
+    <h3>Tech stack</h3>
+    <ul>
+      <li>Custom inference runtime (OpenAI's internal stack, reportedly evolved from Triton + custom kernels); mixture-of-experts routing for the GPT-5 family.</li>
+      <li>Azure for most fleet, with a growing footprint of dedicated data centers (Stargate-class).</li>
+      <li>Postgres + custom vector store for long-term memory (the "persistent memory" feature, 2024+).</li>
+      <li>Sandboxed Python runtime (formerly "Code Interpreter", now "Canvas + advanced data analysis").</li>
+      <li>Browsing via a custom crawler and a retrieval-on-demand cache.</li>
+    </ul>
+
+    <h3>Key design decisions</h3>
+    <ul>
+      <li><strong>Model router over monolithic model.</strong> GPT-5 is not a single weight file; it's a family dispatched by a router that picks between fast, deep-thinking, and multimodal variants based on the prompt. Saves enormous GPU time on easy questions.</li>
+      <li><strong>Persistent memory as a product</strong> — user's preferences, projects, and facts live in a user-scoped store and are injected at the start of every conversation.</li>
+      <li><strong>Tool use as first-class</strong> — browsing, code execution, image generation, data analysis each have their own infra, with the router deciding when to invoke.</li>
+      <li><strong>Safety pipeline</strong> — Moderation API (input), internal classifiers on output, and policy-tuned base model. Refusals are layered, not monolithic.</li>
+    </ul>
+
+    <h3>Tradeoffs</h3>
+    <ul>
+      <li>Routing adds latency and a new failure mode (router mis-classifies query → wrong model answers).</li>
+      <li>Persistent memory vs. privacy — users must be able to see and delete memories easily; this took product iterations.</li>
+      <li>Single-provider dependency for most compute → huge capex commitments.</li>
+    </ul>
+
+    <hr>
+
+    <h2>2. Claude / Anthropic</h2>
+
+    <p>The safety-forward frontier competitor; known for long context, constitutional AI training, and the first serious "computer use" capability. Serves via its own API plus partners (AWS Bedrock, GCP Vertex).</p>
+
+    <h3>Scale</h3>
+    <ul>
+      <li><strong>Users:</strong> tens of millions of consumer + enterprise (exact numbers not public, annualized revenue passed several billion USD in 2025).</li>
+      <li><strong>Contexts:</strong> 200K standard, up to 1M for enterprise on Sonnet/Opus tiers.</li>
+    </ul>
+
+    <h3>Architecture</h3>
+    <div class="diagram">
+<pre>
+  client (claude.ai / api / bedrock / vertex)
+         |
+         v
+  gateway  --> auth, tier routing, rate limits
+         |
+         v
+  router  --> haiku / sonnet / opus  (by tier + size hint)
+         |
+     +---+-----------+----------+
+     |               |          |
+  inference      prompt       tools:
+  fleet          cache         - computer use VM
+  (own stack +   (ephemeral    - code exec
+   AWS/GCP)      5-min)        - web fetch
+         |
+  safety: constitutional training + output classifier
+</pre>
+    </div>
+
+    <h3>Tech stack</h3>
+    <ul>
+      <li>Custom inference infra over AWS Trainium/Inferentia and NVIDIA GPUs; batched continuous batching similar to vLLM.</li>
+      <li>Prompt caching (ephemeral 5-minute cache by default, 1-hour option) — saves on repeated system prompts and doc grounding.</li>
+      <li>Batch API — async jobs at ~50% cost for non-latency-critical workloads.</li>
+      <li>Computer use — the model drives a sandboxed VM via screenshots + tool calls (mouse/keyboard).</li>
+    </ul>
+
+    <h3>Key design decisions</h3>
+    <ul>
+      <li><strong>Constitutional AI</strong> — instead of RLHF from raters only, the model self-critiques against a written constitution during training. Shifts more safety work to training, less to runtime filters.</li>
+      <li><strong>Long context first</strong> — 200K default changed how customers structure RAG. Instead of fine-grained chunking, many teams feed entire documents into context and let the model attend.</li>
+      <li><strong>Prompt caching as a product feature</strong> — not just an optimization; pricing tiers advertise it. Encourages customers to design with stable system prompts.</li>
+      <li><strong>Computer use</strong> — acknowledging that many real tasks are "drive this browser" and giving the model primitives to do so.</li>
+    </ul>
+
+    <h3>Tradeoffs</h3>
+    <ul>
+      <li>Long context is expensive at inference; the cache mitigates but doesn't eliminate cost.</li>
+      <li>Constitutional training trades off some helpfulness for refusal consistency; users occasionally complain about over-refusal.</li>
+      <li>Computer use is slow and error-prone on complex UIs; still a preview capability for many cases.</li>
+    </ul>
+
+    <hr>
+
+    <h2>3. Claude Code (by Anthropic)</h2>
+
+    <p>The agent runtime this book is being authored through. A CLI-based coding agent that combines LLM inference (Claude family) with local tooling, MCP integration, and a filesystem-aware memory.</p>
+
+    <h3>Scale</h3>
+    <ul>
+      <li><strong>Users:</strong> hundreds of thousands of developers in its installed base (2026).</li>
+      <li><strong>Requests:</strong> each session typically dozens to hundreds of LLM calls, with heavy tool-use.</li>
+      <li><strong>Cost shape:</strong> cost per session dominated by context — long codebases re-read across turns benefit hugely from prompt caching.</li>
+    </ul>
+
+    <h3>Architecture</h3>
+    <div class="diagram">
+<pre>
+  user shell
+     |
+  claude-code CLI
+     |
+     v
+  agent loop  --- reads CLAUDE.md (memory)
+     |            loads MCP servers
+     |
+     +--> tool dispatch
+     |       Read / Edit / Write / Bash / Grep / Glob
+     |       MCP tools (user-installed)
+     |       Subagent dispatch
+     |
+     +--> Claude Sonnet/Opus via Anthropic API
+     |       with prompt caching on system + tool specs
+     |
+     +--> hooks  (user-defined shell commands on events)
+</pre>
+    </div>
+
+    <h3>Key design decisions</h3>
+    <ul>
+      <li><strong>MCP (Model Context Protocol)</strong> — tools are not hard-coded; they're discovered from MCP servers the user configures. Treats the agent as a host that loads capabilities at runtime.</li>
+      <li><strong>CLAUDE.md files</strong> as project/user memory — plain markdown in the repo, auto-injected into context. No opaque memory DB; memory is a file the user can read and edit.</li>
+      <li><strong>Subagents</strong> — the main agent can spawn scoped sub-agents for research or delegated tasks; their context is isolated so they don't pollute the parent.</li>
+      <li><strong>Hooks</strong> — user shell commands triggered on events (pre-tool-use, post-tool-use, session-end). Lets users enforce linting, testing, or custom policy outside the model's decision loop.</li>
+      <li><strong>Prompt caching heavy</strong> — system prompt, tool schemas, and often large chunks of read file context get cached, making subsequent turns cheaper.</li>
+    </ul>
+
+    <h3>Tradeoffs</h3>
+    <ul>
+      <li>Filesystem and shell access are powerful and dangerous; the permission model (ask on first dangerous command, remember choices) is a usability/safety tightrope.</li>
+      <li>Long-running sessions accumulate context; careful memory management (CLAUDE.md, task-scoped sub-agents) is the answer to context-window ceilings.</li>
+      <li>MCP's flexibility means ecosystem quality varies; bad MCP servers can mislead the agent.</li>
+    </ul>
+
+    <hr>
+
+    <h2>4. Cursor / Windsurf</h2>
+
+    <p>IDE-native AI pair programmers. A VS Code fork (Cursor) and a ground-up editor (Windsurf / Codeium) that made AI the central UX rather than a side panel.</p>
+
+    <h3>Scale</h3>
+    <ul>
+      <li><strong>Users:</strong> Cursor disclosed over a million paying developers in 2025.</li>
+      <li><strong>QPS:</strong> dominated by inline completions — billions of completion requests per day across the userbase.</li>
+    </ul>
+
+    <h3>Architecture</h3>
+    <div class="diagram">
+<pre>
+  editor client
+     |
+     +--> completion model  (fast, cheap, distilled; &lt;200ms)
+     |        * predicts next edit, not just next token
+     |
+     +--> chat / composer model  (Claude / GPT / own)
+     |        * multi-file edits
+     |        * apply-diff model (cheap, structured)
+     |
+     +--> embedding index of the open repo  (local + cloud)
+     |
+     +--> retrieval: "which files matter for this edit?"
+</pre>
+    </div>
+
+    <h3>Key design decisions</h3>
+    <ul>
+      <li><strong>Two-model architecture</strong> — a tiny completion model for inline suggestions (latency-critical) and a large chat model for reasoning. Don't send everything to the frontier model.</li>
+      <li><strong>Codebase embedding</strong> — the repo is indexed (locally or in the vendor's cloud, per privacy tier) so chat can ground in relevant files without cramming the whole repo into context.</li>
+      <li><strong>Composer / multi-file edit mode</strong> — the model proposes coordinated edits across many files; a separate "apply-diff" model (small, fast, structured) handles the mechanical patching.</li>
+      <li><strong>Custom model training for next-edit prediction</strong> — not just language modeling; trained specifically to predict "what the developer will do next" given repo state.</li>
+      <li><strong>Tab-based UX</strong> — the hero gesture is pressing Tab to accept. Simple, frequent, and cheap to reverse.</li>
+    </ul>
+
+    <h3>Tradeoffs</h3>
+    <ul>
+      <li>Sending source code to the cloud is an enterprise blocker; both products offer privacy/retention modes, sometimes with reduced capability.</li>
+      <li>Multi-file edits can cascade errors; the diff-apply model must be robust.</li>
+      <li>Heavy dependency on frontier model vendors for chat; cost pressure pushes toward own models over time.</li>
+    </ul>
+
+    <hr>
+
+    <h2>5. GitHub Copilot</h2>
+
+    <p>The original completion product, now expanded into chat, agents, and workspace features. Backed by Microsoft/Azure and OpenAI models, plus GitHub's own dataset of public code.</p>
+
+    <h3>Scale</h3>
+    <ul>
+      <li><strong>Users:</strong> several million paid seats (individual + enterprise) across GitHub tenants.</li>
+      <li><strong>Requests:</strong> hundreds of billions of completions/year, based on disclosed usage.</li>
+    </ul>
+
+    <h3>Key design decisions</h3>
+    <ul>
+      <li><strong>Prompt crafting from file context</strong> — Copilot's core IP is figuring out what to stuff into the prompt: the current file, nearby files, open tabs, recently edited regions.</li>
+      <li><strong>Caching and short-context speed</strong> — completions must return in ~100ms at the tail; aggressive token budgets and caching.</li>
+      <li><strong>Model portfolio</strong> — originally Codex-derived, now allows choice of GPT-4.1, Claude Sonnet, Gemini, and others. Users pick.</li>
+      <li><strong>Responsible AI filters</strong> — duplication detector (avoid echoing GPL code), toxicity filter, PII scrubber.</li>
+      <li><strong>Enterprise on-prem / hosted</strong> options for regulated customers; enterprise data never enters training.</li>
+      <li><strong>Agents</strong> (Copilot Workspace / Copilot coding agent) — longer-running multi-file tasks with PR-based output.</li>
+    </ul>
+
+    <h3>Tradeoffs</h3>
+    <ul>
+      <li>Competing with your underlying model provider (OpenAI) while depending on them is strategic tension, addressed by multi-model.</li>
+      <li>Public-code training created IP / licensing concerns; ongoing litigation shaped feature design (attribution, filtering).</li>
+    </ul>
+
+    <hr>
+
+    <h2>6. Perplexity</h2>
+
+    <p>Search-grounded chat. Every answer is formed by an LLM over freshly retrieved web results, with inline citations. Changed user expectations for "AI answers" — cite sources, or users don't trust it.</p>
+
+    <h3>Scale</h3>
+    <ul>
+      <li><strong>Users:</strong> tens of millions of monthly actives by late 2025.</li>
+      <li><strong>QPS:</strong> dominated by the freshness of the web index and search-quality costs.</li>
+    </ul>
+
+    <h3>Architecture</h3>
+    <div class="diagram">
+<pre>
+  user query
+     |
+     v
+  query classifier  -> simple / research / news / academic
+     |
+     v
+  retrieval
+     - own web crawler + index
+     - Bing / Brave partnerships
+     - specialized (arXiv, news APIs)
+     |
+     v
+  reranker  (BGE / Cohere-class)
+     |
+     v
+  LLM grounding call
+     - fast mode: smaller model, fewer sources
+     - pro mode: larger model (GPT / Claude / Sonar own), more sources
+     |
+     v
+  citation-aware response streaming
+</pre>
+    </div>
+
+    <h3>Key design decisions</h3>
+    <ul>
+      <li><strong>Citation-grounded generation</strong> — the prompt forces the model to answer only from cited passages; UI shows source cards.</li>
+      <li><strong>Mode routing</strong> — cheap queries ("what time is it in Tokyo") don't need GPT-5; research queries do. Routing decision before retrieval.</li>
+      <li><strong>Freshness matters</strong> — investment in crawl infra is as important as LLM infra, because stale facts are the main failure mode.</li>
+      <li><strong>Own model (Sonar)</strong> — fine-tuned on citation-following to cut API costs on the hottest workload.</li>
+      <li><strong>Async pipelines</strong> for "Deep Research" — minutes-long agent runs that read dozens of sources and produce a report.</li>
+    </ul>
+
+    <h3>Tradeoffs</h3>
+    <ul>
+      <li>Crawl + index at scale is a cost center distinct from inference; incumbents with owned search (Google, Bing) have structural advantages.</li>
+      <li>Citation accuracy is itself a hard problem; wrong-link hallucinations are a specific failure mode requiring dedicated eval.</li>
+      <li>Speed vs. depth — users expect sub-second answers; Deep Research breaks the pattern and has its own UX.</li>
+    </ul>
+
+    <hr>
+
+    <h2>7. Character.ai / Replika</h2>
+
+    <p>Persona-driven chat. Users talk to characters (fictional, historical, bespoke) for hours. Entirely different economics: conversations are long and emotional, margins are thin, revenue is subscription or per-message.</p>
+
+    <h3>Scale</h3>
+    <ul>
+      <li><strong>Users:</strong> tens of millions of monthly active, heavy daily-session users.</li>
+      <li><strong>Usage shape:</strong> average session length in the tens of minutes — orders of magnitude more tokens per user than productivity tools.</li>
+    </ul>
+
+    <h3>Key design decisions</h3>
+    <ul>
+      <li><strong>Self-hosted, heavily quantized models</strong> — API pricing would bankrupt the product; they run their own fine-tunes on their own GPUs with aggressive quantization (INT4/FP8).</li>
+      <li><strong>Long-term memory per character per user</strong> — summarized conversation history is the product; retrieval from this memory shapes persona continuity.</li>
+      <li><strong>Persona as prompt + embedding</strong> — character definition, example dialogue, constraints all compile into a stable system prompt. Users can create new personas.</li>
+      <li><strong>Safety around emotional harm</strong> — crisis detection (self-harm, suicidal ideation) routes to safety flows, not the roleplay flow. This was a learned, expensive lesson.</li>
+      <li><strong>Monetization around limits</strong> — free users get capped messages; paid tiers unlock longer memory, better models, and voice.</li>
+    </ul>
+
+    <h3>Tradeoffs</h3>
+    <ul>
+      <li>Self-hosted at this scale is a non-trivial infrastructure effort; requires deep ML ops competence.</li>
+      <li>Safety is a first-class product problem, not an afterthought; vulnerable users rely heavily on these apps.</li>
+      <li>Quantization reduces quality; user perception of "my character feels off" is a real churn driver.</li>
+    </ul>
+
+    <hr>
+
+    <h2>8. Midjourney / Sora / Image & Video Gen</h2>
+
+    <p>Generative media pipelines have fundamentally different shape from text LLMs: single requests take seconds-to-minutes, GPUs are pinned for the whole job, and moderation is pre- and post-inference.</p>
+
+    <h3>Scale</h3>
+    <ul>
+      <li><strong>Midjourney:</strong> ~20M registered users, ~1M daily actives, Discord-native (now also web).</li>
+      <li><strong>Sora (OpenAI):</strong> rolled out 2024-25 for video generation; queues and quotas, not instant.</li>
+      <li><strong>Job duration:</strong> image ~10-60s, video ~minutes per clip.</li>
+    </ul>
+
+    <h3>Architecture</h3>
+    <div class="diagram">
+<pre>
+  user prompt
+     |
+     v
+  pre-moderation (text + NSFW / IP classifiers)
+     |
+     v
+  queue  (GPU-aware, per-tier priority)
+     |
+     v
+  render workers (diffusion / DiT models on A100/H100)
+     - batched when possible
+     - pinned for the job duration
+     |
+     v
+  post-moderation (image / video classifier)
+     |
+     v
+  CDN delivery + persistent gallery
+</pre>
+    </div>
+
+    <h3>Key design decisions</h3>
+    <ul>
+      <li><strong>Queue-first</strong> — unlike chat, users know they're waiting. UI leans into the wait with progress + variations.</li>
+      <li><strong>Tiered priority</strong> — paid tiers get faster queues; fast-lane GPUs are a real product feature.</li>
+      <li><strong>Multi-resolution outputs</strong> — render low-res previews fast, upscale on accept. Saves enormous GPU time.</li>
+      <li><strong>Moderation both ends</strong> — text prompt filters don't catch everything; the output image or video is classified too.</li>
+      <li><strong>Style and character consistency</strong> — later products (MJ v6, Sora) added reference-image / persistent-character features, built on training tricks (DreamBooth-like fine-tunes, ControlNet, LoRAs).</li>
+    </ul>
+
+    <h3>Tradeoffs</h3>
+    <ul>
+      <li>GPU utilization economics are brutal; a 60-second render that fails moderation is 60 seconds of burned money.</li>
+      <li>IP / training data remains legally unsettled; several companies have paid settlements, others face ongoing litigation.</li>
+      <li>Video is orders of magnitude harder than image — coherence across frames, audio, and length.</li>
+    </ul>
+
+    <hr>
+
+    <h2>9. Google Gemini & AI Overviews</h2>
+
+    <p>LLMs grafted into classical search. AI Overviews sit above the blue links, powered by Gemini models grounded on the search index itself. The single highest-volume LLM deployment on earth.</p>
+
+    <h3>Scale</h3>
+    <ul>
+      <li><strong>Search QPS:</strong> many billions/day.</li>
+      <li><strong>AI Overview rate:</strong> triggered on a meaningful fraction of informational queries; cached aggressively.</li>
+    </ul>
+
+    <h3>Key design decisions</h3>
+    <ul>
+      <li><strong>Don't overview everything</strong> — a classifier decides when an AI Overview adds value; for navigational or commercial queries, classical results win.</li>
+      <li><strong>Ground on search results, not model memory</strong> — same RAG pattern as Perplexity, at Google's scale. The search index is already retrieval-optimized.</li>
+      <li><strong>Aggressive caching of common queries</strong> — most of search is long-tail, but the head is enormous, and head queries' overviews cache well.</li>
+      <li><strong>Factuality filters</strong> — after the model answers, a secondary check compares claims to retrieved sources; low-confidence overviews suppressed.</li>
+      <li><strong>Fall back to classical</strong> — when the AI layer fails or times out, the classical SERP still loads. Never block the user.</li>
+      <li><strong>Gemini Nano on-device</strong> — Android and Pixel devices run small Gemini variants locally for features like summarization, for latency and privacy.</li>
+    </ul>
+
+    <h3>Tradeoffs</h3>
+    <ul>
+      <li>Publisher economics — AI Overviews that answer the question reduce click-through to source sites; this is an ongoing policy and legal fight.</li>
+      <li>Early launch embarrassments (glue-on-pizza, etc.) forced tighter factuality gates.</li>
+      <li>Cost at this QPS demands highly optimized inference (TPU-based) and heavy caching.</li>
+    </ul>
+
+    <hr>
+
+    <h2>10. Microsoft Copilot 365</h2>
+
+    <p>Enterprise AI embedded across Word, Excel, PowerPoint, Outlook, Teams. Differentiator isn't the model — it's the <em>context</em>: your tenant's emails, documents, meetings, and calendars, all indexed and compliance-boundary-respecting.</p>
+
+    <h3>Scale</h3>
+    <ul>
+      <li><strong>Seats:</strong> many millions of licensed users across enterprise tenants.</li>
+      <li><strong>Tenants:</strong> tens of thousands of organizations, each with isolated data.</li>
+    </ul>
+
+    <h3>Architecture</h3>
+    <div class="diagram">
+<pre>
+  Office app
+     |
+     v
+  Copilot service (Azure, per-region)
+     |
+     +--> Microsoft Graph   (user's emails, docs, chats, calendar)
+     |       with tenant + role-based access enforcement
+     |
+     +--> Semantic Index over tenant data  (per-tenant)
+     |       indexed nightly + incremental
+     |
+     +--> LLM call (Azure OpenAI: GPT-4.1 / GPT-5)
+     |       with tenant-scoped retrieval in prompt
+     |
+     +--> compliance: DLP, sensitivity labels, purview audit logs
+</pre>
+    </div>
+
+    <h3>Key design decisions</h3>
+    <ul>
+      <li><strong>Per-tenant semantic index</strong> — every tenant gets its own vector/semantic index over their Graph data. No cross-tenant leakage by construction.</li>
+      <li><strong>Microsoft Graph as the API</strong> — Copilot doesn't build new connectors; it uses the existing Graph permission model, so a user's Copilot sees only what the user sees.</li>
+      <li><strong>Prompt construction at query time</strong> — Copilot pulls relevant emails/docs, inserts them into the prompt, and the LLM never sees data the user couldn't.</li>
+      <li><strong>Compliance as a first-class feature</strong> — audit logs, sensitivity labels, DLP, EU data boundary, HIPAA/FedRAMP certifications drive enterprise adoption.</li>
+      <li><strong>Grounding over creativity</strong> — product philosophy leans toward "cite the source doc" rather than free-generation.</li>
+    </ul>
+
+    <h3>Tradeoffs</h3>
+    <ul>
+      <li>Semantic index freshness vs. cost — real-time indexing is expensive at enterprise scale; Copilot typically sees recent-hours-old state.</li>
+      <li>"Copilot is only as good as your data" — tenants with messy SharePoint get mediocre answers and blame Copilot; customer success is an infra problem.</li>
+      <li>The LLM vendor lock-in (Azure OpenAI) mirrors ChatGPT's; Microsoft hedges by adding MAI and open-weights alongside.</li>
+    </ul>
+
+    <hr>
+
+    <h2>11. Harvey / Hebbia / Enterprise RAG</h2>
+
+    <p>Legal, finance, and consulting AI. Tiny user base (thousands per firm), enormous per-seat revenue, brutally high quality bar. A hallucinated case citation is a malpractice event.</p>
+
+    <h3>Scale</h3>
+    <ul>
+      <li><strong>Users per tenant:</strong> hundreds to low thousands (lawyers, analysts).</li>
+      <li><strong>Documents per tenant:</strong> millions of contracts, filings, memos.</li>
+      <li><strong>Seat price:</strong> hundreds of dollars per user per month.</li>
+    </ul>
+
+    <h3>Key design decisions</h3>
+    <ul>
+      <li><strong>Document understanding pipeline</strong> — OCR, layout analysis, table extraction, footnote linking. The input isn't text; it's structured multi-page PDFs.</li>
+      <li><strong>Citations with page references</strong> — every claim in an output links to the exact page+paragraph in the source. Non-negotiable.</li>
+      <li><strong>Hybrid search</strong> — BM25 + vector + legal-specific knowledge graphs (case citations, statute cross-refs).</li>
+      <li><strong>On-prem and VPC-deployment options</strong> — regulated customers won't send documents to a multi-tenant SaaS; architecture supports single-tenant or on-prem deployments.</li>
+      <li><strong>Workflow over chat</strong> — contract review, due diligence, deposition prep are long, structured workflows, not free-form conversations. Hebbia's "matrices" and Harvey's "workflows" encode domain rituals.</li>
+      <li><strong>Human-in-the-loop by design</strong> — the product produces draft memos or review reports; the human lawyer signs. Liability remains with the human.</li>
+    </ul>
+
+    <h3>Tradeoffs</h3>
+    <ul>
+      <li>Accuracy bar so high that RAG alone is insufficient; significant fine-tuning and rule systems complement the LLM.</li>
+      <li>Sales cycle is enterprise-long; infra must support high-touch customer success.</li>
+      <li>Data never leaves tenant boundary — training on customer data is typically contractually forbidden, complicating the model improvement loop.</li>
+    </ul>
+
+    <hr>
+
+    <h2>12. v0 / bolt.new / Lovable</h2>
+
+    <p>AI website and app builders. Prompt in natural language, get a running app in seconds, iterate by chatting. The real product is the streaming preview loop.</p>
+
+    <h3>Scale</h3>
+    <ul>
+      <li><strong>Users:</strong> millions of registered developers and hobbyists combined across these tools.</li>
+      <li><strong>Latency expectation:</strong> first preview within seconds; iterative edits faster.</li>
+    </ul>
+
+    <h3>Architecture</h3>
+    <div class="diagram">
+<pre>
+  user prompt
+     |
+     v
+  planner  (LLM: Claude / GPT)
+     - decides files to create or edit
+     |
+     v
+  streaming generator  (LLM)
+     - emits file diffs or whole files
+     - streamed token-by-token to the UI
+     |
+     v
+  sandbox runtime  (WebContainers / Firecracker / browser VM)
+     - installs deps, starts dev server
+     - live-reloads as files change
+     |
+     v
+  preview iframe  (user sees app live)
+     |
+     v
+  chat loop
+     - "change the hero to blue"
+     - diff-apply cycle repeats
+</pre>
+    </div>
+
+    <h3>Key design decisions</h3>
+    <ul>
+      <li><strong>In-browser execution (bolt.new with WebContainers, StackBlitz tech)</strong> — no server-side sandbox needed; node runs in WASM in the user's browser. Zero per-user infra.</li>
+      <li><strong>v0 relies on Vercel's ecosystem</strong> — generated React/Next.js apps deploy to Vercel with a click; integrates with the broader platform.</li>
+      <li><strong>Streaming file diffs</strong> — the model emits files as they're generated, the runtime applies and reloads. Latency feels instant because something visible is always happening.</li>
+      <li><strong>Iterative loop is the core UX</strong> — first generation is rarely what the user wants; the product is optimized for "change X, change Y, add Z" rounds.</li>
+      <li><strong>Templates and scaffolding</strong> — not every token is LLM-generated. Common stacks (Next.js + Tailwind + Shadcn) are scaffolded deterministically; LLM fills in the app-specific parts.</li>
+    </ul>
+
+    <h3>Tradeoffs</h3>
+    <ul>
+      <li>Browser-sandbox execution limits what's possible (no long-running servers, limited Python); server-side sandbox options (Firecracker, E2B) fill gaps at cost.</li>
+      <li>Generated code quality varies; the product is strongest for UI/frontend, weaker for complex backend or data logic.</li>
+      <li>Cost per session is high — many LLM calls per iteration; pricing usually caps free tier to a few projects.</li>
+    </ul>
+
+    <hr>
+
+    <h2>Cross-cutting patterns: what all twelve share</h2>
+
+    <table>
+      <tr>
+        <th>Pattern</th>
+        <th>Seen in</th>
+        <th>Why it emerges</th>
+      </tr>
+      <tr>
+        <td>Model routing (small / large / specialized)</td>
+        <td>ChatGPT, Claude, Cursor, Perplexity, Copilot, Gemini</td>
+        <td>Frontier models are too expensive for every request; cheap models handle the common case.</td>
+      </tr>
+      <tr>
+        <td>RAG + reranking as the knowledge substrate</td>
+        <td>Perplexity, Copilot 365, Harvey, Gemini, ChatGPT (browse)</td>
+        <td>Parametric memory hallucinates; retrieval grounds. Every serious knowledge product uses it.</td>
+      </tr>
+      <tr>
+        <td>Prompt caching / context reuse</td>
+        <td>Claude, Claude Code, Copilot, most API wrappers</td>
+        <td>System prompts and tool specs are stable; recomputing KV cache is pure waste.</td>
+      </tr>
+      <tr>
+        <td>Safety as layered pipeline</td>
+        <td>All consumer-facing (ChatGPT, Claude, Gemini, Character.ai, MJ)</td>
+        <td>Single guardrail fails; input filter + training + output filter + human review is the template.</td>
+      </tr>
+      <tr>
+        <td>Continuous eval infrastructure</td>
+        <td>Everyone serious</td>
+        <td>Quality regresses silently; only nightly/CI eval catches it before users do.</td>
+      </tr>
+      <tr>
+        <td>Streaming UX</td>
+        <td>ChatGPT, Claude, Cursor, Perplexity, v0, Copilot</td>
+        <td>Latency of first byte matters more than total latency for perceived quality.</td>
+      </tr>
+      <tr>
+        <td>Memory abstraction (user / project / session scoped)</td>
+        <td>ChatGPT, Character.ai, Claude Code, Copilot 365</td>
+        <td>Context windows aren't infinite; persistent state must live outside the prompt.</td>
+      </tr>
+      <tr>
+        <td>Tool use (code exec, web, MCP, Graph)</td>
+        <td>ChatGPT, Claude, Claude Code, Copilot, Perplexity</td>
+        <td>LLMs alone can't act on the world; tools make them agents.</td>
+      </tr>
+      <tr>
+        <td>Cost-routing middleware / LLM gateway</td>
+        <td>Large enterprise deployments (Harvey, Copilot, internal gateways)</td>
+        <td>Multi-provider, fallback, rate limits, caching, telemetry all belong in one layer.</td>
+      </tr>
+      <tr>
+        <td>Human-in-the-loop for high-stakes outputs</td>
+        <td>Harvey, Copilot 365, support-bot deployments</td>
+        <td>Liability and quality floors require the human to sign; product is drafting, not deciding.</td>
+      </tr>
+      <tr>
+        <td>Self-hosted / open-weights backstop</td>
+        <td>Character.ai, Perplexity (Sonar), Harvey, many enterprises</td>
+        <td>Provider risk (deprecation, silent swap, cost) makes a deterministic fallback strategic.</td>
+      </tr>
+      <tr>
+        <td>Per-tenant isolation for enterprise</td>
+        <td>Copilot 365, Harvey, enterprise Claude/OpenAI</td>
+        <td>Compliance, trust, and data-residency requirements demand it.</td>
+      </tr>
+    </table>
+
+    <h2>Reference tech stack (2026 defaults)</h2>
+
+    <p>If you were starting a new serious AI product today, the parts you would almost certainly reach for:</p>
+
+    <ul>
+      <li><strong>Model access:</strong> Anthropic Claude, OpenAI GPT-5, Google Gemini via direct APIs; a fallback via Bedrock/Vertex; an open-weights self-host option (Llama 3.3, Qwen 2.5, Mistral) for cost and resilience.</li>
+      <li><strong>Gateway:</strong> LiteLLM, Portkey, or a thin in-house wrapper — model routing, retries, fallback, caching, telemetry.</li>
+      <li><strong>Serving (self-host):</strong> vLLM, TensorRT-LLM, or SGLang on H100/H200 or MI300 GPUs.</li>
+      <li><strong>Vector / retrieval:</strong> Pinecone (managed), Weaviate, Qdrant, or pgvector (Postgres-native) at smaller scale; Elasticsearch/OpenSearch for hybrid BM25+vector.</li>
+      <li><strong>Reranker:</strong> Cohere Rerank, BGE-reranker, or Voyage for latency-sensitive cases.</li>
+      <li><strong>Embeddings:</strong> OpenAI text-embedding-3, Cohere embed-v3, Voyage, or open-weights BGE/E5 for self-host.</li>
+      <li><strong>Agent framework:</strong> LangGraph, CrewAI, or roll-your-own; avoid heavyweight agent frameworks for simple workflows.</li>
+      <li><strong>Evaluation:</strong> Braintrust, LangSmith, Arize, or a home-grown golden-set runner. Run continuously, not just pre-launch.</li>
+      <li><strong>Observability:</strong> Datadog/Grafana for infra; LangSmith/Helicone/Langfuse for LLM-specific tracing.</li>
+      <li><strong>Safety:</strong> Llama Guard 3 / Prompt Guard / Azure Content Safety / OpenAI Moderation as input + output classifiers.</li>
+      <li><strong>Memory:</strong> Mem0, Zep, or custom (Postgres + vector + summary LLM).</li>
+      <li><strong>Tooling protocol:</strong> MCP (Model Context Protocol) is rapidly becoming the standard for agent tool integration.</li>
+      <li><strong>Sandbox exec:</strong> E2B, Modal, or Firecracker-based; WebContainers for in-browser.</li>
+    </ul>
+
+    <h2>Lessons, distilled</h2>
+
+    <div class="callout success">
+      <strong>1. Model routing is a product decision, not just cost optimization.</strong> The routing logic — which query goes to which model — is often more defensible than the model itself, because it reflects your understanding of your users' needs.
+    </div>
+
+    <div class="callout success">
+      <strong>2. Retrieval quality dominates model choice for knowledge products.</strong> A worse LLM with better RAG beats a better LLM with mediocre RAG, every time. Invest in the index.
+    </div>
+
+    <div class="callout success">
+      <strong>3. Evals are the source of truth.</strong> Without them you're flying blind through a landscape where every change — even one you didn't make — can silently regress quality. Build the eval harness before the feature.
+    </div>
+
+    <div class="callout success">
+      <strong>4. The gateway is the contract.</strong> One layer between your code and every model vendor. That's where routing, fallback, caching, rate limiting, cost attribution, and observability live. Build it early; changing it later is painful.
+    </div>
+
+    <div class="callout success">
+      <strong>5. Safety is layered or it is absent.</strong> One classifier, one prompt hardening, one RLHF pass — each is defeatable. In combination, layered at input, model, and output, they hold. Every successful consumer AI product follows this pattern.
+    </div>
+
+    <div class="callout success">
+      <strong>6. Own your fallback.</strong> Whether it's an open-weights self-hosted model, a second provider, or a deterministic rule-based backstop, your product should keep functioning when any single LLM vendor has a bad day. They all have bad days.
+    </div>
+
+    <div class="callout warn">
+      <strong>Closing thought.</strong> AI system design in 2026 is not about picking the smartest model. It's about assembling an opinionated pipeline — retrieval, routing, prompting, tooling, memory, safety, evaluation, observability, and human oversight — where each component is individually mediocre but together they produce a product users trust. The best AI systems look, from the inside, a lot like boring distributed systems with a weird oracle in the middle. Treat the oracle with respect; treat the system with rigor.
+    </div>
+
+    <div class="chapter-nav">
+      <a href="07-war-room.html"><div class="label">← Previous</div><div class="title">Chapter 7: AI War Room</div></a>
+      <a class="next" href="../index.html"><div class="label">Next →</div><div class="title">Back to Home</div></a>
+    </div>
+  </main>
+</div>
+<script src="../assets/js/nav.js"></script>
+</body>
+</html>

@@ -1,0 +1,624 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LLM Serving Infrastructure — Book III · AI System Design</title>
+<link rel="stylesheet" href="../assets/css/style.css">
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">System Design Books</div>
+    <div class="brand-sub">by Sanheen · Progressive Learning</div>
+    <div class="nav-section">
+      <h3>Home</h3>
+      <a href="../index.html">Overview</a>
+    </div>
+    <div class="nav-section">
+      <h3>Book I — Low Level Design</h3>
+      <a href="../lld/index.html">LLD Index</a>
+    </div>
+    <div class="nav-section">
+      <h3>Book II — High Level Design</h3>
+      <a href="../hld/index.html">HLD Index</a>
+    </div>
+    <div class="nav-section">
+      <h3>Book III — AI System Design</h3>
+      <a href="index.html">AI Index</a>
+      <a href="01-foundations.html">1. AI Foundations</a>
+      <a href="02-building-blocks.html">2. AI Building Blocks</a>
+      <a href="03-rag.html">3. RAG Systems</a>
+      <a href="04-llm-serving.html">4. LLM Serving</a>
+      <a href="05-agents.html">5. Agent Architectures</a>
+      <a href="06-hybrid-legacy.html">6. Hybrid & Legacy</a>
+      <a href="07-war-room.html">7. AI War Room</a>
+      <a href="08-real-architectures.html">8. Real AI Architectures</a>
+    </div>
+  </aside>
+  <main class="main">
+    <div class="breadcrumb"><a href="../index.html">Home</a> / <a href="index.html">Book III · AI</a> / Chapter 4</div>
+    <h1>Chapter 4: LLM Serving Infrastructure</h1>
+
+    <p class="lede">A 70-billion-parameter model is not a web service. It is a memory-bound, autoregressive, latency-sensitive beast that runs on $30,000 GPUs and generates one token at a time. Serving it at 10,000 QPS takes every trick in the book — continuous batching, PagedAttention, speculative decoding, quantization, tensor parallelism, LoRA multiplexing. This chapter is the trick book. By the end you will know why vLLM dominates throughput, why TGI v3 still wins on tail latency, and how to size a fleet for a 10K-QPS chat product without setting $40M/year on fire.</p>
+
+    <h2>1. Why serving LLMs is a different sport</h2>
+
+    <p>Classical web services assume: requests are small, processing is fast, compute is cheap, memory is plentiful. LLM serving inverts all four.</p>
+
+    <table>
+      <tr><th>Property</th><th>Typical microservice</th><th>LLM serving</th></tr>
+      <tr><td>Model size</td><td>few MB</td><td>10–500 GB (FP16)</td></tr>
+      <tr><td>Warm start</td><td>seconds</td><td>30 s – 5 min</td></tr>
+      <tr><td>Per-request work</td><td>O(ms), deterministic</td><td>O(seconds), variable by output length</td></tr>
+      <tr><td>Bottleneck</td><td>CPU/IO</td><td>GPU memory bandwidth (for decode)</td></tr>
+      <tr><td>Output shape</td><td>fixed</td><td>streaming, 1 token at a time</td></tr>
+      <tr><td>Batching</td><td>optional</td><td>mandatory for economics</td></tr>
+      <tr><td>$ per 1M requests</td><td>pennies</td><td>tens to hundreds of dollars</td></tr>
+    </table>
+
+    <p>Four structural facts drive every design decision in this chapter:</p>
+    <ol>
+      <li>Models are too big to keep multiple copies in GPU RAM. You serve one (possibly sharded) copy, and you must amortize it.</li>
+      <li>Decode is autoregressive — token <em>n</em> depends on token <em>n−1</em>. You cannot parallelize a single request's decode.</li>
+      <li>Decode is memory-bound. The GPU spends most cycles waiting for weights and KV cache to move from HBM to registers, not doing FLOPs.</li>
+      <li>Output length is unknown at admission time. A request may be 5 tokens or 5,000.</li>
+    </ol>
+
+    <hr>
+
+    <h2>2. Prefill vs Decode — the two-phase reality</h2>
+
+    <p>Every LLM request is two phases. They look similar in code, but they have opposite performance characteristics.</p>
+
+    <div class="diagram"><pre>
+  PREFILL                         DECODE
+  -------                         ------
+  input: 2000 tokens              input: 1 token at a time
+  work: 1 big matmul over all     work: 1 small matmul per step
+        tokens in parallel        × hundreds of steps (serial)
+  compute-bound                   memory-bound
+  GPU at ~80-95% FLOPs util       GPU at ~10-25% FLOPs util
+  produces: first token + KV      produces: next token + KV append
+  latency: ~50-300 ms             latency per token: 15-40 ms
+  batches well (compute parallel) batches EXTREMELY well (memory amortized)
+</pre></div>
+
+    <p>This split is the most important mental model in LLM serving. Two bottlenecks, two optimization strategies, and two different SLOs:</p>
+
+    <ul>
+      <li><strong>TTFT</strong> (Time To First Token) — dominated by prefill. "Feels fast."</li>
+      <li><strong>TPOT</strong> (Time Per Output Token) — dominated by decode. "Streams smoothly."</li>
+    </ul>
+
+    <p>A well-tuned Llama-70B on H100 tensor-parallel-4 in 2026: TTFT ~150 ms for 2K input, TPOT ~20 ms (50 tok/s user-perceived).</p>
+
+    <div class="callout">
+      <strong>Prefill-decode disaggregation</strong> (2024-2026 trend, DistServe / MoonCake / SGLang): run prefill on one pool of GPUs and decode on another. Prefill GPUs are saturated on compute; decode GPUs are saturated on memory bandwidth. Running both on the same GPU means one phase steals from the other. Disaggregation gives 1.5-3× throughput at the cost of KV cache transfer over NVLink/RDMA. Standard in hyperscale deployments.
+    </div>
+
+    <hr>
+
+    <h2>3. KV Cache — the real memory hog</h2>
+
+    <p>The attention mechanism, for every token it generates, needs to look at the keys and values of every <em>previous</em> token. Recomputing those from scratch every step would be O(n²) and suicidal. The KV cache stores them.</p>
+
+    <h3>What it actually stores</h3>
+
+    <p>Per token, per layer, per attention head, two tensors (K and V) of dimension head_dim.</p>
+
+    <pre><code>kv_bytes_per_token = 2                         # K + V
+                   * n_layers
+                   * n_kv_heads                # GQA: usually &lt; n_attn_heads
+                   * head_dim
+                   * dtype_bytes               # 2 for FP16, 1 for FP8
+</code></pre>
+
+    <h3>Llama-3-70B numbers</h3>
+
+    <table>
+      <tr><th>param</th><th>value</th></tr>
+      <tr><td>layers</td><td>80</td></tr>
+      <tr><td>kv heads (GQA)</td><td>8</td></tr>
+      <tr><td>head_dim</td><td>128</td></tr>
+      <tr><td>dtype</td><td>FP16 = 2 bytes</td></tr>
+      <tr><td>KV per token</td><td>2 × 80 × 8 × 128 × 2 = <strong>320 KB</strong></td></tr>
+      <tr><td>KV for 2,048 tokens</td><td>320 KB × 2048 = <strong>655 MB</strong></td></tr>
+      <tr><td>KV for 32,768 tokens</td><td>~10.5 GB for ONE request</td></tr>
+      <tr><td>KV for 100 concurrent 2K requests</td><td>65 GB</td></tr>
+    </table>
+
+    <p>H100 has 80 GB HBM. Model weights (FP16) take ~140 GB — already needs TP=2 (or TP=4 with room to spare). KV cache eats whatever is left. On a 4×H100 node serving 70B in FP16: ~180 GB of HBM available for KV after weights. You get roughly 270 concurrent 2K-token requests, or 18 concurrent 32K-token requests. This is the number that sets your QPS ceiling.</p>
+
+    <div class="callout warn">
+      <strong>KV cache size, not FLOPs, is the binding constraint for decode.</strong> Every serving optimization from here down (paged attention, quantized KV, prefix caching, context window caps) is ultimately a fight for KV cache space.
+    </div>
+
+    <h3>Eviction / admission</h3>
+    <ul>
+      <li><strong>Preemption</strong> (vLLM): swap a running request's KV cache to CPU or recompute it when a higher-priority request needs room.</li>
+      <li><strong>Admission control</strong>: refuse a new request if its projected KV at max_tokens would OOM.</li>
+      <li><strong>KV quantization</strong>: FP16 → FP8 or INT4 KV cache, cuts KV memory 2-4× with &lt;1% quality loss.</li>
+      <li><strong>Prefix caching</strong>: share KV pages for common prefixes (system prompt, few-shots). Can 10× effective capacity for chatty workloads.</li>
+    </ul>
+
+    <hr>
+
+    <h2>4. PagedAttention — vLLM's killer idea</h2>
+
+    <p>Before vLLM (2023), KV cache was stored as one big contiguous tensor per request. Two problems:</p>
+    <ul>
+      <li>You had to pre-allocate max_tokens worth of KV, even if the request ended at 50 tokens. <strong>Internal fragmentation</strong>.</li>
+      <li>Requests of different lengths leave gaps. <strong>External fragmentation</strong>.</li>
+    </ul>
+    <p>Measured waste in pre-vLLM systems: <strong>60–80%</strong> of KV memory unused. That is the majority of your decode capacity, gone.</p>
+
+    <h3>The OS analogy</h3>
+
+    <p>vLLM borrowed virtual memory from operating systems. KV cache is split into fixed-size <strong>blocks</strong> (e.g., 16 tokens each). A per-request <strong>block table</strong> maps logical positions to physical blocks, exactly like a page table.</p>
+
+    <div class="diagram"><pre>
+  Request A (logical tokens 0-47):            Physical KV blocks:
+    logical block 0 -> phys 42                 [0 ] free
+    logical block 1 -> phys 17                 [17] A-block1
+    logical block 2 -> phys 55                 [42] A-block0
+                                               [55] A-block2
+  Request B (logical tokens 0-31):             [71] B-block0
+    logical block 0 -> phys 71                 [88] B-block1
+    logical block 1 -> phys 88                 ...
+
+  No contiguity required. No pre-allocation. ~0% fragmentation.
+</pre></div>
+
+    <p>Consequences:</p>
+    <ul>
+      <li>Memory fragmentation drops from 60-80% to near 0.</li>
+      <li>Concurrent request count goes up 2-4× on the same GPU.</li>
+      <li>Prefix sharing (copy-on-write blocks) becomes natural — multiple requests sharing the same system prompt literally share physical blocks.</li>
+    </ul>
+
+    <p>Every serious modern engine now implements paged attention: vLLM, SGLang, TensorRT-LLM (since 2024), TGI v3. If your serving stack is not paged, you are leaving half your GPU on the table.</p>
+
+    <hr>
+
+    <h2>5. Continuous (in-flight) batching</h2>
+
+    <p>Static batching — collect N requests, run them together, return all at once — is catastrophic for LLMs because output lengths vary. A batch of 32 where 31 requests finish at token 50 and one runs to token 500 wastes 31 GPUs-worth of decode cycles doing nothing.</p>
+
+    <h3>Continuous batching (Orca 2022, now universal)</h3>
+
+    <p>At each decode step, the scheduler builds a fresh batch of currently-active requests. Finished requests drop out of the batch immediately; newly arrived requests join as soon as prefill completes. The batch size is re-chosen at every iteration.</p>
+
+    <div class="diagram"><pre>
+  t=0  batch = [R1]                 decode step
+  t=1  batch = [R1, R2(prefill)]    R2 joins after its prefill
+  t=2  batch = [R1, R2]             both decoding
+  t=3  batch = [R1, R2, R3]         R3 joins
+  t=4  R1 emits &lt;EOS&gt; and leaves
+       batch = [R2, R3, R4]         R4 joins, R1 gone
+  ...
+</pre></div>
+
+    <p>Measured effect: <strong>3-10× throughput</strong> over static batching for typical chat workloads, at equal p99 latency. This is the second-largest serving optimization after PagedAttention. Combined, they account for most of the gap between "I wrote a for-loop over model.generate" (20 QPS) and a production engine (500+ QPS on the same GPU).</p>
+
+    <hr>
+
+    <h2>6. Speculative decoding</h2>
+
+    <p>Decode is memory-bound. The GPU reads 140 GB of weights to produce one token. What if we could produce several tokens per weight-read?</p>
+
+    <h3>The idea</h3>
+
+    <ol>
+      <li>A small <strong>draft model</strong> (e.g., Llama-3.2-1B) proposes the next K tokens, very cheaply.</li>
+      <li>The big <strong>target model</strong> (Llama-70B) runs those K tokens in a single forward pass — one weight-read, K token probabilities.</li>
+      <li>For each of the K tokens, accept if the target's distribution matches the draft's closely enough (rejection sampling gives mathematically identical output to non-speculative sampling).</li>
+      <li>Accept the longest accepted prefix, commit, repeat.</li>
+    </ol>
+
+    <pre><code># Conceptual loop (Leviathan et al., 2022; since refined in Medusa, EAGLE, Lookahead)
+while not done:
+    drafts = draft_model.generate(ctx, k=5)               # cheap
+    target_logprobs = target_model.forward(ctx + drafts)  # 1 big fwd, K outputs
+    n_accepted = rejection_sample(drafts, target_logprobs)
+    ctx += drafts[:n_accepted] + [target_next_token_if_rejected]
+</code></pre>
+
+    <p>Acceptance rate depends on how well the draft mirrors the target. For a well-matched pair, 60-80% acceptance is common → <strong>1.8-2.5× speedup</strong> on decode, no quality loss.</p>
+
+    <h3>Variants (2025-2026)</h3>
+    <ul>
+      <li><strong>Medusa / EAGLE</strong>: multiple prediction heads on the <em>target</em> model itself — no separate draft model needed. Standard in 2026.</li>
+      <li><strong>Lookahead decoding</strong>: draft-free, uses Jacobi iteration; good when no draft model fits.</li>
+      <li><strong>Prompt lookup decoding</strong>: for RAG, draft tokens by copying from the retrieved context; near-zero cost, 2× speedup when the answer quotes context.</li>
+    </ul>
+
+    <div class="callout">
+      <strong>When spec decoding is worth it:</strong> decode-dominant workloads (long outputs, chat). Not worth it when output is 5 tokens — prefill dominates. Not worth it if draft model doesn't fit alongside target in GPU RAM. Most production stacks default-enable it for chat workloads in 2026.
+    </div>
+
+    <hr>
+
+    <h2>7. Quantization</h2>
+
+    <p>Weights are typically stored in FP16 at training time. For inference, you can usually represent them in fewer bits. Less memory → more KV cache room → more concurrent requests → higher throughput. Bandwidth is also reduced, which directly speeds up decode.</p>
+
+    <table>
+      <tr><th>Format</th><th>Bits</th><th>Memory</th><th>Quality hit</th><th>Notes</th></tr>
+      <tr><td>FP16 / BF16</td><td>16</td><td>1.00×</td><td>baseline</td><td>training default</td></tr>
+      <tr><td>FP8 (E4M3)</td><td>8</td><td>0.5×</td><td>&lt;0.5%</td><td>H100+ native, drop-in</td></tr>
+      <tr><td>INT8 (SmoothQuant)</td><td>8</td><td>0.5×</td><td>~1%</td><td>pre-H100 hardware</td></tr>
+      <tr><td>INT4 (GPTQ)</td><td>4</td><td>0.25×</td><td>2-4%</td><td>post-training, calibration needed</td></tr>
+      <tr><td>INT4 (AWQ)</td><td>4</td><td>0.25×</td><td>1-3%</td><td>activation-aware, slightly better than GPTQ</td></tr>
+      <tr><td>GGUF Q4_K_M</td><td>~4.5</td><td>0.28×</td><td>1-2%</td><td>llama.cpp ecosystem, CPU-friendly</td></tr>
+      <tr><td>INT2 / 1.58-bit</td><td>2</td><td>0.13×</td><td>5-15%</td><td>research, niche</td></tr>
+    </table>
+
+    <h3>Practical defaults (2026)</h3>
+    <ul>
+      <li><strong>Datacenter, H100+ / B100</strong>: FP8 weights + FP8 KV cache. Nearly free quality. This is the baseline.</li>
+      <li><strong>Cost-sensitive / A100 / L40S</strong>: AWQ INT4 weights + FP8 KV. Double the throughput of FP16, small quality cost.</li>
+      <li><strong>Edge / consumer GPU</strong>: GGUF Q4_K_M or Q5_K_M.</li>
+    </ul>
+
+    <h3>What NOT to quantize</h3>
+    <p>Embeddings and the final LM head often break at INT4. Most toolchains skip them automatically. Attention softmax accumulators stay in FP16/FP32. Router weights in MoE stay full precision.</p>
+
+    <hr>
+
+    <h2>8. Model parallelism — when one GPU isn't enough</h2>
+
+    <p>Llama-70B at FP16 = ~140 GB. No single GPU today has that much HBM for weights alone once you account for activations and KV. You shard.</p>
+
+    <h3>Tensor Parallel (TP)</h3>
+    <p>Split each weight matrix across N GPUs along rows or columns. Each forward pass requires all-reduce communication per layer. Needs <strong>fat NVLink/NVSwitch</strong> — intra-node only in practice. Standard TP sizes: 2, 4, 8.</p>
+    <p>TP halves latency (more compute per token) but adds fixed comm overhead. Rule: use the smallest TP that fits the model + reasonable KV cache.</p>
+
+    <h3>Pipeline Parallel (PP)</h3>
+    <p>Split the <em>layers</em> across GPUs. Layer 0-39 on GPU A, 40-79 on GPU B. Token flows through sequentially. Pipeline bubbles waste cycles unless batch is deep. Works over slower interconnects (PCIe, inter-node) because activations (MBs) are cheaper to ship than weights (GBs).</p>
+    <p>Used to span nodes when a single model exceeds one node's HBM (e.g., 405B at FP16 needs 2 × 8×H100).</p>
+
+    <h3>Expert Parallel (EP) — MoE models</h3>
+    <p>In Mixture-of-Experts models (Mixtral, DeepSeek-V3, Llama-4), each layer has many FFN experts; each token routes to 2-8 of them. Experts can live on different GPUs. EP makes MoE serving practical — without it, replicating all experts on every GPU defeats the sparsity.</p>
+    <p>Drawback: routing can be imbalanced ("hot experts") → some GPUs at 100%, others idle. Production stacks use capacity factors, expert replication, and dropless routing.</p>
+
+    <h3>When to use what</h3>
+    <table>
+      <tr><th>Model shape</th><th>Combo</th></tr>
+      <tr><td>7B–13B dense</td><td>TP=1 (one GPU fits it)</td></tr>
+      <tr><td>70B dense</td><td>TP=2 or TP=4 intra-node</td></tr>
+      <tr><td>200-400B dense</td><td>TP=8 + PP=2, multi-node</td></tr>
+      <tr><td>MoE 100B+</td><td>TP=8 + EP across nodes</td></tr>
+      <tr><td>Long context (1M+)</td><td>add Sequence/Context Parallel (split the sequence dim)</td></tr>
+    </table>
+
+    <hr>
+
+    <h2>9. Inference engines — the 2026 landscape</h2>
+
+    <table>
+      <tr><th>Engine</th><th>Strength</th><th>Weakness</th><th>Pick when</th></tr>
+      <tr><td><strong>vLLM</strong></td><td>highest throughput on commodity NVIDIA; huge community; supports almost every model day-1; PagedAttention origin</td><td>tail latency less tight than TGI; setup can be fussy for exotic quant</td><td>default for multi-tenant, high-QPS internal serving</td></tr>
+      <tr><td><strong>TGI v3</strong> (HuggingFace)</td><td>excellent tail latency; best long-context handling; SLO-aware scheduler</td><td>throughput trails vLLM ~10-20%; HF-centric</td><td>user-facing products with strict p99</td></tr>
+      <tr><td><strong>SGLang</strong></td><td>fastest structured output (JSON/regex); RadixAttention prefix caching; great for agents</td><td>newer, smaller ecosystem</td><td>agentic workloads, heavy JSON, tool-use-heavy</td></tr>
+      <tr><td><strong>TensorRT-LLM</strong></td><td>maximum NVIDIA throughput; best FP8 kernels; tight with Triton Inference Server</td><td>compile step is painful; NVIDIA-only; lags on newest models</td><td>biggest hyperscale NVIDIA deployments</td></tr>
+      <tr><td><strong>LMDeploy</strong></td><td>strong on AWQ INT4; good InternLM/Qwen support; fast turbomind backend</td><td>smaller community outside China</td><td>APAC deployments, Qwen-heavy stacks</td></tr>
+      <tr><td><strong>llama.cpp / Ollama</strong></td><td>CPU + Metal + ROCm; GGUF ecosystem; single-user excellence</td><td>not a multi-tenant engine</td><td>local dev, edge, single-user</td></tr>
+      <tr><td><strong>MLC-LLM</strong></td><td>portable compile to any backend (WebGPU, iOS, Android)</td><td>niche for server</td><td>on-device</td></tr>
+    </table>
+
+    <div class="callout success">
+      Default choice for a new 2026 backend: <strong>vLLM</strong> for throughput workloads, <strong>SGLang</strong> if you're heavy on agents/JSON. Fall back to TGI v3 if tail latency is a hard product requirement. Use TensorRT-LLM only when you have a dedicated perf team and a stable model.
+    </div>
+
+    <hr>
+
+    <h2>10. Hardware — memory bandwidth is the number that matters</h2>
+
+    <table>
+      <tr><th>GPU</th><th>HBM</th><th>BW (TB/s)</th><th>FP16 TFLOPS</th><th>Notes</th></tr>
+      <tr><td>A100 80GB</td><td>80 GB</td><td>2.0</td><td>312</td><td>still workhorse, cheaper</td></tr>
+      <tr><td>H100 SXM</td><td>80 GB</td><td>3.35</td><td>989 (FP16), 1979 (FP8)</td><td>2026 baseline</td></tr>
+      <tr><td>H200</td><td>141 GB</td><td>4.8</td><td>same compute as H100</td><td>drop-in upgrade, huge KV room</td></tr>
+      <tr><td>B100 / B200</td><td>192 GB</td><td>~8</td><td>2-3× H100</td><td>Blackwell, 2025-2026 rollout</td></tr>
+      <tr><td>GB200 NVL72</td><td>13.5 TB pooled</td><td>huge NVLink domain</td><td>—</td><td>rack-scale, huge models + long ctx</td></tr>
+      <tr><td>MI300X (AMD)</td><td>192 GB</td><td>5.3</td><td>1307 (FP16)</td><td>more HBM than H100, ROCm maturing, price-competitive</td></tr>
+      <tr><td>TPU v5p / v6e (Trillium)</td><td>95-192 GB</td><td>2.8-7.3</td><td>—</td><td>Google-only, JAX/XLA stack</td></tr>
+      <tr><td>Inferentia2 / Trainium2</td><td>—</td><td>—</td><td>—</td><td>AWS-only, large $ savings if you fit</td></tr>
+    </table>
+
+    <div class="callout">
+      <strong>Why memory bandwidth, not FLOPs?</strong> For decode on a 70B model: each token requires reading 140 GB of weights. On H100 at 3.35 TB/s, theoretical minimum is 140/3350 = 42 ms/token. The actual 20 ms is achieved only because batching amortizes that 140 GB read across many requests. FLOPs utilization on decode typically 10-25%; <strong>bandwidth utilization is what you optimize</strong>.
+    </div>
+
+    <p>This is also why MI300X (5.3 TB/s, 192 GB) is competitive with H100 for decode-dominant inference despite weaker FLOPs and a less mature software stack — for the bottleneck that matters, it has more of the thing.</p>
+
+    <hr>
+
+    <h2>11. Autoscaling</h2>
+
+    <p>Horizontal scaling of LLM servers looks like regular autoscaling until you hit two walls: cold start and batching economics.</p>
+
+    <h3>Cold start problem</h3>
+    <ul>
+      <li>Loading a 70B FP16 model from S3: ~140 GB at ~1 GB/s effective = 2-3 minutes.</li>
+      <li>Loading from local NVMe: 20-40 seconds.</li>
+      <li>From a pre-warmed local cache: 10-20 seconds.</li>
+      <li>CUDA graph capture + compile: additional 10-60 seconds.</li>
+    </ul>
+
+    <p>You cannot react to a traffic spike in real time. Options:</p>
+    <ul>
+      <li><strong>Predictive scaling</strong>: forecast load from historical patterns + leading indicators (DAU, upstream service QPS). Pre-warm N minutes ahead of the curve.</li>
+      <li><strong>Warm pools</strong>: keep a few idle replicas with the model loaded but no traffic.</li>
+      <li><strong>Model streaming</strong>: tools like Run:ai, Anyscale, and cloud-native solutions stream weights from object storage with prefetch; 5-15 s cold start.</li>
+      <li><strong>Multi-model slots</strong>: serve many small models on one GPU with hot-swap; amortize cold-start cost across tenants.</li>
+    </ul>
+
+    <h3>Scale-to-zero</h3>
+    <p>Only viable for cost-sensitive, latency-tolerant workloads (batch, internal tools). For user-facing chat, a 30-second cold start breaks the product. Default to a floor of 1-3 replicas in production.</p>
+
+    <h3>Scaling signal</h3>
+    <p>Do NOT autoscale on CPU. Useless for GPUs. Use:</p>
+    <ul>
+      <li>Average queue wait time (primary signal for "need more capacity").</li>
+      <li>KV cache utilization (secondary).</li>
+      <li>Batch size at saturation (tells you if you can still absorb more).</li>
+      <li>p95 TTFT (user-facing SLO).</li>
+    </ul>
+
+    <hr>
+
+    <h2>12. Queue management and admission control</h2>
+
+    <p>Incoming requests do not arrive evenly. A well-designed LLM server is mostly a queue in front of a batcher.</p>
+
+    <div class="diagram"><pre>
+  clients --> gateway --> priority queues --> scheduler --> engine
+                           [ P0 realtime ]
+                           [ P1 default  ]     --(pick best-fit)-->
+                           [ P2 batch    ]
+
+                ^                                   ^
+                |                                   |
+           admission control                      SLO monitor
+           (reject if queue &gt; X)                 (promote/demote)
+</pre></div>
+
+    <h3>Priorities</h3>
+    <ul>
+      <li><strong>P0 interactive</strong>: strict TTFT SLO, small max_tokens, preempts others when needed.</li>
+      <li><strong>P1 standard</strong>: default.</li>
+      <li><strong>P2 batch</strong>: async, can wait minutes, fills idle capacity.</li>
+    </ul>
+
+    <h3>SLO-aware scheduling</h3>
+    <p>The scheduler looks at each queued request's deadline (arrival + SLO budget) and schedules to minimize SLO misses, not just FIFO. A request with 50ms of TTFT budget left beats one with 5s left. Sarathi-Serve and TGI v3 pioneered this pattern.</p>
+
+    <h3>Admission control</h3>
+    <p>If adding this request would blow KV cache, reject early with 429 rather than admit and preempt. Preemption is expensive: you either recompute (costs GPU time) or swap (costs PCIe bandwidth). Most mature stacks combine: accept, admit to a waiting list, run when room opens, reject only if the waiting list itself is too long.</p>
+
+    <hr>
+
+    <h2>13. Multi-tenancy and LoRA serving</h2>
+
+    <p>In 2026, most enterprises don't want one fine-tuned model per use case — they want <em>hundreds</em>. LoRA adapters (low-rank weight deltas, typically 10-200 MB each) make that economically possible.</p>
+
+    <div class="diagram"><pre>
+                        +------------------+
+  request (tenant=A) -->|                  |
+  request (tenant=B) -->|   one base 70B   | --> outputs
+  request (tenant=C) -->|   + LoRA swap    |
+                        |     per request  |
+                        +------------------+
+                                ^
+                        +-------+-------+
+                        | LoRA cache    |
+                        | (A, B, C, ... | GPU RAM LRU
+                        |  tens of MB) |
+                        +---------------+
+</pre></div>
+
+    <h3>How it works</h3>
+    <p>At each layer, the LoRA adds a tiny low-rank matrix multiply to the base output. The base model is loaded once. Adapters are hot-swapped per request. Techniques like <strong>Punica</strong> and <strong>S-LoRA</strong> batch requests with different adapters in the same forward pass, keeping throughput high. vLLM, SGLang, and TensorRT-LLM all support multi-LoRA serving in 2026.</p>
+
+    <h3>Per-tenant concerns</h3>
+    <ul>
+      <li><strong>Rate limits</strong>: per-tenant tokens/sec and concurrent requests; enforced at the gateway.</li>
+      <li><strong>Fairness</strong>: dominant-resource fair queuing (DRFQ) across tenants; one heavy tenant can't starve others.</li>
+      <li><strong>Isolation</strong>: one crash should not take down others. Hard at the kernel level; mostly enforced by process separation + quota.</li>
+      <li><strong>Billing</strong>: meter input + output tokens per tenant, per model, per request.</li>
+    </ul>
+
+    <hr>
+
+    <h2>14. Capacity math — how many GPUs for 1,000 QPS?</h2>
+
+    <p>Working example: Llama-3-70B, 200 in / 200 out average, 4×H100 node with TP=4, FP8 weights, FP8 KV.</p>
+
+    <table>
+      <tr><th>quantity</th><th>value</th><th>how</th></tr>
+      <tr><td>model weights (FP8)</td><td>~70 GB</td><td>70B × 1 byte</td></tr>
+      <tr><td>per-GPU weight share (TP=4)</td><td>~17.5 GB</td><td>70/4</td></tr>
+      <tr><td>HBM per GPU</td><td>80 GB</td><td>H100</td></tr>
+      <tr><td>HBM free per GPU for KV + act</td><td>~55 GB</td><td>80 − 17.5 − overhead</td></tr>
+      <tr><td>total KV budget per node</td><td>~220 GB</td><td>4 × 55</td></tr>
+      <tr><td>KV per token (FP8, 70B)</td><td>~160 KB</td><td>half of FP16 320 KB</td></tr>
+      <tr><td>tokens of KV per node</td><td>~1.4M</td><td>220 GB / 160 KB</td></tr>
+      <tr><td>avg context per request</td><td>~400 tok</td><td>200 in + 200 out</td></tr>
+      <tr><td>concurrent requests per node</td><td>~3,400 theoretical, ~1,500 practical</td><td>1.4M / 400, derated for fragmentation, prefix caches, safety margin</td></tr>
+      <tr><td>decode TPOT at batch 64</td><td>~20 ms/token</td><td>measured</td></tr>
+      <tr><td>decode throughput per node</td><td>~3,200 tok/s</td><td>64 req × 50 tok/s</td></tr>
+      <tr><td>prefill time for 200 tok</td><td>~60 ms</td><td>measured</td></tr>
+      <tr><td>avg total latency per request</td><td>~4.1 s</td><td>60 ms prefill + 200 × 20 ms decode</td></tr>
+      <tr><td>sustained completed req/s per node</td><td>~8 / s (decode-bound)</td><td>3200 tok/s ÷ 400 tok/req</td></tr>
+      <tr><td>nodes needed for 1,000 QPS</td><td>~125 nodes</td><td>1000 / 8</td></tr>
+    </table>
+
+    <p>That is ~500 H100 SXM GPUs at full load, before headroom. At list ~$3/GPU-hr on cloud, that is ~$13M/year of compute to sustain 1K QPS. Reserved pricing and contract discounts trim that to $5-8M.</p>
+
+    <div class="callout warn">
+      <strong>Gut check:</strong> if your product economics cannot support $5-15M/year of compute for 1K QPS of 70B generation, you probably need (a) a smaller model for the common case, (b) aggressive caching, (c) quantization to INT4 + MI300X, or (d) all three. See next section.
+    </div>
+
+    <hr>
+
+    <h2>15. Cost optimization — the real moves</h2>
+
+    <ol>
+      <li><strong>Model routing / cascades</strong>. Cheap small model (Haiku, Llama-3-8B) handles 60-80% of traffic. Hard queries route to the 70B. A small router model decides. 30-60% total cost reduction with &lt;2% quality loss.</li>
+      <li><strong>Semantic + exact caching</strong>. FAQ-style deployments see 20-40% cache hit rates. Cache hit is near-zero cost.</li>
+      <li><strong>Distillation</strong>. Fine-tune a small model on the big model's outputs for your specific task. Once you have traffic data, you can often replace 70B with a 8B distill at 80-95% quality.</li>
+      <li><strong>Spot / interruptible GPUs</strong>. For batch workloads, 50-70% discount. For online, use for the excess capacity above a reserved baseline.</li>
+      <li><strong>Quantize aggressively</strong>. FP8 is free quality. AWQ INT4 doubles throughput at ~1-3% quality cost — often worth it.</li>
+      <li><strong>Prompt caching</strong>. If every request shares the same 2K-token system prompt, cache its KV once. 30-70% reduction in prefill cost.</li>
+      <li><strong>Short-circuit on low entropy</strong>. If the first few tokens are extremely confident ("Yes." "No."), stop early.</li>
+      <li><strong>Co-location of prefill and decode on different GPU classes</strong>. Prefill wants compute (B100); decode wants bandwidth (MI300X or H200). Heterogeneous fleet.</li>
+    </ol>
+
+    <hr>
+
+    <h2>16. Observability</h2>
+
+    <p>Non-negotiable metrics for production LLM serving:</p>
+
+    <table>
+      <tr><th>Metric</th><th>What it tells you</th><th>Alert when</th></tr>
+      <tr><td>TTFT p50/p95/p99</td><td>prefill health, queue wait</td><td>p95 &gt; 2× target for 5 min</td></tr>
+      <tr><td>TPOT p50/p95</td><td>decode health, batch pressure</td><td>p95 &gt; target</td></tr>
+      <tr><td>end-to-end latency</td><td>user experience</td><td>SLO breach</td></tr>
+      <tr><td>tokens/sec per GPU</td><td>serving efficiency</td><td>drop &gt; 20% baseline</td></tr>
+      <tr><td>batch size (current, avg)</td><td>batching efficiency</td><td>consistently tiny → underutilized</td></tr>
+      <tr><td>KV cache utilization</td><td>memory pressure</td><td>&gt; 85% sustained</td></tr>
+      <tr><td>KV cache hit rate (prefix)</td><td>prompt caching savings</td><td>drop suggests tenant churn</td></tr>
+      <tr><td>queue depth / wait time</td><td>scaling signal</td><td>wait &gt; 500 ms</td></tr>
+      <tr><td>preemption rate</td><td>admission too loose</td><td>any significant rate</td></tr>
+      <tr><td>OOM count</td><td>bug or overcommit</td><td>any</td></tr>
+      <tr><td>tokens/$ (cost metric)</td><td>business</td><td>unit-econ regression</td></tr>
+      <tr><td>error rate by tenant</td><td>SLO per tenant</td><td>per-tenant breach</td></tr>
+      <tr><td>acceptance rate (spec dec)</td><td>draft model health</td><td>drop &gt; 10 pp</td></tr>
+      <tr><td>output length distribution</td><td>workload shift</td><td>shape change</td></tr>
+    </table>
+
+    <p>Stack: Prometheus + Grafana + OpenTelemetry traces. vLLM and SGLang expose these natively on /metrics. Tag every metric with model, model_version, adapter (if LoRA), tenant, and engine_version.</p>
+
+    <hr>
+
+    <h2>17. Worked example — Designing a 10K QPS chat service</h2>
+
+    <h3>Requirements</h3>
+    <ul>
+      <li>Consumer chat product, general conversation and light RAG.</li>
+      <li>10,000 QPS peak, 3,000 QPS average.</li>
+      <li>TTFT SLO: p95 &lt; 800 ms.</li>
+      <li>TPOT SLO: p95 &lt; 40 ms (≥25 tok/s perceived).</li>
+      <li>Avg input 400 tokens, avg output 200 tokens, max 4K context.</li>
+      <li>Global, 3 regions.</li>
+    </ul>
+
+    <h3>Model strategy</h3>
+    <ul>
+      <li><strong>Router</strong>: tiny classifier (distilled, on CPU) picks tier.</li>
+      <li><strong>70% traffic → small tier</strong>: Llama-3.3-8B FP8 on L40S / single H100.</li>
+      <li><strong>25% → medium tier</strong>: Llama-3.3-70B FP8 on 4×H100.</li>
+      <li><strong>5% → large tier</strong>: 200-400B frontier model on 8×H100 or GB200 slice.</li>
+    </ul>
+
+    <h3>Capacity per region (peak 4K QPS regional)</h3>
+    <table>
+      <tr><th>Tier</th><th>QPS</th><th>Throughput/node</th><th>Nodes</th><th>GPUs</th></tr>
+      <tr><td>Small (8B)</td><td>2,800</td><td>~120 req/s per 1×H100</td><td>30 (× headroom 40%)</td><td>30</td></tr>
+      <tr><td>Medium (70B)</td><td>1,000</td><td>~8 req/s per 4×H100</td><td>180</td><td>720</td></tr>
+      <tr><td>Large (400B)</td><td>200</td><td>~2 req/s per 8×H100</td><td>140</td><td>1,120</td></tr>
+      <tr><td colspan="4">Per region GPU total</td><td>~1,870</td></tr>
+      <tr><td colspan="4">Across 3 regions</td><td>~5,600</td></tr>
+    </table>
+
+    <h3>Architecture</h3>
+    <div class="diagram"><pre>
+                            global
+                              |
+                   +----------+----------+
+                   |          |          |
+              [region-US]  [region-EU] [region-APAC]
+                   |
+          +--------+----------------+
+          |        |                |
+       gateway  auth/rate-limit  observability
+          |
+          v
+      +---------------+
+      | router (tiny) | --> tier decision
+      +-------+-------+
+              |
+     +--------+-------+-----------+
+     |        |       |           |
+     v        v       v           v
+  [small]  [medium] [large]   [sem cache]
+  vLLM     vLLM    vLLM        redis
+  pool     pool    pool
+     |        |       |
+     +--------+-------+
+              |
+        KV cache store
+        (prefix sharing, cross-node)
+</pre></div>
+
+    <h3>SLO defense</h3>
+    <ul>
+      <li>Semantic cache in front of tiers: ~20-30% hit rate, deflects load.</li>
+      <li>Admission control at 70% KV cache utilization; queue SLO budget &lt; 500 ms.</li>
+      <li>Speculative decoding enabled on all tiers (Medusa heads on base).</li>
+      <li>FP8 weights + FP8 KV cache end-to-end.</li>
+      <li>Warm pool: 10% extra reserved, scale-out predictive on daily curve.</li>
+      <li>Regional failover: cross-region spillover with 50 ms budget add.</li>
+    </ul>
+
+    <h3>Cost estimate</h3>
+    <table>
+      <tr><th>line item</th><th>$/yr</th></tr>
+      <tr><td>~5,600 H100-equivalents, 3-yr reserved @ $1.40/GPU-hr blended</td><td>$68 M</td></tr>
+      <tr><td>routing, gateways, KV store, observability</td><td>$3 M</td></tr>
+      <tr><td>egress, storage, misc</td><td>$2 M</td></tr>
+      <tr><td>headcount (20 eng)</td><td>$8 M</td></tr>
+      <tr><td><strong>Total</strong></td><td><strong>~$81 M/yr</strong></td></tr>
+    </table>
+
+    <p>Unit economics: 3K QPS × 86,400 s × 365 = 9.5 × 10^10 requests/year. $81M / 95B = <strong>$0.00085/request fully loaded</strong>. At 200 output tokens, that is ~$4.25 per million output tokens — competitive with frontier API pricing while keeping data in-house.</p>
+
+    <h3>What breaks in production (and how you learn)</h3>
+    <div class="callout danger">
+      <ul>
+        <li><strong>Thundering herd on cold region</strong>: load balancer drops a region, other two spike. Fix: slow-start cross-region, regional isolation budgets.</li>
+        <li><strong>Long-tail requests</strong>: someone pastes a 30K-token doc and asks for 4K output. That one request holds a batch slot for 2 minutes. Fix: per-tier max_context + max_output, classify and route to batch tier.</li>
+        <li><strong>LoRA cache thrash</strong>: tenants churn adapters faster than cache warms. Fix: pin top-K adapters, throttle less common.</li>
+        <li><strong>KV cache fragmentation after deploys</strong>: rolling restart leaves fresh nodes cold for 5-10 minutes. Fix: staged warm with synthetic traffic.</li>
+        <li><strong>Spec decoding acceptance crash</strong> after a base model update because draft model is stale. Fix: pin pairs, CI check acceptance rate.</li>
+      </ul>
+    </div>
+
+    <hr>
+
+    <h2>The mental model, compressed</h2>
+
+    <ol>
+      <li>Serving an LLM is memory-bandwidth engineering, not compute engineering. Optimize for bytes moved, not FLOPs.</li>
+      <li>Prefill and decode are two different workloads. Treat them separately (batch, possibly disaggregate, measure with different SLOs).</li>
+      <li>KV cache is the binding constraint. PagedAttention + quantized KV + prefix caching are how you win.</li>
+      <li>Continuous batching is mandatory. Static batching is a bug.</li>
+      <li>Spec decoding, quantization, LoRA multiplexing, semantic cache, model routing — stack them, they compound.</li>
+      <li>Cold starts are minutes. Plan capacity predictively, never reactively.</li>
+      <li>Measure TTFT, TPOT, batch size, KV utilization, acceptance rate, tokens/$. Nothing else is serving SRE.</li>
+    </ol>
+
+    <p>Next we climb one layer up. LLMs serving fast is necessary but not sufficient — the 2026 product surface is agents that chain reasoning, use tools, and recover from their own mistakes. That is where all this infrastructure gets pushed to its limits.</p>
+
+    <div class="chapter-nav">
+      <a href="03-rag.html"><div class="label">← Previous</div><div class="title">RAG Systems</div></a>
+      <a class="next" href="05-agents.html"><div class="label">Next →</div><div class="title">Agent Architectures</div></a>
+    </div>
+  </main>
+</div>
+<script src="../assets/js/nav.js"></script>
+</body>
+</html>

@@ -36,7 +36,7 @@
     <div class="breadcrumb"><a href="../index.html">Home</a> / <a href="index.html">Book I · LLD</a> / Chapter 7</div>
     <h1>Chapter 7: War Room Scenarios — Production LLD Bugs</h1>
 
-    <p class="lede">It is 2:47 AM. PagerDuty fires. Someone on Slack is typing in all-caps. The dashboard is red. Welcome to the war room. In this chapter we walk through eight real-flavored production incidents, each rooted in a subtle LLD mistake. You will see the alert, the investigation, the bad code, the diagnosis, the fix, and — most important — the pattern or test that would have prevented the page.</p>
+    <p class="lede">It is 2:47 AM. PagerDuty fires. Someone on Slack is typing in all-caps. The dashboard is red. Welcome to the war room. In this chapter we walk through eighteen real-flavored production incidents, each rooted in a subtle LLD mistake. You will see the alert, the investigation, the bad code, the diagnosis, the fix, and — most important — the pattern or test that would have prevented the page.</p>
 
     <p>If you have read chapters 1 through 6 carefully, you will recognize the mistakes as violations of principles you already know. That is the point: clean LLD is not academic. It is what lets you sleep through the night.</p>
 
@@ -514,7 +514,7 @@ class OrderStateMachine:
 
     <hr>
 
-    <h2>Scenario 8: The O(n²) Hidden in a Decorator</h2>
+    <h2>Scenario 8: The O(n&sup2;) Hidden in a Decorator</h2>
 
     <div class="callout danger">
       <div class="callout-title">INCIDENT · P1 · "search is slow only in prod"</div>
@@ -538,7 +538,7 @@ class SearchService:
         ...
         return matches   # a list of 50,000 Doc objects</code></pre>
 
-    <p><strong>The diagnosis.</strong> The f-string eagerly calls <code>str(result)</code> <em>even when debug logging is disabled</em>. In staging, log level was INFO — the string was built and discarded; nobody noticed the cost. At 3 AM, SRE flipped prod to DEBUG for an unrelated service, and the global formatter changed. Now the full 50k-doc list serializes on every call — O(n) in the result — and because <code>Doc.__repr__</code> iterates its fields, the effective cost is O(n · fields) per call, which behaves like O(n²) relative to query size.</p>
+    <p><strong>The diagnosis.</strong> The f-string eagerly calls <code>str(result)</code> <em>even when debug logging is disabled</em>. In staging, log level was INFO — the string was built and discarded; nobody noticed the cost. At 3 AM, SRE flipped prod to DEBUG for an unrelated service, and the global formatter changed. Now the full 50k-doc list serializes on every call — O(n) in the result — and because <code>Doc.__repr__</code> iterates its fields, the effective cost is O(n &middot; fields) per call, which behaves like O(n&sup2;) relative to query size.</p>
 
     <p><strong>The fix.</strong> Use lazy logging so the string is built only when the log line actually emits. And never <code>repr</code> unbounded collections.</p>
 
@@ -566,15 +566,1247 @@ class SearchService:
 
     <hr>
 
+    <h2>Scenario 9: The 4 AM Singleton Test Failure</h2>
+
+    <div class="callout danger">
+      <div class="callout-title">INCIDENT · CI · 04:12 AM (Alice is paged)</div>
+      <p><strong>Alert:</strong> <code>main</code> branch is red. Test <code>test_user_limit_reset</code> has failed on every CI run for two hours. Alice ran it locally — passes. Bob ran it locally — passes. It only fails in CI. And only when run <em>after</em> <code>test_user_signup</code>.</p>
+    </div>
+
+    <p><strong>The Slack thread (#eng-platform).</strong></p>
+
+    <pre><code>[04:14] alice: anyone else seeing test_user_limit_reset fail in CI?
+[04:15] alice: ran it 10x locally, green every time
+[04:18] bob:   it passes locally for me too. classic flaky test?
+[04:19] alice: it's been failing for 2 hours straight. not flaky. deterministic.
+[04:22] manager: we cannot merge anything until main is green. triage please.
+[04:31] alice: found it. if I run `pytest test_user_signup.py test_user_limits.py`
+               in that order, the second one fails. swap the order, both pass.
+[04:32] bob:   oh no. the service is a singleton isn't it.
+[04:33] alice: the service is a singleton.</code></pre>
+
+    <p><strong>The bad code.</strong></p>
+
+    <pre><code>class RateLimiter:
+    """Singleton — one limiter per process."""
+    _instance = None
+
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+            cls._instance._counts = {}
+        return cls._instance
+
+    def incr(self, user_id: str) -&gt; int:
+        self._counts[user_id] = self._counts.get(user_id, 0) + 1
+        return self._counts[user_id]
+
+# -------- tests --------
+def test_user_signup():
+    limiter = RateLimiter()
+    for _ in range(5):
+        limiter.incr("alice")
+    assert limiter.incr("alice") == 6   # passes, leaves state behind
+
+def test_user_limit_reset():
+    limiter = RateLimiter()              # NOT a fresh instance!
+    assert limiter.incr("alice") == 1   # FAILS: actually returns 7</code></pre>
+
+    <p><strong>Initial wrong hypothesis.</strong> Alice thinks it's a timing issue and adds <code>time.sleep(0.1)</code> before the assertion. Still fails. Bob thinks it's a pytest-xdist parallelism issue and disables <code>-n auto</code>. Still fails. Thirty minutes gone.</p>
+
+    <p><strong>The root cause.</strong> The <code>RateLimiter</code> class uses the Singleton pattern: <code>__new__</code> returns the same instance every call. Python's module cache means that instance persists across tests in the same process. <code>test_user_signup</code> left <code>_counts["alice"] = 6</code> behind. <code>test_user_limit_reset</code> constructed what it thought was a fresh limiter — but got the same one. Tests aren't isolated.</p>
+
+    <div class="callout success">
+      <div class="callout-title">FIX · Dependency injection kills the singleton</div>
+      <pre><code>class RateLimiter:
+    """No more singleton. Construct one per caller."""
+    def __init__(self):
+        self._counts: dict[str, int] = {}
+
+    def incr(self, user_id: str) -&gt; int:
+        self._counts[user_id] = self._counts.get(user_id, 0) + 1
+        return self._counts[user_id]
+
+# Production code gets ONE instance from the DI container.
+# Tests get fresh instances via fixtures.
+
+@pytest.fixture
+def limiter() -&gt; RateLimiter:
+    return RateLimiter()   # fresh per test, no shared state
+
+def test_user_signup(limiter):
+    for _ in range(5):
+        limiter.incr("alice")
+    assert limiter.incr("alice") == 6
+
+def test_user_limit_reset(limiter):
+    assert limiter.incr("alice") == 1   # now passes, always</code></pre>
+      <p>If you <em>must</em> keep a singleton (shared thread pool, connection pool), provide a <code>reset()</code> classmethod and call it in <code>conftest.py</code>'s <code>autouse</code> fixture.</p>
+    </div>
+
+    <div class="callout warn">
+      <div class="callout-title">PREVENTION</div>
+      <ul>
+        <li>Singletons are globals in a trench coat. They hide shared state and break test isolation — always.</li>
+        <li>Run your test suite with <code>pytest -p no:randomly</code> locally, and <code>pytest-randomly</code> in CI. If tests fail depending on order, you have hidden state.</li>
+        <li>Prefer dependency injection: pass collaborators as constructor arguments. The <em>composition root</em> (the top of <code>main</code>) is the only place that decides "there is one limiter per process."</li>
+      </ul>
+    </div>
+
+    <div class="callout success">
+      <div class="callout-title">STAFF ENGINEER TAKEAWAY</div>
+      <p>"It passed locally" is the most expensive sentence in engineering. If a test depends on process state that previous tests created, it is not a test — it is a trap for your future team. Kill singletons. Inject dependencies. Let the DI container decide lifetimes, not <code>__new__</code>.</p>
+    </div>
+
+    <hr>
+
+    <h2>Scenario 10: The Builder That Lied</h2>
+
+    <div class="callout danger">
+      <div class="callout-title">INCIDENT · P1 · Wednesday 15:47 UTC</div>
+      <p><strong>Alert:</strong> <code>notification-svc</code> sending emails with empty <code>To:</code> field. SendGrid is returning 400s at 8% of traffic. Marketing's drip campaign is half-broken. Growth PM is in the Slack channel "why are half our signup emails bouncing?"</p>
+    </div>
+
+    <p><strong>The Slack thread.</strong></p>
+
+    <pre><code>[15:48] carol:  SendGrid dashboard shows 12k failures in the last hour
+                all with "missing recipient" errors
+[15:49] dave:   but the code clearly calls .withRecipient()... right?
+[15:51] carol:  the NEW signup flow doesn't. the old one does.
+[15:52] dave:   wait, if you skip .withRecipient(), does build() fail?
+[15:53] carol:  checking... no. it just returns an Email with to=None.
+[15:53] dave:   that's the whole bug then. the builder doesn't validate.
+[15:54] carol:  who wrote this? &gt;:(
+[15:55] dave:   `git blame`... oh. we all did.</code></pre>
+
+    <p><strong>The bad code.</strong></p>
+
+    <pre><code>class EmailBuilder:
+    """Fluent builder. Chain .withX() calls, then .build()."""
+
+    def __init__(self):
+        self._to: str | None = None
+        self._from: str | None = None
+        self._subject: str | None = None
+        self._body: str | None = None
+
+    def with_recipient(self, addr: str) -&gt; "EmailBuilder":
+        self._to = addr
+        return self
+
+    def with_sender(self, addr: str) -&gt; "EmailBuilder":
+        self._from = addr
+        return self
+
+    def with_subject(self, s: str) -&gt; "EmailBuilder":
+        self._subject = s
+        return self
+
+    def with_body(self, b: str) -&gt; "EmailBuilder":
+        self._body = b
+        return self
+
+    def build(self) -&gt; Email:
+        # No validation! Returns a half-built Email with None fields.
+        return Email(self._to, self._from, self._subject, self._body)
+
+# New signup flow — someone forgot the .with_recipient() call:
+email = (EmailBuilder()
+         .with_sender("hello@acme.com")
+         .with_subject("Welcome!")
+         .with_body(template.render(user))
+         .build())   # silently produces Email(to=None, ...)
+send(email)          # blows up at SendGrid, not at build time</code></pre>
+
+    <p><strong>Initial wrong hypothesis.</strong> Carol thinks it's a template rendering bug — maybe <code>user.email</code> is sometimes <code>None</code>. She adds a log line and finds <code>user.email</code> is always populated. Dave thinks SendGrid is rate-limiting them. He checks the dashboard — no rate limit hit. Forty minutes wasted before they open the caller code.</p>
+
+    <p><strong>The root cause.</strong> The Builder pattern looks safe because it's <em>fluent</em> — but fluency is cosmetic. Nothing enforces that <code>.with_recipient()</code> was ever called. The caller forgot it, and <code>build()</code> happily returned <code>Email(to=None, ...)</code>. The failure surfaced five network hops away, at SendGrid, with an error that pointed at nothing useful.</p>
+
+    <div class="callout success">
+      <div class="callout-title">FIX · Required fields in the constructor + build-time validation</div>
+      <pre><code>class EmailBuilder:
+    """Required fields are constructor args. Optional fields chain."""
+
+    def __init__(self, to: str, sender: str, subject: str):
+        if not to or "@" not in to:
+            raise ValueError(f"invalid recipient: {to!r}")
+        if not sender or "@" not in sender:
+            raise ValueError(f"invalid sender: {sender!r}")
+        if not subject:
+            raise ValueError("subject is required")
+        self._to = to
+        self._from = sender
+        self._subject = subject
+        self._body: str | None = None
+        self._reply_to: str | None = None     # truly optional
+
+    def with_body(self, b: str) -&gt; "EmailBuilder":
+        self._body = b
+        return self
+
+    def with_reply_to(self, addr: str) -&gt; "EmailBuilder":
+        self._reply_to = addr
+        return self
+
+    def build(self) -&gt; Email:
+        if not self._body:
+            raise ValueError("body is required (call with_body)")
+        return Email(self._to, self._from, self._subject,
+                     self._body, self._reply_to)
+
+# New signup flow — won't even compile without the recipient:
+email = (EmailBuilder(
+             to=user.email,
+             sender="hello@acme.com",
+             subject="Welcome!",
+         )
+         .with_body(template.render(user))
+         .build())</code></pre>
+      <p>Alternative: use <em>phantom types</em> (step builders) so the type system refuses to call <code>.build()</code> until every required <code>.withX()</code> has been called. In Python, a simpler equivalent is <code>pydantic.BaseModel</code> with required fields — it validates at construction time.</p>
+    </div>
+
+    <div class="callout warn">
+      <div class="callout-title">PREVENTION</div>
+      <ul>
+        <li>If a field is required, make it a constructor arg, not a chained <code>.withX()</code>. The type system is your friend.</li>
+        <li>Every builder should validate in <code>build()</code>. "No invalid object ever leaves this class" is the invariant.</li>
+        <li>Prefer <code>pydantic</code>, <code>attrs</code>, or <code>@dataclass(frozen=True)</code> with <code>__post_init__</code> validation over hand-rolled builders for domain models.</li>
+      </ul>
+    </div>
+
+    <div class="callout success">
+      <div class="callout-title">STAFF ENGINEER TAKEAWAY</div>
+      <p>A fluent API is a <em>usability</em> feature, not a correctness feature. If forgetting a call silently produces an invalid object, the design has traded runtime safety for typing convenience — and the bill arrives later, in production, at 3 AM. Design for the <em>failure mode</em>: "what happens if someone skips this method?" If the answer is "it silently builds garbage", fix the API before you fix the caller.</p>
+    </div>
+
+    <hr>
+
+    <h2>Scenario 11: The N+1 Query in the Template Method</h2>
+
+    <div class="callout danger">
+      <div class="callout-title">INCIDENT · P2 · Monday 10:14 AM</div>
+      <p><strong>Alert:</strong> DBA Slack: "admin-panel is generating 1,200 queries per page load. Our RDS CPU is at 94%." The admin panel lists orders for support staff — one page, 50 rows.</p>
+    </div>
+
+    <p><strong>The Slack thread.</strong></p>
+
+    <pre><code>[10:15] dba-frank: someone's hammering orders_db. 1.2k queries/request from admin-panel.
+[10:16] eve:       admin panel? that's like 50 rows per page, should be 1 query
+[10:17] dba-frank: it's one "SELECT * FROM orders LIMIT 50" followed by 1000+
+                   "SELECT * FROM users WHERE id=?" queries. classic N+1.
+[10:18] eve:       but the code is a template method — the base class handles fetching
+[10:19] dba-frank: that's probably the problem. show me the base class.</code></pre>
+
+    <p><strong>The bad code.</strong></p>
+
+    <pre><code>class ListView(ABC):
+    """Template method: subclasses override fetch_detail and render."""
+
+    def render_list(self, items: list[Item]) -&gt; str:
+        rows = []
+        for item in items:
+            detail = self.fetch_detail(item.id)   # &lt;-- 1 query per item
+            rows.append(self.render_row(item, detail))
+        return "&lt;table&gt;" + "".join(rows) + "&lt;/table&gt;"
+
+    @abstractmethod
+    def fetch_detail(self, item_id: int) -&gt; dict: ...
+
+    @abstractmethod
+    def render_row(self, item: Item, detail: dict) -&gt; str: ...
+
+class OrderListView(ListView):
+    def fetch_detail(self, order_id: int) -&gt; dict:
+        # Junior wrote this. Looks innocent. One query per row.
+        user = self.db.query(
+            "SELECT * FROM users WHERE id = (SELECT user_id FROM orders WHERE id=?)",
+            (order_id,),
+        ).one()
+        return {"user": user}
+
+    def render_row(self, item, detail):
+        return f"&lt;tr&gt;&lt;td&gt;{item.id}&lt;/td&gt;&lt;td&gt;{detail['user'].name}&lt;/td&gt;&lt;/tr&gt;"</code></pre>
+
+    <p><em>Eve on Slack:</em> "The template method <em>forces</em> per-item fetching. The abstract signature is <code>fetch_detail(item_id) -&gt; dict</code>. You literally cannot batch in this API."</p>
+
+    <p><strong>Initial wrong hypothesis.</strong> Eve first suspects a missing index. She runs <code>EXPLAIN</code> on the user-lookup query — it's using the primary key. The query is fast (0.3ms). The problem is that there are 1,000 of them.</p>
+
+    <p><strong>The root cause.</strong> The base class's Template Method pattern is the wrong shape. <code>render_list</code> loops over items and calls <code>fetch_detail(item_id)</code> one-at-a-time. The base class <em>dictates</em> the fetch cardinality, and no subclass can batch without working against the contract. Every subclass of <code>ListView</code> has the same N+1 bug baked in.</p>
+
+    <div class="callout success">
+      <div class="callout-title">FIX · Batch-by-default in the base class</div>
+      <pre><code>class ListView(ABC):
+    """Template method that prefetches details in ONE query."""
+
+    def render_list(self, items: list[Item]) -&gt; str:
+        ids = [item.id for item in items]
+        details = self.fetch_details(ids)          # &lt;-- one query, returns dict
+        rows = [self.render_row(item, details[item.id]) for item in items]
+        return "&lt;table&gt;" + "".join(rows) + "&lt;/table&gt;"
+
+    @abstractmethod
+    def fetch_details(self, ids: list[int]) -&gt; dict[int, dict]:
+        """MUST batch. Return {id: detail} for all ids in a single query."""
+
+    @abstractmethod
+    def render_row(self, item: Item, detail: dict) -&gt; str: ...
+
+class OrderListView(ListView):
+    def fetch_details(self, order_ids: list[int]) -&gt; dict[int, dict]:
+        rows = self.db.query(
+            "SELECT o.id, u.name "
+            "FROM orders o JOIN users u ON u.id = o.user_id "
+            "WHERE o.id = ANY(%s)",
+            (order_ids,),
+        ).all()
+        return {r.id: {"user_name": r.name} for r in rows}</code></pre>
+      <p>Down from 1,001 queries to 2 (list + batched detail). If you're in Django, the framework equivalent is <code>prefetch_related</code> / <code>select_related</code>; in SQLAlchemy it's <code>joinedload</code>. But the real fix is <em>making the base class's contract force batching</em>, so no subclass can reintroduce the N+1.</p>
+    </div>
+
+    <div class="callout warn">
+      <div class="callout-title">PREVENTION</div>
+      <ul>
+        <li>Assert query counts in integration tests. <code>django-assert-num-queries</code> or SQLAlchemy's event hook. If a list-view PR grows the count, reject it.</li>
+        <li>When designing an abstract base class, ask: "What is the smallest unit of work this method exposes?" If that unit is per-item, the class will encourage N+1.</li>
+        <li>Logs should emit <code>db.queries_per_request</code> as a metric; alert if the p95 crosses a threshold.</li>
+      </ul>
+    </div>
+
+    <div class="callout success">
+      <div class="callout-title">STAFF ENGINEER TAKEAWAY</div>
+      <p>The worst N+1 bugs are the ones <em>the framework forces you into</em>. A base class that defines <code>fetch_one(id)</code> as its extension point is quietly telling every subclass author "write an N+1". The template method pattern is powerful — but only if the <em>template</em> is batched. Design the abstract signature around the query, not around the row.</p>
+    </div>
+
+    <hr>
+
+    <h2>Scenario 12: The Factory That Forgot</h2>
+
+    <div class="callout danger">
+      <div class="callout-title">INCIDENT · P0 · Saturday 21:03 (Slack outage coincidence)</div>
+      <p><strong>Alert:</strong> <code>notifier-svc</code> throwing <code>ValueError: unknown channel 'slack'</code> on 100% of Slack-routed alerts. On-call can't receive pages. The irony is not lost on anyone.</p>
+    </div>
+
+    <p><strong>The Slack thread (from a personal DM, since Slack alerts are dead).</strong></p>
+
+    <pre><code>[21:05] frank:  our alert pipeline is down. nothing is paging.
+[21:06] grace:  I literally deployed the new SlackNotifier class on Friday. my god.
+[21:07] frank:  did you add it to the factory?
+[21:08] grace:  ...
+[21:08] grace:  ...what factory.
+[21:09] frank:  `create_notifier(channel)` in notifier/factory.py. there's a dict.
+[21:10] grace:  oh no. I added the class. I added the tests (that use it directly).
+                I did not touch factory.py.
+[21:11] frank:  and code review didn't catch it because...
+[21:11] grace:  ...the tests passed. because the tests instantiate SlackNotifier directly.
+                nobody tested the factory path.</code></pre>
+
+    <p><strong>The bad code.</strong></p>
+
+    <pre><code># notifier/factory.py — last edited 4 months ago
+NOTIFIER_TYPES: dict[str, type[Notifier]] = {
+    "email": EmailNotifier,
+    "sms": SmsNotifier,
+    "webhook": WebhookNotifier,
+    # "slack": SlackNotifier,   &lt;-- Grace forgot to add this line
+}
+
+def create_notifier(channel: str) -&gt; Notifier:
+    try:
+        return NOTIFIER_TYPES[channel]()
+    except KeyError:
+        raise ValueError(f"unknown channel {channel!r}")
+
+# notifier/slack.py — Grace's new file, deployed Friday
+class SlackNotifier(Notifier):
+    def send(self, message: Message) -&gt; None:
+        requests.post(SLACK_WEBHOOK, json={"text": message.text})
+
+# notifier/test_slack.py — Grace's new tests, all passing
+def test_slack_sends():
+    SlackNotifier().send(Message("hello"))   # direct instantiation, not via factory
+    assert mock_requests.called</code></pre>
+
+    <p><strong>Initial wrong hypothesis.</strong> Frank suspects Slack's outbound webhook endpoint is down (there was an actual Slack incident that evening). He spends 15 minutes staring at status.slack.com before he tails the service logs and sees <code>ValueError: unknown channel 'slack'</code>.</p>
+
+    <p><strong>The root cause.</strong> The factory is a manual registry — a dict that must be kept in sync with the set of concrete classes. Grace added a new <code>SlackNotifier</code> class and tested it directly, bypassing the factory. Code review didn't notice because the factory change is in a different file. The first time the factory was exercised with <code>channel="slack"</code> was in production.</p>
+
+    <div class="callout success">
+      <div class="callout-title">FIX · Auto-registration via decorator</div>
+      <pre><code># notifier/registry.py
+NOTIFIER_TYPES: dict[str, type[Notifier]] = {}
+
+def register(channel: str):
+    """Decorator: registers a Notifier subclass under `channel`."""
+    def wrap(cls: type[Notifier]) -&gt; type[Notifier]:
+        if channel in NOTIFIER_TYPES:
+            raise ValueError(f"channel {channel!r} already registered")
+        NOTIFIER_TYPES[channel] = cls
+        return cls
+    return wrap
+
+def create_notifier(channel: str) -&gt; Notifier:
+    if channel not in NOTIFIER_TYPES:
+        raise ValueError(f"unknown channel {channel!r}. "
+                         f"Registered: {sorted(NOTIFIER_TYPES)}")
+    return NOTIFIER_TYPES[channel]()
+
+# notifier/slack.py — registration lives NEXT TO the class
+from .registry import register, Notifier
+
+@register("slack")
+class SlackNotifier(Notifier):
+    def send(self, message: Message) -&gt; None:
+        requests.post(SLACK_WEBHOOK, json={"text": message.text})</code></pre>
+      <p>Even better, add a <em>discovery</em> step at startup: <code>importlib.import_module</code> every file under <code>notifier/channels/*.py</code>, which triggers the decorators. And add a <em>contract test</em>: for each channel mentioned in config, assert the factory can build it.</p>
+    </div>
+
+    <div class="callout warn">
+      <div class="callout-title">PREVENTION</div>
+      <ul>
+        <li>Never maintain a registry-dict in a separate file from the classes. Move registration next to the class — via decorator, plugin discovery, or metaclass <code>__init_subclass__</code>.</li>
+        <li>Contract test: enumerate every channel name used in config and assert <code>create_notifier(name)</code> returns a valid instance. Runs in CI.</li>
+        <li>At startup, log every registered channel. <code>log.info("notifier.registered", channels=sorted(NOTIFIER_TYPES))</code> — missing channels are visible before traffic hits.</li>
+      </ul>
+    </div>
+
+    <div class="callout success">
+      <div class="callout-title">STAFF ENGINEER TAKEAWAY</div>
+      <p>Any "you must edit two files to add one feature" design is broken. If adding a new subclass requires editing a parallel registry, the registry <em>will</em> fall out of sync eventually. Move registration to where the class is defined — decorators, <code>__init_subclass__</code>, or filesystem discovery. Let the code deploy itself.</p>
+    </div>
+
+    <hr>
+
+    <h2>Scenario 13: The Decorator Stacking Order Bug</h2>
+
+    <div class="callout danger">
+      <div class="callout-title">INCIDENT · P1 · Thursday 14:20</div>
+      <p><strong>Alert:</strong> customer support: "my API key works on the first call and then returns an auth error for the next hour — then works again for one call." Weird shape. 60-minute period. Seven customers have reported it.</p>
+    </div>
+
+    <p><strong>The Slack thread (#eng-gateway).</strong></p>
+
+    <pre><code>[14:22] henry:  this is bizarre. first request: 200. next hour: 401. then 200 for one call. 401 for an hour.
+[14:23] ivy:    1-hour period matches our TTL cache. we cache auth lookups for an hour.
+[14:24] henry:  but auth is working, the key is valid...
+[14:25] ivy:    let me check the decorator order on the auth endpoint.
+[14:27] ivy:    found it. @retry sits OUTSIDE @cache. we're caching the RESULT of retry.
+                if the first call in a window gets a transient 401 from the auth service,
+                @retry succeeds on the second attempt internally — but we cached the first
+                attempt's exception.
+[14:28] henry:  wait. we're caching exceptions?
+[14:28] ivy:    we're caching whatever the inner function returns OR raises. for an hour.</code></pre>
+
+    <p><strong>The bad code.</strong></p>
+
+    <pre><code>@retry(attempts=3, backoff=0.5)
+@cache(ttl=3600)   # cache auth lookups for 1 hour
+@log
+def check_api_key(key: str) -&gt; User:
+    return auth_service.verify(key)   # occasionally flaky: 1-2% error rate</code></pre>
+
+    <p>Decorator application order is <em>bottom-up</em>. Python builds: <code>check_api_key =
+    retry(cache(log(check_api_key)))</code>. So a call flows: <code>retry</code> wraps <code>cache</code> wraps <code>log</code> wraps the real function. That means <code>retry</code> is the <em>outermost</em> layer — it retries calls to <code>cache(...)</code>. But <code>cache</code> doesn't know retries happened; it records the first result it saw.</p>
+
+    <p><strong>Initial wrong hypothesis.</strong> Henry suspects the upstream auth service. He opens its dashboard. It's green. He then suspects a DDoS protection middleware returning 401s. No — the 401s are coming from <em>our</em> cache.</p>
+
+    <p><strong>The root cause.</strong> The decorators stack in an order that means <strong>cache sees the raw function output, and retry sees the cached output</strong>. When <code>auth_service.verify</code> raised a transient <code>AuthError</code>, the <code>@cache</code> layer caught it and stored the <em>exception object</em> as the cached value for that key. For the next hour, every call for that key re-raised the cached exception. The <code>@retry</code> layer did retry — but every retry was a cache hit, returning the same cached failure instantly. No new call to the auth service for 60 minutes.</p>
+
+    <div class="callout success">
+      <div class="callout-title">FIX · Cache only successful results, and order the layers deliberately</div>
+      <pre><code># Option A: flip the order. retry is INSIDE cache, so cache only ever sees
+# the successful final value. Retries happen before we commit to caching.
+
+@cache(ttl=3600, cache_exceptions=False)
+@retry(attempts=3, backoff=0.5)
+@log
+def check_api_key(key: str) -&gt; User:
+    return auth_service.verify(key)
+
+# Option B: a cache implementation that refuses to store exceptions:
+
+def cache(ttl: int, cache_exceptions: bool = False):
+    def decorator(func):
+        store: dict[tuple, tuple[float, object]] = {}
+        def wrapper(*args, **kwargs):
+            key = (args, tuple(sorted(kwargs.items())))
+            hit = store.get(key)
+            if hit and time.monotonic() - hit[0] &lt; ttl:
+                value = hit[1]
+                if isinstance(value, BaseException):
+                    raise value              # only reached if cache_exceptions=True
+                return value
+            try:
+                value = func(*args, **kwargs)
+            except Exception as e:
+                if cache_exceptions:
+                    store[key] = (time.monotonic(), e)
+                raise                        # do NOT cache failures by default
+            store[key] = (time.monotonic(), value)
+            return value
+        return wrapper
+    return decorator</code></pre>
+    </div>
+
+    <div class="callout warn">
+      <div class="callout-title">PREVENTION</div>
+      <ul>
+        <li>Write one test per decorator ordering. If swapping two decorators changes behavior (it often does), document why the chosen order is correct in a comment above the stack.</li>
+        <li>Caches should default to <em>not</em> caching exceptions. Making that the default avoids this bug entirely.</li>
+        <li>When reviewing a stack of decorators, read them <em>bottom to top</em> (that's the execution order for <code>func(...)</code>). Ask: "does each layer see what it expects from the layer below?"</li>
+      </ul>
+    </div>
+
+    <div class="callout success">
+      <div class="callout-title">STAFF ENGINEER TAKEAWAY</div>
+      <p>Decorators are composed functions, and function composition is not commutative. <code>retry(cache(f))</code> and <code>cache(retry(f))</code> are different programs. Every cross-cutting concern you stack — retry, cache, log, auth, trace — needs an explicit statement of "this layer sees X and produces Y". Treat the stack like a Unix pipeline: order matters, and you should be able to justify it in one sentence.</p>
+    </div>
+
+    <hr>
+
+    <h2>Scenario 14: The Circular Import Death Spiral</h2>
+
+    <div class="callout danger">
+      <div class="callout-title">INCIDENT · P0 · Deploy to prod fails instantly</div>
+      <p><strong>Alert:</strong> canary pod for <code>billing-svc</code> is in CrashLoopBackOff. Error: <code>ImportError: cannot import name 'Invoice' from partially initialized module 'billing.models'</code>. Works perfectly in dev. Works in CI. Fails in prod.</p>
+    </div>
+
+    <p><strong>The Slack thread (#eng-billing).</strong></p>
+
+    <pre><code>[11:02] jack:   canary is crashing on startup with a partial-import error
+[11:03] kate:   "partially initialized module" — that's a circular import
+[11:04] jack:   but the tests pass. and `python -c "import billing"` works locally.
+[11:05] kate:   the prod image uses `python -O` and a different entrypoint.
+                different import order triggers the cycle.
+[11:06] jack:   okay so A imports B imports C imports A. classic.
+                why does it ONLY break in prod?
+[11:07] kate:   because in dev we always import through `app.py`, which imports A first.
+                the prod gunicorn config imports C first. different seed, different cycle outcome.</code></pre>
+
+    <p><strong>The bad code.</strong></p>
+
+    <pre><code># billing/models.py
+from billing.services import InvoiceService   # C imports from services
+
+class Invoice:
+    def total(self) -&gt; Decimal:
+        return InvoiceService.compute_total(self)
+
+# billing/services.py
+from billing.repository import InvoiceRepository   # services imports repo
+
+class InvoiceService:
+    @staticmethod
+    def compute_total(invoice): ...
+
+# billing/repository.py
+from billing.models import Invoice   # repository imports models -- CYCLE!
+
+class InvoiceRepository:
+    def get(self, id: int) -&gt; Invoice:
+        row = db.query("SELECT * FROM invoices WHERE id=?", (id,)).one()
+        return Invoice(**row)</code></pre>
+
+    <p>The cycle: <code>models → services → repository → models</code>. In dev, the entrypoint imports <code>models</code> first; by the time <code>repository</code> tries to import <code>Invoice</code>, <code>models</code> is already partially initialized and the class exists. In prod, Gunicorn imports <code>repository</code> first for its autoload order — it hits <code>from billing.models import Invoice</code> while <code>models</code> is still loading (because <code>models</code> imports <code>services</code> imports <code>repository</code> — which we are), and the partial module has no <code>Invoice</code> attribute yet.</p>
+
+    <p><strong>Initial wrong hypothesis.</strong> Jack thinks it's a Docker layer caching issue and rebuilds from scratch. Same failure. Kate suspects a missing <code>__init__.py</code>. It's there. Twenty minutes of staring at <code>pip install</code> output before they read the actual traceback.</p>
+
+    <p><strong>The root cause.</strong> The three modules form a cycle. Python allows cyclic imports to <em>sometimes</em> work — if by the time the inner import statement executes, the needed attribute has already been defined. This depends on load order, which depends on the entrypoint. It is undefined behavior dressed up as a feature.</p>
+
+    <div class="callout success">
+      <div class="callout-title">FIX · Dependency inversion — extract a shared interface</div>
+      <pre><code># billing/interfaces.py   (NEW — no imports from siblings)
+from typing import Protocol
+from decimal import Decimal
+
+class InvoiceLike(Protocol):
+    id: int
+    line_items: list
+    # just the shape both sides need
+
+class InvoiceServicePort(Protocol):
+    def compute_total(self, invoice: InvoiceLike) -&gt; Decimal: ...
+
+# billing/models.py  — depends only on interfaces
+from billing.interfaces import InvoiceServicePort
+
+class Invoice:
+    # service is injected, not imported
+    def total(self, service: InvoiceServicePort) -&gt; Decimal:
+        return service.compute_total(self)
+
+# billing/services.py — depends on interfaces only
+from billing.interfaces import InvoiceLike
+
+class InvoiceService:
+    def compute_total(self, invoice: InvoiceLike) -&gt; Decimal: ...
+
+# billing/repository.py — still imports models (one-way)
+from billing.models import Invoice
+class InvoiceRepository: ...</code></pre>
+      <p>The trick: introduce a third module that nobody imports <em>from</em> except consumers of abstractions. The concrete modules now form a tree, not a cycle. This is the Dependency Inversion Principle (the "D" in SOLID) applied concretely.</p>
+    </div>
+
+    <div class="callout warn">
+      <div class="callout-title">PREVENTION</div>
+      <ul>
+        <li>Add a CI check: <code>python -c "import billing; import billing.models; import billing.services; import billing.repository"</code> in every order. Fails if any order causes a cycle.</li>
+        <li>Tools: <code>pydeps</code> or <code>import-linter</code> can statically detect cycles and fail the build.</li>
+        <li>"If you need to <code>import</code> something inside a function to avoid a cycle, the design is telling you to extract an interface."</li>
+      </ul>
+    </div>
+
+    <div class="callout success">
+      <div class="callout-title">STAFF ENGINEER TAKEAWAY</div>
+      <p>Circular imports are architectural debt, not Python quirks. When module A imports B imports A, the two modules have a <em>shared abstraction</em> that wants to live somewhere else. Extract it. The moment you reach for <code>import inside function</code> or <code>TYPE_CHECKING</code> tricks to paper over a cycle, stop — and move the shared type to a new module that neither side imports from.</p>
+    </div>
+
+    <hr>
+
+    <h2>Scenario 15: The Observer Memory Leak</h2>
+
+    <div class="callout danger">
+      <div class="callout-title">INCIDENT · P1 · 14 days after deploy</div>
+      <p><strong>Alert:</strong> <code>chat-svc</code> OOM-killed in prod for the first time. Pods have been up 14 days since the last deploy. Memory graph is a perfect staircase — up only, never down. GC isn't reclaiming anything.</p>
+    </div>
+
+    <p><strong>The Slack thread.</strong></p>
+
+    <pre><code>[03:14] leo:    chat-svc just OOM'd. first time since the big deploy 2 weeks ago.
+[03:15] mia:    memory graph looks like... every request adds ~2KB and nothing is ever freed?
+[03:17] leo:    ran objgraph in a test pod. 12 million WebSocketSession objects
+                in a "listeners" list on the global EventBus.
+[03:18] mia:    we register a listener on every incoming WS request.
+                do we unregister on disconnect?
+[03:19] leo:    checking.......
+[03:19] leo:    we do not.
+[03:19] mia:    and the bus holds a strong reference to the listener, so the
+                WebSocketSession is never garbage-collected. leak.</code></pre>
+
+    <p><strong>The bad code.</strong></p>
+
+    <pre><code>class EventBus:
+    def __init__(self):
+        self._listeners: list[Callable] = []   # strong refs
+
+    def subscribe(self, fn: Callable) -&gt; None:
+        self._listeners.append(fn)
+
+    def publish(self, event) -&gt; None:
+        for fn in self._listeners:
+            fn(event)
+
+class WebSocketSession:
+    def __init__(self, ws, bus: EventBus):
+        self.ws = ws
+        # "Subscribe to all events and push them to this client."
+        bus.subscribe(self.on_event)
+
+    def on_event(self, event):
+        self.ws.send(json.dumps(event))
+
+# app.py
+bus = EventBus()   # lives for the whole process
+
+async def handle_ws(ws):
+    session = WebSocketSession(ws, bus)
+    await ws.wait_closed()
+    # session goes out of scope here... but bus._listeners still holds
+    # a reference to session.on_event, which is a bound method,
+    # which holds a reference to session. session is unreachable from
+    # user code but not garbage-collectable. the listener stays forever.</code></pre>
+
+    <p><strong>Initial wrong hypothesis.</strong> Leo blames the JSON serializer — maybe it's caching payloads. He profiles with <code>tracemalloc</code>. The allocations are all <code>WebSocketSession.__init__</code>, 12 million of them. "But the sessions close!" He then runs <code>gc.get_referrers(some_session)</code> and sees the EventBus listeners list.</p>
+
+    <p><strong>The root cause.</strong> The Observer pattern creates a <em>back-reference</em>: the bus holds a bound method <code>session.on_event</code>, which implicitly holds <code>session</code>. The bus outlives every session. There is no <code>unsubscribe</code> call on disconnect. Python's garbage collector cannot reclaim the session because the bus reaches it. Over 14 days of traffic, that's 12 million "zombie" session objects.</p>
+
+    <div class="callout success">
+      <div class="callout-title">FIX · Explicit unsubscribe + weak references</div>
+      <pre><code>import weakref
+
+class EventBus:
+    def __init__(self):
+        # WeakMethod releases the ref when the bound object is GC'd
+        self._listeners: list[weakref.WeakMethod] = []
+
+    def subscribe(self, bound_method) -&gt; Callable[[], None]:
+        ref = weakref.WeakMethod(bound_method)
+        self._listeners.append(ref)
+        def unsubscribe() -&gt; None:
+            try:
+                self._listeners.remove(ref)
+            except ValueError:
+                pass
+        return unsubscribe
+
+    def publish(self, event) -&gt; None:
+        dead = []
+        for ref in self._listeners:
+            fn = ref()
+            if fn is None:
+                dead.append(ref)
+                continue
+            fn(event)
+        for d in dead:
+            self._listeners.remove(d)   # sweep collected listeners
+
+class WebSocketSession:
+    def __init__(self, ws, bus: EventBus):
+        self.ws = ws
+        self._unsub = bus.subscribe(self.on_event)
+
+    def close(self) -&gt; None:
+        self._unsub()   # belt
+
+    def on_event(self, event): ...
+
+async def handle_ws(ws):
+    session = WebSocketSession(ws, bus)
+    try:
+        await ws.wait_closed()
+    finally:
+        session.close()   # suspenders</code></pre>
+      <p>Belt (<code>close()</code>) <em>and</em> suspenders (<code>WeakMethod</code>). If someone forgets to call <code>close()</code>, the weak reference still lets the GC reclaim the session. If the weak reference setup breaks, explicit unsubscribe still cleans up.</p>
+    </div>
+
+    <div class="callout warn">
+      <div class="callout-title">PREVENTION</div>
+      <ul>
+        <li>Every <code>subscribe()</code> should return an <code>unsubscribe</code> handle. Callers must call it (or use a context manager).</li>
+        <li>Expose <code>bus.listener_count()</code> as a metric. A metric that only grows is a leak.</li>
+        <li>Load test with a long-running scenario (not just burst): 10k connects/disconnects, assert listener count returns to baseline.</li>
+      </ul>
+    </div>
+
+    <div class="callout success">
+      <div class="callout-title">STAFF ENGINEER TAKEAWAY</div>
+      <p>Every <code>register()</code> is a promise that someone will eventually <code>unregister()</code>. Observers, callbacks, event listeners, signal handlers, watchers — all of them leak by default if the registry outlives the subscriber. Design registration APIs to return an <em>unsubscribe closure</em> and make long-lived registries use weak references. You'll catch this bug at design time, not 14 days into a deploy.</p>
+    </div>
+
+    <hr>
+
+    <h2>Scenario 16: The State Machine That Skipped</h2>
+
+    <div class="callout danger">
+      <div class="callout-title">INCIDENT · P1 · Wednesday morning</div>
+      <p><strong>Alert:</strong> finance audit finds 340 orders in the last month where the refund was issued <em>after</em> the package was delivered. Refund total: $48k. Customers got the goods <em>and</em> the money. The state machine was supposed to make this impossible. Yet here we are.</p>
+    </div>
+
+    <p><strong>The Slack thread.</strong></p>
+
+    <pre><code>[09:12] nora:  we literally have a state machine that forbids CANCELLED after DELIVERED
+[09:13] oscar: and yet. 340 cases.
+[09:15] nora:  I'll pull the event log for one of them
+[09:20] nora:  found it. look at this timeline:
+               - 14:02:11  state=SHIPPED
+               - 14:02:11  state=DELIVERED (webhook from carrier)
+               - 14:02:11  state=CANCELLED (user hit cancel button)
+               all in the same SECOND. they raced.
+[09:21] oscar: so two transitions happened concurrently. which one's read-then-write
+               landed first?
+[09:21] nora:  both read state=SHIPPED. both validated "SHIPPED -&gt; X is legal".
+               both wrote their target. last writer wins.
+[09:22] oscar: ...we need optimistic locking.</code></pre>
+
+    <p><strong>The bad code.</strong></p>
+
+    <pre><code>TRANSITIONS = {
+    OrderStatus.CREATED:   {OrderStatus.PAID, OrderStatus.CANCELLED},
+    OrderStatus.PAID:      {OrderStatus.SHIPPED, OrderStatus.CANCELLED},
+    OrderStatus.SHIPPED:   {OrderStatus.DELIVERED, OrderStatus.CANCELLED},
+    OrderStatus.DELIVERED: set(),
+    OrderStatus.CANCELLED: set(),
+}
+
+class OrderStateMachine:
+    def transition(self, order_id: int, target: OrderStatus) -&gt; None:
+        order = self.db.get_order(order_id)                # (1) read
+        if target not in TRANSITIONS[order.status]:
+            raise IllegalTransition(f"{order.status} -&gt; {target}")
+        order.status = target                              # (2) mutate
+        self.db.save(order)                                # (3) write</code></pre>
+
+    <p><strong>Initial wrong hypothesis.</strong> Nora thinks the transition table is wrong — that somebody added <code>CANCELLED</code> to <code>DELIVERED</code>'s allowed set. She checks git blame: no, the table is correct. Oscar suspects a rogue admin tool writing to the DB directly. He checks the audit log: no admin writes. Then Nora aligns the events on the millisecond and sees the race.</p>
+
+    <p><strong>The root cause.</strong> The state machine enforces transitions <em>in memory</em>, not <em>atomically</em>. Two concurrent transitions can both pass the validation step (they both read <code>SHIPPED</code>), then both write. The DELIVERED writer wrote first, but the CANCELLED writer's read happened before DELIVERED's write landed — so CANCELLED validated against stale state and overwrote. The refund fired because the state machine <em>thought</em> it was cancelling from SHIPPED.</p>
+
+    <div class="callout success">
+      <div class="callout-title">FIX · Optimistic locking with a version column + an append-only transition log</div>
+      <pre><code>class OrderStateMachine:
+    def transition(self, order_id: int, target: OrderStatus) -&gt; None:
+        # Read current state AND version.
+        order = self.db.get_order(order_id)
+        if target not in TRANSITIONS[order.status]:
+            raise IllegalTransition(f"{order.status} -&gt; {target}")
+
+        # Conditional write: only succeeds if version hasn't changed.
+        updated = self.db.execute(
+            "UPDATE orders SET status = %s, version = version + 1 "
+            "WHERE id = %s AND version = %s AND status = %s",
+            (target, order_id, order.version, order.status),
+        )
+        if updated == 0:
+            # Someone else transitioned between our read and our write.
+            raise ConcurrentTransition(
+                f"order {order_id} was modified; retry with fresh state"
+            )
+
+        # Append to an immutable transition log — source of truth for audits.
+        self.db.execute(
+            "INSERT INTO order_transitions "
+            "(order_id, from_status, to_status, version, at) "
+            "VALUES (%s, %s, %s, %s, NOW())",
+            (order_id, order.status, target, order.version + 1),
+        )
+
+    def cancel(self, order_id: int) -&gt; None:
+        for _ in range(3):
+            try:
+                self.transition(order_id, OrderStatus.CANCELLED)
+                return
+            except ConcurrentTransition:
+                continue
+        raise OrderLockedError(order_id)</code></pre>
+      <p>Three layers: (1) transition table validates legality, (2) version-gated UPDATE makes the check-and-set atomic at the DB, (3) append-only log gives you event sourcing — you can reconstruct history after the fact and catch illegal transitions in audits.</p>
+    </div>
+
+    <div class="callout warn">
+      <div class="callout-title">PREVENTION</div>
+      <ul>
+        <li>Any mutation guarded by a state check needs optimistic locking (version column) <em>or</em> a <code>SELECT ... FOR UPDATE</code>. In-memory validation is advisory, not authoritative.</li>
+        <li>Keep an immutable transition log. It catches bugs the state column cannot: "we went SHIPPED → CANCELLED → DELIVERED" is visible in the log, invisible in <code>orders.status</code>.</li>
+        <li>Chaos test: fire two transitions on the same order concurrently; assert one wins and one raises.</li>
+      </ul>
+    </div>
+
+    <div class="callout success">
+      <div class="callout-title">STAFF ENGINEER TAKEAWAY</div>
+      <p>A state machine in code is not a state machine in the database. If two threads can race between your "validate transition" check and your "persist new state" write, you don't have a state machine — you have a suggestion. Push atomicity down to the storage layer: version columns, conditional updates, append-only logs. The transition table in Python should be <em>a mirror</em> of the invariants enforced in SQL, not the sole enforcer.</p>
+    </div>
+
+    <hr>
+
+    <h2>Scenario 17: The Immutable That Wasn't</h2>
+
+    <div class="callout danger">
+      <div class="callout-title">INCIDENT · P2 · "the receipt doesn't match the order"</div>
+      <p><strong>Alert:</strong> support tickets: customers receive a confirmation email listing items, then a receipt PDF listing <em>different</em> items. Accounting is livid. The order object is supposed to be immutable once placed.</p>
+    </div>
+
+    <p><strong>The Slack thread.</strong></p>
+
+    <pre><code>[10:30] paul:    receipts don't match confirmation emails. order supposed to be frozen.
+[10:32] quinn:   we use @dataclass(frozen=True). how is anything mutating?
+[10:35] paul:    frozen=True prevents reassigning fields. it does NOT prevent
+                 mutating the objects they point to.
+[10:36] quinn:   oh god. the items field is a list.
+[10:37] paul:    and two downstream services — EmailRenderer and PdfRenderer — both
+                 apply their own adjustments (remove free gifts, add sample items)
+                 by MUTATING the list in place.
+[10:38] quinn:   the first renderer to run wins. the second sees the already-mutated list.
+[10:39] paul:    worse. the ORIGINAL order object, which we persisted, is now mutated too.</code></pre>
+
+    <p><strong>The bad code.</strong></p>
+
+    <pre><code>from dataclasses import dataclass
+
+@dataclass(frozen=True)
+class Order:
+    id: str
+    customer: str
+    items: list[Item]     # MUTABLE list — frozen=True doesn't protect this
+    total: Decimal
+
+# EmailRenderer, written by Team A:
+def render_email(order: Order) -&gt; str:
+    # "Filter out free gifts from the email subject line list"
+    for item in list(order.items):
+        if item.is_free_gift:
+            order.items.remove(item)   # mutates shared state!
+    return f"Your order of {len(order.items)} items has shipped."
+
+# PdfRenderer, written by Team B (doesn't know Team A mutates):
+def render_pdf(order: Order) -&gt; bytes:
+    # "Add a 'sample included' line item for marketing"
+    order.items.append(Item(name="Free sample", price=Decimal("0")))
+    return pdf.render(order)
+
+# Caller:
+order = Order(id="o1", customer="c1",
+              items=[Item("shoes", Decimal("80")), Item("socks", Decimal("10"))],
+              total=Decimal("90"))
+email = render_email(order)   # removes gifts (none here) — no-op
+pdf   = render_pdf(order)     # appends sample — now len(items)=3
+# Persisted order now has 3 items. Receipt shows 3. Email said 2. Customer confused.</code></pre>
+
+    <p><strong>Initial wrong hypothesis.</strong> Paul thinks it's a caching issue — that the email renderer is using a stale copy. He adds cache-buster logs. The logs show both renderers reading the same order object. Quinn then diffs <code>order.items</code> before and after each renderer call. The list is changing in place.</p>
+
+    <p><strong>The root cause.</strong> <code>@dataclass(frozen=True)</code> only forbids rebinding the attributes (<code>order.items = [...]</code>). It does <em>not</em> make the referenced collection immutable. The <code>list</code> inside is fully mutable, and any caller can <code>append</code> or <code>remove</code>. Python's "immutability" is shallow by default, and two downstream teams independently assumed the order would be stable, then both violated it.</p>
+
+    <div class="callout success">
+      <div class="callout-title">FIX · Deeply immutable — tuples, frozensets, defensive copies</div>
+      <pre><code>from dataclasses import dataclass, field
+from typing import Tuple
+
+@dataclass(frozen=True)
+class Order:
+    id: str
+    customer: str
+    items: Tuple[Item, ...]     # tuple — truly immutable
+    total: Decimal
+
+    def __post_init__(self):
+        # Defensive: if caller passed a list, freeze it.
+        # object.__setattr__ is required because we're in a frozen dataclass.
+        if not isinstance(self.items, tuple):
+            object.__setattr__(self, "items", tuple(self.items))
+        # Validate invariant: total matches items.
+        computed = sum((i.price for i in self.items), Decimal("0"))
+        if computed != self.total:
+            raise ValueError(f"total mismatch: {computed} != {self.total}")
+
+# Now the renderers cannot mutate. If they try:
+def render_email(order: Order) -&gt; str:
+    order.items.remove(...)   # AttributeError: 'tuple' has no attribute 'remove'
+
+# They're forced to make a new Order (or return a filtered tuple):
+def render_email(order: Order) -&gt; str:
+    visible = tuple(i for i in order.items if not i.is_free_gift)
+    return f"Your order of {len(visible)} items has shipped."</code></pre>
+      <p>Same pattern for dict fields: use <code>types.MappingProxyType</code> or a <code>frozendict</code>. For sets: <code>frozenset</code>. For custom collections: wrap in a read-only view in <code>__post_init__</code>.</p>
+    </div>
+
+    <div class="callout warn">
+      <div class="callout-title">PREVENTION</div>
+      <ul>
+        <li>Treat <code>frozen=True</code> as shallow. Every mutable collection inside a frozen dataclass is a footgun; freeze it explicitly.</li>
+        <li>Prefer <code>Tuple[T, ...]</code> over <code>list[T]</code> for "list-of-things that should never change after construction".</li>
+        <li>If you need to expose a method that "modifies" an immutable object, return a new instance — <code>order.without_item(i) -&gt; Order</code>. Make copying cheap, mutation impossible.</li>
+      </ul>
+    </div>
+
+    <div class="callout success">
+      <div class="callout-title">STAFF ENGINEER TAKEAWAY</div>
+      <p>Immutability is a defensive contract, and contracts must be enforced, not declared. <code>frozen=True</code> alone is a suggestion. Real immutability means <em>no reachable state</em> can change after construction — which means tuples instead of lists, frozen dicts instead of dicts, and <code>__post_init__</code> validation to lock the rest. When two teams downstream of an object assume they have their own copy, they are about to discover that they do not.</p>
+    </div>
+
+    <hr>
+
+    <h2>Scenario 18: The DI Config Explosion</h2>
+
+    <div class="callout danger">
+      <div class="callout-title">INCIDENT · P2 · velocity death</div>
+      <p><strong>Symptom:</strong> adding a new endpoint used to take 2 hours; now it takes 2 days. The bottleneck isn't the feature — it's wiring. The DI container config file is 3,147 lines. Every new class needs a new binding. A senior engineer spent an afternoon last week trying to untangle why <code>PaymentService</code> resolves to the wrong instance in one code path.</p>
+    </div>
+
+    <p><strong>The Slack thread (#eng-platform).</strong></p>
+
+    <pre><code>[14:00] rita:   I want to add an endpoint for /promos/validate. it needs PromoRepo
+                and FeatureFlags. both already exist. should be 10 lines.
+[14:45] rita:   I am now 45 minutes deep into container.py figuring out why
+                PromoRepo's test double is being injected into prod.
+[15:02] rita:   ok the problem is that we have THREE bindings for PromoRepo.
+                one for tests, one for staging, one for prod. they disagree on scope.
+                one is singleton. one is per-request. one is transient.
+[15:10] sam:    we need to talk about the container
+[15:11] rita:   we need to burn the container
+[15:30] sam:    the real problem is that we're listing every single binding by hand.
+                nobody has a mental model of what's wired to what.</code></pre>
+
+    <p><strong>The bad code.</strong></p>
+
+    <pre><code># container.py — 3,147 lines of this
+container.register(Database,       lambda: Postgres(DSN), scope="singleton")
+container.register(PromoRepo,      lambda c: PromoRepo(c[Database]), scope="request")
+container.register(FeatureFlags,   lambda c: FeatureFlags(c[Database]), scope="singleton")
+container.register(PaymentService, lambda c: PaymentService(
+    c[Database], c[FeatureFlags], c[FraudClient], c[MetricsClient],
+    c[RetryPolicy], c[IdempotencyStore]
+), scope="request")
+# ... 200 more entries exactly like this ...
+# Three separate copies for test/staging/prod, diverging over time.</code></pre>
+
+    <p><strong>Initial wrong hypothesis.</strong> Sam proposes splitting the container into "per-bounded-context" files. Good idea, but doesn't solve the core issue: <em>every class still needs a hand-written binding</em>. The total line count doesn't shrink, it just moves.</p>
+
+    <p><strong>The root cause.</strong> The container maps interface → construction-recipe, and every class in the app needs its own recipe. But 95% of those recipes are mechanical: "for class <code>X</code>, inject whatever its constructor type-hints ask for." Writing those by hand turns into a maintenance tax on every PR.</p>
+
+    <div class="callout success">
+      <div class="callout-title">FIX · Auto-wire by type hints; only hand-configure the exceptions</div>
+      <pre><code>import inspect
+from typing import get_type_hints
+
+class Container:
+    def __init__(self):
+        self._bindings: dict[type, Callable] = {}   # only for EXCEPTIONS
+        self._singletons: dict[type, object] = {}
+        self._component_scopes: dict[type, str] = {}
+
+    def bind(self, iface: type, factory: Callable, scope: str = "transient") -&gt; None:
+        """Hand-bind only when the default (auto-wire) won't do."""
+        self._bindings[iface] = factory
+        self._component_scopes[iface] = scope
+
+    def resolve(self, cls: type):
+        # 1. Explicit binding wins.
+        if cls in self._bindings:
+            scope = self._component_scopes.get(cls, "transient")
+            if scope == "singleton" and cls in self._singletons:
+                return self._singletons[cls]
+            value = self._bindings[cls](self)
+            if scope == "singleton":
+                self._singletons[cls] = value
+            return value
+
+        # 2. Auto-wire: inspect the constructor, recursively resolve type hints.
+        hints = get_type_hints(cls.__init__)
+        hints.pop("return", None)
+        kwargs = {name: self.resolve(dep) for name, dep in hints.items()
+                  if name != "self"}
+        return cls(**kwargs)
+
+# Bootstrap shrinks from 3000 lines to ~20:
+container = Container()
+container.bind(Database,     lambda c: Postgres(DSN),              scope="singleton")
+container.bind(FeatureFlags, lambda c: FeatureFlags(c.resolve(Database)), scope="singleton")
+# PromoRepo, PaymentService, FraudClient, etc: no binding needed.
+# Their constructors are "def __init__(self, db: Database): ..." — auto-wired.
+
+payment_svc = container.resolve(PaymentService)   # just works</code></pre>
+      <p>The framework equivalents: <code>FastAPI</code>'s <code>Depends()</code> auto-wires by type; <code>dependency-injector</code> supports <code>@inject</code> with annotations; <code>Spring</code> has <code>@ComponentScan</code>. Pick one — don't roll your own past the proof-of-concept.</p>
+    </div>
+
+    <div class="callout warn">
+      <div class="callout-title">PREVENTION</div>
+      <ul>
+        <li>Default to auto-wiring by type hints. Hand-bind <em>only</em> when a class needs configuration (connection strings, flags) or a non-trivial scope decision.</li>
+        <li>If your container config grows past ~200 lines, stop adding to it. Switch strategies.</li>
+        <li>Treat the container as an implementation detail. Business code should not import <code>container</code> directly; it should receive dependencies as constructor args and let the composition root wire them.</li>
+      </ul>
+    </div>
+
+    <div class="callout success">
+      <div class="callout-title">STAFF ENGINEER TAKEAWAY</div>
+      <p>A dependency injection container that requires a manual binding per class is a dependency injection <em>bureaucracy</em>. Humans do not scale at writing <code>container.register(...)</code> lines; compilers and runtimes do. If your wiring config grows faster than your feature code, the tool is working against you. Switch to auto-wiring, keep hand-bindings for the genuine exceptions, and measure the config's line count — it should grow sub-linearly with the app.</p>
+    </div>
+
+    <hr>
+
+    <h2>Scenario 19: The Custom ORM SQL Injection</h2>
+
+    <div class="callout danger">
+      <div class="callout-title">INCIDENT · P0 · Security (bug bounty report)</div>
+      <p><strong>Alert:</strong> a bug bounty researcher submits a working SQL injection PoC against the <code>/reports/search</code> endpoint. Payload: <code>name=' OR 1=1 --</code>. They dumped the first row of the <code>users</code> table. Security rotates credentials immediately; the engineering lead asks "how is this possible, we use an ORM?"</p>
+    </div>
+
+    <p><strong>The Slack thread.</strong></p>
+
+    <pre><code>[09:44] tina:     how is SQLi possible? everything uses the ORM
+[09:45] uma:      not everything. the 'dynamic filters' feature uses raw string concat
+                  because the ORM didn't support arbitrary column filters at build time
+[09:47] tina:     who wrote that
+[09:47] uma:      me. two years ago. with a big "// TODO: parameterize this" comment.
+[09:48] tina:     oof. rollback the endpoint. we need to ship a fix today.
+[09:50] uma:      the TODO is still there. I just grepped.</code></pre>
+
+    <p><strong>The bad code.</strong></p>
+
+    <pre><code>class ReportRepository:
+    """Custom mini-ORM with dynamic WHERE filters."""
+
+    def __init__(self, db):
+        self.db = db
+
+    def search(self, filters: dict[str, str]) -&gt; list[Report]:
+        # filters is user-supplied! e.g., {"name": "budget"} or {"status": "open"}
+        where_parts = []
+        for col, val in filters.items():
+            # TODO: parameterize this      &lt;-- left in place for 2 years
+            where_parts.append(f"{col} = '{val}'")
+        where_sql = " AND ".join(where_parts) or "TRUE"
+        sql = f"SELECT * FROM reports WHERE {where_sql}"
+        return self.db.query(sql).all()
+
+# Endpoint:
+@app.get("/reports/search")
+def search(request):
+    # request.query is like {"name": "' OR 1=1 --"}
+    return repo.search(dict(request.query))</code></pre>
+
+    <p><strong>Initial wrong hypothesis.</strong> Tina thinks the researcher hit a raw <code>db.execute()</code> call. She greps for <code>db.execute</code>. Only three call sites, all parameterized. Then Uma remembers the "dynamic filter" feature — a parallel code path that wasn't on anyone's radar because it was written before the ORM migration and never revisited.</p>
+
+    <p><strong>The root cause.</strong> Two compounding failures. (1) The repository builds SQL via string interpolation, which allows an attacker to terminate the literal with a quote. (2) There is no allow-list of column names, so <code>filters</code> can reference any column the DB user can see. The "ORM" is a thin facade; the injection risk is identical to plain string SQL.</p>
+
+    <div class="callout success">
+      <div class="callout-title">FIX · Parameterized queries + column allow-list</div>
+      <pre><code>ALLOWED_FILTER_COLUMNS: frozenset[str] = frozenset({
+    "name", "status", "owner_id", "created_at",
+})
+
+class ReportRepository:
+    def __init__(self, db):
+        self.db = db
+
+    def search(self, filters: dict[str, str]) -&gt; list[Report]:
+        # 1. Validate column names against an allow-list.
+        unknown = set(filters) - ALLOWED_FILTER_COLUMNS
+        if unknown:
+            raise ValueError(f"unknown filter columns: {sorted(unknown)}")
+
+        # 2. Build the SQL with placeholders; pass values separately.
+        cols = list(filters)
+        where_sql = " AND ".join(f"{c} = %s" for c in cols) or "TRUE"
+        sql = f"SELECT * FROM reports WHERE {where_sql}"
+        values = [filters[c] for c in cols]
+
+        # 3. Driver parameterizes safely.
+        return self.db.query(sql, values).all()
+
+# Even better: use SQLAlchemy Core — composable, parameterized queries
+# without hand-rolling the string builder.
+from sqlalchemy import select
+def search(self, filters):
+    stmt = select(reports_table)
+    for col, val in filters.items():
+        if col not in ALLOWED_FILTER_COLUMNS:
+            raise ValueError(col)
+        stmt = stmt.where(reports_table.c[col] == val)
+    return self.db.execute(stmt).fetchall()</code></pre>
+      <p>Two defenses, belt-and-suspenders: the allow-list keeps the set of interpolated identifiers bounded and known-safe; the <code>%s</code> placeholders push value-quoting into the driver, where it's correct. The app never concatenates user input into SQL.</p>
+    </div>
+
+    <div class="callout warn">
+      <div class="callout-title">PREVENTION</div>
+      <ul>
+        <li>Static analysis: <code>bandit</code>, <code>semgrep</code> rules for "f-string or <code>%</code> formatting inside SQL execution". Fail CI.</li>
+        <li>Code review rule: any function that <em>constructs</em> SQL strings gets a security reviewer. No exceptions.</li>
+        <li>Every "TODO: parameterize this" comment in production code is an open incident. Promote it to a ticket with a security tag on sight.</li>
+        <li>Run DAST / fuzzing against every query endpoint, especially ones with structured filter input.</li>
+      </ul>
+    </div>
+
+    <div class="callout success">
+      <div class="callout-title">STAFF ENGINEER TAKEAWAY</div>
+      <p>"We use an ORM" is not a security posture — it's an assumption. The moment the ORM's abstraction is inconvenient, someone will route around it with string concatenation, and two years later a bug bounty report will remind you. Separate <em>identifiers</em> (validated against an allow-list) from <em>values</em> (always parameterized). Treat SQL construction the way you treat cryptography: assume you will get it wrong, and lean on libraries designed to be correct.</p>
+    </div>
+
+    <hr>
+
+    <h2>Scenario 20: The Generic Exception That Hid a Disk Full</h2>
+
+    <div class="callout danger">
+      <div class="callout-title">INCIDENT · P1 · three-day silent failure</div>
+      <p><strong>Alert:</strong> analytics team escalates: "our user-event pipeline has zero writes for the last 3 days. We thought we had a bug in the query." Engineering checks the upload service. It's happily running, health endpoint green, logs clean. Except — zero files actually landed on disk.</p>
+    </div>
+
+    <p><strong>The Slack thread.</strong></p>
+
+    <pre><code>[16:20] vic:    analytics says no events since Monday. but the upload svc
+                is "healthy". 40k requests/min coming in, pod is up, no errors logged.
+[16:22] will:   do we have ANY log lines about failed saves?
+[16:23] vic:    let me widen the grep...
+[16:26] vic:    found it. 14 million of these: "save failed" at WARNING.
+                no stack trace. no error type. just the string.
+[16:27] will:   we caught Exception and logged a string. classic.
+[16:28] vic:    running df on one of the pods...
+[16:28] vic:    /data is 100% full. has been since Monday 03:10.
+[16:29] will:   so the disk filled up, every save raised OSError(ENOSPC),
+                we caught it, shrugged, returned 200 to the client.
+[16:30] vic:    three days of events in /dev/null. gone.</code></pre>
+
+    <p><strong>The bad code.</strong></p>
+
+    <pre><code>class EventUploadHandler:
+    def save(self, event: dict) -&gt; None:
+        path = self.storage_dir / f"{event['id']}.json"
+        try:
+            with open(path, "w") as f:
+                json.dump(event, f)
+        except Exception:
+            log.warning("save failed")
+            # swallow — "we don't want to fail the whole request for a single save"
+
+    def handle(self, request) -&gt; Response:
+        self.save(request.json)
+        return Response(200, {"status": "ok"})   # always 200</code></pre>
+
+    <p><strong>Initial wrong hypothesis.</strong> Vic suspects the analytics pipeline's consumer is broken. Will checks the consumer: healthy, but nothing to consume. They verify the upload service is receiving traffic (it is) and look at disk usage last. The actual signal — <code>ENOSPC</code> — was right there in the OS, visible to <code>df</code>, but the application's log line obliterated it to a friendly "save failed" string with no exception type, no errno, no traceback.</p>
+
+    <p><strong>The root cause.</strong> Three compounding mistakes:
+    (1) <code>except Exception:</code> caught every possible failure — <code>OSError</code> (disk full), <code>PermissionError</code>, <code>JSONDecodeError</code>, and anything else — and treated them all the same.
+    (2) The log line was a bare string with no context: no errno, no exception type, no filename. Grep-invisible.
+    (3) The handler returned 200 regardless, so clients kept sending. There was no feedback loop at any layer of the stack.</p>
+
+    <div class="callout success">
+      <div class="callout-title">FIX · Catch specific exceptions, re-raise the unexpected, alert on the critical</div>
+      <pre><code>class EventUploadHandler:
+    def save(self, event: dict) -&gt; None:
+        path = self.storage_dir / f"{event['id']}.json"
+        try:
+            with open(path, "w") as f:
+                json.dump(event, f)
+        except OSError as e:
+            # Disk full, permission denied, too many open files, etc.
+            # OPERATIONAL failures — the system is broken, not the request.
+            log.error(
+                "event_upload.save_failed",
+                path=str(path),
+                errno=e.errno,
+                error_class=type(e).__name__,
+                error=str(e),
+                exc_info=True,
+            )
+            metrics.incr("event_upload.save_failed",
+                         tags={"errno": e.errno})
+            raise   # surface to caller — do not pretend this succeeded
+
+        except (TypeError, ValueError) as e:
+            # Data bug: the event isn't JSON-serializable. Distinct failure mode.
+            log.error("event_upload.serialization_failed",
+                      event_id=event.get("id"), error=str(e), exc_info=True)
+            metrics.incr("event_upload.serialization_failed")
+            raise   # caller gets a 400
+
+    def handle(self, request) -&gt; Response:
+        try:
+            self.save(request.json)
+        except OSError:
+            return Response(503, {"status": "storage_unavailable"})
+        except (TypeError, ValueError):
+            return Response(400, {"status": "invalid_event"})
+        return Response(200, {"status": "ok"})</code></pre>
+      <p>Plus system-level monitoring — alerts on <code>disk_usage &gt; 85%</code> on every data volume, and alerts on <code>event_upload.save_failed</code> rate exceeding a trivial threshold. The rule: <em>if a failure mode is survivable for one request but catastrophic in aggregate, alert on the aggregate</em>.</p>
+    </div>
+
+    <div class="callout warn">
+      <div class="callout-title">PREVENTION</div>
+      <ul>
+        <li>Forbid <code>except Exception:</code> without either a re-raise or a <em>named reason comment</em> explaining why the failure is benign.</li>
+        <li>Always log with <code>exc_info=True</code> or <code>logger.exception</code> — never a bare string. The traceback is the signal.</li>
+        <li>Infrastructure alerts on disk / memory / file-descriptor saturation are a separate must-have, independent of application logs.</li>
+        <li>Every "persist" path needs a counterpart success metric. If <code>events_saved_total</code> is flat for ten minutes, page someone — silence is not success.</li>
+      </ul>
+    </div>
+
+    <div class="callout success">
+      <div class="callout-title">STAFF ENGINEER TAKEAWAY</div>
+      <p>The most expensive bugs are the ones the code was <em>designed</em> to hide. A broad <code>except Exception: log.warning("something failed")</code> is not error handling — it is error <em>disposal</em>. Catch narrowly. Log structurally. Re-raise anything you don't fully understand. Monitor at two levels: the application ("did the save succeed?") and the infrastructure ("is the disk full?"). If your only signal that the system works is "no exceptions logged", you will find out about outages from your customers, three days late.</p>
+    </div>
+
+    <hr>
+
     <h2>Closing: What the War Room Teaches</h2>
 
     <p>Every scenario in this chapter is a violation of a principle you already met in chapters 1 through 6:</p>
 
     <ul>
-      <li>Race / deadlock / cache leak → failures of concurrency and resource management (chapter 6).</li>
-      <li>God class → SRP violation (chapter 1).</li>
-      <li>Missing state validation → State pattern not fully applied (chapter 2).</li>
-      <li>Exception swallower, mutable default, lazy-log footgun → defensive coding discipline.</li>
+      <li>Race, deadlock, cache leak, observer leak, state-machine race → failures of concurrency and resource management (chapter 6).</li>
+      <li>God class, DI config explosion → SRP and composition boundaries (chapter 1).</li>
+      <li>Missing state validation, state-machine skip → State pattern not fully applied, atomicity ignored (chapter 2).</li>
+      <li>Singleton test failure, circular imports → coupling via hidden global state; Dependency Inversion fixes both (chapter 1).</li>
+      <li>Builder that lied, factory that forgot → creation-pattern contracts left unchecked (chapter 2).</li>
+      <li>Template-method N+1, decorator stacking → abstract base class and cross-cutting concerns shaped wrong (chapters 1–2).</li>
+      <li>Immutable that wasn't, mutable default → Python's shallow-immutability footguns.</li>
+      <li>Exception swallower, disk-full silent failure, SQL injection → defensive coding and failure-mode design.</li>
+      <li>O(n&sup2;) in a decorator → hot-path discipline, lazy evaluation.</li>
     </ul>
 
     <p>Good LLD is what lets you <em>not</em> be in the war room at 2 AM. The next and final chapter of Book I shows how real companies encode these lessons into libraries you already use.</p>

@@ -1,0 +1,719 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI Building Blocks — Book III · AI System Design</title>
+<link rel="stylesheet" href="../assets/css/style.css">
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">System Design Books</div>
+    <div class="brand-sub">by Sanheen · Progressive Learning</div>
+    <div class="nav-section">
+      <h3>Home</h3>
+      <a href="../index.html">Overview</a>
+    </div>
+    <div class="nav-section">
+      <h3>Book I — Low Level Design</h3>
+      <a href="../lld/index.html">LLD Index</a>
+    </div>
+    <div class="nav-section">
+      <h3>Book II — High Level Design</h3>
+      <a href="../hld/index.html">HLD Index</a>
+    </div>
+    <div class="nav-section">
+      <h3>Book III — AI System Design</h3>
+      <a href="index.html">AI Index</a>
+      <a href="01-foundations.html">1. AI Foundations</a>
+      <a href="02-building-blocks.html">2. AI Building Blocks</a>
+      <a href="03-rag.html">3. RAG Systems</a>
+      <a href="04-llm-serving.html">4. LLM Serving</a>
+      <a href="05-agents.html">5. Agent Architectures</a>
+      <a href="06-hybrid-legacy.html">6. Hybrid & Legacy</a>
+      <a href="07-war-room.html">7. AI War Room</a>
+      <a href="08-real-architectures.html">8. Real AI Architectures</a>
+    </div>
+  </aside>
+  <main class="main">
+    <div class="breadcrumb"><a href="../index.html">Home</a> / <a href="index.html">Book III · AI</a> / Chapter 2</div>
+    <h1>Chapter 2: AI Building Blocks</h1>
+
+    <p class="lead">This is the parts bin. Every production AI system is a composition of the components below. For each: what it is, when you need it, what breaks without it, and which tools are worth using in 2026. By the end you should be able to sketch an architecture diagram for any AI product and name each box.</p>
+
+    <div class="diagram"><pre>
+                 ┌─────────────────────────────────────────────────┐
+                 │                   User                          │
+                 └────────────────────┬────────────────────────────┘
+                                      │
+                      ┌───────────────▼───────────────┐
+                      │  Input Guardrails / Injection │
+                      └───────────────┬───────────────┘
+                                      │
+         ┌────────────────────────────▼────────────────────────────┐
+         │   LLM Gateway (retries, fallback, cost, cache)          │
+         └─┬──────────┬───────────┬───────────┬───────────┬────────┘
+           │          │           │           │           │
+    ┌──────▼──┐ ┌─────▼─────┐ ┌───▼────┐ ┌────▼────┐ ┌────▼────┐
+    │ Semantic│ │ Embedder  │ │ Vector │ │Reranker │ │  LLM    │
+    │  Cache  │ │           │ │   DB   │ │         │ │ Provider│
+    └─────────┘ └───────────┘ └────────┘ └─────────┘ └─────────┘
+           │                                               │
+           │        ┌──────────────────┐      ┌────────────▼────┐
+           │        │ Memory / Features│      │  Tool Calls     │
+           │        └──────────────────┘      └────────────┬────┘
+           │                                               │
+           │        ┌──────────────────────────────────────▼────┐
+           │        │ Output Guardrails (PII, toxicity, schema)  │
+           │        └──────────────────────────────────────┬────┘
+           │                                               │
+           └───────────────► Observability / Evals ◄───────┘
+</pre></div>
+
+    <h2>1. LLM API / Gateway</h2>
+
+    <p><strong>What.</strong> A proxy in front of one or more LLM providers. Every LLM call in your codebase goes through the gateway, not directly to OpenAI/Anthropic.</p>
+
+    <p><strong>Why it exists.</strong> Direct SDK calls work for a prototype. In production you need: retries on 429/500, fallback across providers when one is down, cost attribution per user/feature, response caching, centralized rate limiting, prompt versioning, and drop-in model swaps without redeploying every service.</p>
+
+    <p><strong>Options (2026).</strong></p>
+
+    <table>
+      <thead><tr><th>Tool</th><th>Strength</th><th>Watch for</th></tr></thead>
+      <tbody>
+        <tr><td>LiteLLM</td><td>Open source, 100+ provider adapters, self-hosted router</td><td>You own the ops burden</td></tr>
+        <tr><td>Portkey</td><td>Hosted gateway, strong observability, guardrails built in</td><td>Adds network hop</td></tr>
+        <tr><td>Helicone</td><td>Header-based proxy, minimal code change</td><td>Mostly observability, lighter on routing</td></tr>
+        <tr><td>OpenRouter</td><td>Aggregator, unified billing, good for experimentation</td><td>Variable latency, provider transparency</td></tr>
+        <tr><td>AWS Bedrock / Azure AI / Vertex</td><td>Enterprise data boundary, IAM integration</td><td>Model availability lags providers by weeks</td></tr>
+      </tbody>
+    </table>
+
+    <div class="callout">
+      <div class="callout-title">Without a gateway</div>
+      <p>You will discover the problem on the day Anthropic has a 20-minute outage and every one of your features breaks simultaneously because none of them know how to fall back to GPT. Build the gateway before that day.</p>
+    </div>
+
+    <h2>2. Embedding Models</h2>
+
+    <p><strong>What.</strong> A model that turns text into a fixed-length vector. Used for search, clustering, classification, deduplication, and as the retrieval signal for RAG.</p>
+
+    <p><strong>When.</strong> Every time you need "find things semantically similar to this." Search, recommendations, RAG retrieval, anomaly detection on text, near-duplicate detection.</p>
+
+    <table>
+      <thead><tr><th>Model</th><th>Dims</th><th>Best for</th></tr></thead>
+      <tbody>
+        <tr><td>OpenAI text-embedding-3-large</td><td>3072 (Matryoshka)</td><td>Default for English, truncatable for cost</td></tr>
+        <tr><td>OpenAI text-embedding-3-small</td><td>1536</td><td>Cheap default, 5x cheaper than large</td></tr>
+        <tr><td>Cohere embed-v3</td><td>1024</td><td>Multilingual, business docs</td></tr>
+        <tr><td>Voyage-3</td><td>1024</td><td>Top retrieval benchmarks in 2025–26</td></tr>
+        <tr><td>BGE-M3</td><td>1024 + sparse + multi-vector</td><td>Self-host, hybrid search natively</td></tr>
+        <tr><td>Nomic embed v1.5</td><td>768 (Matryoshka)</td><td>Open Apache 2.0, on-device</td></tr>
+        <tr><td>E5-Mistral-7B-instruct</td><td>4096</td><td>Heavyweight self-hosted, high quality</td></tr>
+      </tbody>
+    </table>
+
+    <h3>Dimensions vs accuracy tradeoff</h3>
+
+    <ul>
+      <li>More dimensions = more semantic nuance = more storage, more compute per comparison.</li>
+      <li>Matryoshka embeddings let you truncate without retraining — store 3072 dims, query at 512 dims for a first-pass filter, rescore top-k at full 3072.</li>
+      <li>Doubling dimensions roughly doubles index memory and query latency for flat search; less for HNSW.</li>
+    </ul>
+
+    <div class="callout warn">
+      <div class="callout-title">Switching embedding models is destructive</div>
+      <p>Embeddings from model A are meaningless in model B's space. Changing embedding models means re-embedding your entire corpus. Budget time and cost for this. Version your embeddings with the model ID so you can run A/B migrations.</p>
+    </div>
+
+    <h2>3. Vector Database</h2>
+
+    <p><strong>What.</strong> A datastore optimized for approximate nearest neighbor (ANN) search over high-dimensional vectors, with metadata filtering.</p>
+
+    <p><strong>When.</strong> Any time you need to store &gt; 10K vectors and query them with sub-second latency. Below 10K, a numpy array in memory plus a brute-force dot product is fine.</p>
+
+    <table>
+      <thead><tr><th>Option</th><th>Type</th><th>Best for</th></tr></thead>
+      <tbody>
+        <tr><td>Pinecone</td><td>Hosted, managed</td><td>"Just works," serverless billing, zero ops</td></tr>
+        <tr><td>Weaviate</td><td>OSS + cloud</td><td>Hybrid search, modular vectorizers, strong filtering</td></tr>
+        <tr><td>Qdrant</td><td>OSS + cloud, Rust</td><td>Performance, payload filtering, self-host friendly</td></tr>
+        <tr><td>Chroma</td><td>OSS, Python-native</td><td>Prototyping, small-to-medium scale</td></tr>
+        <tr><td>Milvus / Zilliz</td><td>OSS + cloud</td><td>Billion-scale, enterprise</td></tr>
+        <tr><td>Postgres + pgvector</td><td>Extension</td><td>Already running Postgres; transactions; &lt; 10M vectors</td></tr>
+        <tr><td>Elasticsearch / OpenSearch</td><td>Search engine</td><td>You already run ES; BM25 + vectors in one place</td></tr>
+        <tr><td>Turbopuffer, LanceDB</td><td>Object-store backed</td><td>Huge scale at low cost, slightly higher latency</td></tr>
+      </tbody>
+    </table>
+
+    <h3>Index types</h3>
+
+    <ul>
+      <li><strong>Flat (brute force).</strong> Exact, O(n) per query. Fine up to 100K vectors.</li>
+      <li><strong>HNSW (Hierarchical Navigable Small World).</strong> Graph-based, the default for most vector DBs. Fast, high recall, high memory footprint.</li>
+      <li><strong>IVF (Inverted File).</strong> Partition vectors into Voronoi cells, search only nearest cells. Lower memory, lower recall.</li>
+      <li><strong>IVF-PQ (Product Quantization).</strong> IVF plus compression. Billion-scale on commodity RAM. Some recall loss.</li>
+      <li><strong>DiskANN / ScaNN.</strong> Optimized for SSD-backed search. Lower cost per vector at scale.</li>
+    </ul>
+
+    <h3>Filtering</h3>
+
+    <p>Real queries combine semantic search with metadata filters: "find docs similar to X <em>where</em> user_id=42 AND created_at &gt; 2024-01-01." Pre-filtering (filter then ANN) vs post-filtering (ANN then filter) tradeoffs matter — aggressive post-filtering can return empty result sets even when relevant docs exist.</p>
+
+    <h3>Hybrid search</h3>
+
+    <p>Dense (vector) + sparse (BM25) retrieval, fused via Reciprocal Rank Fusion (RRF) or weighted score. Dense catches semantic matches; sparse catches exact keywords (product codes, names, acronyms). In practice, hybrid beats dense-only on most enterprise search benchmarks.</p>
+
+    <h2>4. Document Processing and Chunking</h2>
+
+    <p><strong>What.</strong> The pipeline that turns a 200-page PDF into N embeddable, retrievable text chunks with metadata.</p>
+
+    <p><strong>Why it matters more than your model choice.</strong> A mediocre LLM with great chunks beats a great LLM with mediocre chunks. Garbage retrieval = garbage generation. This is the single most under-invested-in layer in most RAG systems.</p>
+
+    <h3>Parsing</h3>
+
+    <ul>
+      <li><strong>Unstructured.io</strong> — general-purpose document parser, handles PDF/DOCX/HTML/email.</li>
+      <li><strong>LlamaParse</strong> — LLM-powered parser, excellent on tables and complex layouts.</li>
+      <li><strong>Docling (IBM)</strong> — open-source, strong on scientific papers and tables.</li>
+      <li><strong>Native: pypdf, pdfplumber, Tesseract OCR</strong> — when you need control.</li>
+      <li><strong>Vision-LLM parsing</strong> — send page images to GPT-4V/Claude, get structured markdown back. Expensive but handles anything.</li>
+    </ul>
+
+    <h3>Chunking strategies</h3>
+
+    <table>
+      <thead><tr><th>Strategy</th><th>How</th><th>Use when</th></tr></thead>
+      <tbody>
+        <tr><td>Fixed-size</td><td>N tokens per chunk, M-token overlap</td><td>Simple, fast, baseline</td></tr>
+        <tr><td>Recursive character</td><td>Split on paragraphs, then sentences, then words until size fits</td><td>Default for most prose</td></tr>
+        <tr><td>Sentence-window</td><td>Embed a sentence, retrieve the surrounding window at query time</td><td>Precision matters, context matters</td></tr>
+        <tr><td>Semantic chunking</td><td>Split where embedding similarity drops sharply</td><td>Topic-heterogeneous docs</td></tr>
+        <tr><td>Structural (by heading)</td><td>Respect markdown/HTML headings as boundaries</td><td>Technical docs, wikis</td></tr>
+        <tr><td>Hierarchical / parent-child</td><td>Embed small chunks, retrieve, but pass parent chunk to LLM</td><td>Precision retrieval + wide context</td></tr>
+        <tr><td>Contextual retrieval (Anthropic 2024)</td><td>Prepend LLM-generated context summary to each chunk before embedding</td><td>Premium retrieval quality, worth the ingest cost</td></tr>
+      </tbody>
+    </table>
+
+    <h3>Metadata</h3>
+
+    <p>Attach to every chunk: source_id, doc_title, section, page, created_at, author, permissions_tag, chunk_index. These drive filtering at query time. Without metadata, you cannot answer "only search docs this user has access to" without leaking.</p>
+
+    <div class="callout">
+      <div class="callout-title">Chunk sizes that work</div>
+      <p>Defaults that rarely go wrong: 500–800 tokens per chunk, 50–100 token overlap, retrieve top 5–10 chunks. Tune with evals on your specific corpus. Long chunks = fewer retrievals needed but more noise per chunk. Short chunks = higher precision but more context fragmentation.</p>
+    </div>
+
+    <h2>5. Reranker</h2>
+
+    <p><strong>What.</strong> A second-stage model that takes the top-k retrieved candidates and re-scores them against the query using a cross-encoder (the model sees query + document together and outputs a relevance score, rather than comparing two separately-embedded vectors).</p>
+
+    <p><strong>Why.</strong> Bi-encoder embeddings compress each text into a single vector; lots of signal is lost. A cross-encoder rereads both together — far better at fine-grained relevance, worse at scale. Use the embedding model to shortlist 50–200 candidates, use the reranker to pick the top 5–10.</p>
+
+    <table>
+      <thead><tr><th>Reranker</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td>Cohere Rerank v3.5</td><td>Managed API, multilingual, strong default</td></tr>
+        <tr><td>Voyage rerank</td><td>Competitive with Cohere, often cheaper</td></tr>
+        <tr><td>BGE-reranker-v2-m3</td><td>Open source, self-host, matches managed APIs</td></tr>
+        <tr><td>Jina reranker v2</td><td>Open source, multilingual</td></tr>
+        <tr><td>LLM-as-reranker</td><td>GPT-4o-mini scoring each candidate — flexible, expensive</td></tr>
+      </tbody>
+    </table>
+
+    <div class="callout success">
+      <div class="callout-title">Rerank beats "better embeddings"</div>
+      <p>Upgrading from a cheap to expensive embedding model gives you maybe 5–10% retrieval quality gain. Adding a reranker on top of the cheap embeddings often gives you 20–40%. Latency cost: ~100–300ms for top-100 rerank. Almost always worth it.</p>
+    </div>
+
+    <h2>6. Prompt Management</h2>
+
+    <p><strong>What.</strong> Version control, A/B testing, and runtime management for your prompts — treating them as first-class versioned artifacts rather than hardcoded strings.</p>
+
+    <p><strong>Why.</strong> Prompts are the source code of your AI system. They need history, review, rollback, staging/prod separation, and experiments. If your prompt lives as a Python f-string in a file edited by whoever deployed last, you have a compliance problem waiting to happen.</p>
+
+    <ul>
+      <li><strong>Langfuse</strong> — open source, prompt registry + observability in one place.</li>
+      <li><strong>LangSmith</strong> — LangChain's hosted platform, strong prompt playground.</li>
+      <li><strong>PromptLayer</strong> — OG prompt-versioning tool.</li>
+      <li><strong>Humanloop, Promptfoo</strong> — test-driven prompt development.</li>
+      <li><strong>DIY</strong> — prompts in a Git-tracked `prompts/` directory, loaded at startup. Works fine at small scale.</li>
+    </ul>
+
+    <h3>What "prompts are code" means in practice</h3>
+
+    <ul>
+      <li>Prompts have semantic version numbers.</li>
+      <li>Prompt changes go through PR review.</li>
+      <li>Every prompt version has an eval-suite score attached.</li>
+      <li>Prompts are deployed with the app, not edited live in prod (except during emergencies with audit trail).</li>
+      <li>You can answer "what prompt was used for this user's request three weeks ago?" from logs.</li>
+    </ul>
+
+    <h2>7. LLM Orchestrator</h2>
+
+    <p><strong>What.</strong> A framework that composes LLM calls, tool calls, retrievals, and control flow into a pipeline.</p>
+
+    <table>
+      <thead><tr><th>Framework</th><th>Style</th><th>Good when</th></tr></thead>
+      <tbody>
+        <tr><td>LangChain</td><td>Kitchen-sink, chain-based</td><td>Rapid prototyping, standard patterns</td></tr>
+        <tr><td>LlamaIndex</td><td>Retrieval-first, data-centric</td><td>RAG-heavy apps, document workflows</td></tr>
+        <tr><td>DSPy</td><td>Declarative, optimizable</td><td>You want the framework to compile/tune prompts for you</td></tr>
+        <tr><td>Semantic Kernel</td><td>Microsoft, .NET/Python</td><td>Enterprise .NET shops</td></tr>
+        <tr><td>Haystack</td><td>Pipeline DAG, production-oriented</td><td>Search-heavy products</td></tr>
+        <tr><td>Raw SDK (Anthropic/OpenAI)</td><td>None</td><td>You understand what you're doing and want zero abstraction tax</td></tr>
+      </tbody>
+    </table>
+
+    <div class="callout warn">
+      <div class="callout-title">The framework tax</div>
+      <p>Frameworks help in weeks 1–4 and hurt in months 3–12. Common failure: you adopt LangChain to save time, then spend three weeks debugging its retry logic and realizing its abstraction doesn't match your control-flow needs. Rule of thumb: <em>start</em> raw SDK for anything going to prod; reach for a framework only for fast throwaway prototypes or specific features (LangGraph for agents, LlamaIndex for complex retrieval patterns).</p>
+    </div>
+
+    <h2>8. Agent Framework</h2>
+
+    <p><strong>What.</strong> A layer on top of an orchestrator that manages stateful, multi-step, tool-using workflows where the LLM decides what to do next.</p>
+
+    <table>
+      <thead><tr><th>Framework</th><th>Style</th></tr></thead>
+      <tbody>
+        <tr><td>LangGraph</td><td>Explicit state-machine graph, strong control, default for production agents</td></tr>
+        <tr><td>CrewAI</td><td>Multi-agent "teams" with roles</td></tr>
+        <tr><td>AutoGen (Microsoft)</td><td>Conversation-based multi-agent</td></tr>
+        <tr><td>Pydantic AI</td><td>Type-safe agents, lightweight</td></tr>
+        <tr><td>Anthropic / OpenAI native agents SDK</td><td>First-party, integrates with provider features</td></tr>
+        <tr><td>Mastra, Inngest Agents</td><td>Event-driven, durable execution</td></tr>
+      </tbody>
+    </table>
+
+    <h3>What you need from an agent framework</h3>
+
+    <ul>
+      <li><strong>State management</strong> — durable across crashes, resumable mid-workflow.</li>
+      <li><strong>Tool routing</strong> — pick which tool to call, parse args, handle errors.</li>
+      <li><strong>Loop control</strong> — max steps, max cost, max time, escape hatches.</li>
+      <li><strong>Observability</strong> — every step traceable, replayable.</li>
+      <li><strong>Human-in-the-loop</strong> — pause, ask for approval, resume.</li>
+    </ul>
+
+    <div class="callout danger">
+      <div class="callout-title">Agents love to loop</div>
+      <p>An agent with a bug or a misinterpretation can spin through 200 tool calls before noticing. Always bound: max steps, max tokens, max cost, max wall time. Enforce at the framework level, not hope the LLM behaves.</p>
+    </div>
+
+    <h2>9. Tool / Function Calling</h2>
+
+    <p><strong>What.</strong> A protocol where the LLM emits a structured call (function name + JSON args) that your code executes, then feeds the result back to the LLM.</p>
+
+    <p><strong>MCP (Model Context Protocol).</strong> Anthropic's open standard (adopted widely in 2025–26) for exposing tools and data sources to LLMs via a uniform server/client interface. Think "USB-C for LLM tools." MCP servers expose tools; any MCP-speaking client (Claude Desktop, Cursor, your app) can consume them.</p>
+
+    <h3>Designing tool APIs for LLMs</h3>
+
+    <ul>
+      <li><strong>Idempotency.</strong> Every tool must be safely retryable. Agents will retry on failure or confusion. "charge_customer" must be idempotent on a key, not fire twice.</li>
+      <li><strong>Narrow scope.</strong> "send_email(to, subject, body)" beats "do_email_thing(action, params)". LLMs pick better between focused tools.</li>
+      <li><strong>Clear descriptions.</strong> Tool descriptions are prompt real estate. Write them for the LLM, not for a developer. "Use this when the user asks about order status. Requires an order_id."</li>
+      <li><strong>Explicit schemas.</strong> Required vs optional, types, enums, examples. Structured outputs will enforce these; free-form won't.</li>
+      <li><strong>Dry-run mode.</strong> Destructive tools should have a preview variant so the agent can plan without committing.</li>
+      <li><strong>Least privilege.</strong> Scope tool permissions per session/user. An injection that successfully fires "delete_all_records" is a catastrophe.</li>
+    </ul>
+
+    <h2>10. Memory Store</h2>
+
+    <p><strong>What.</strong> Persistent storage for information the LLM should "remember" across turns or sessions.</p>
+
+    <h3>Memory types</h3>
+
+    <table>
+      <thead><tr><th>Type</th><th>What it stores</th><th>How retrieved</th></tr></thead>
+      <tbody>
+        <tr><td>Short-term (conversation)</td><td>Last N messages verbatim</td><td>Stuffed into context</td></tr>
+        <tr><td>Rolling summary</td><td>LLM-compressed history</td><td>Stuffed into system prompt</td></tr>
+        <tr><td>Semantic / long-term</td><td>Extracted facts, preferences, past interactions</td><td>Retrieved per turn via embeddings</td></tr>
+        <tr><td>Episodic</td><td>Structured past events (timestamps, entities)</td><td>Queried by time/entity</td></tr>
+        <tr><td>Procedural</td><td>Workflows, instructions the agent learned</td><td>Indexed by task</td></tr>
+      </tbody>
+    </table>
+
+    <h3>Tools</h3>
+
+    <ul>
+      <li><strong>Mem0</strong> — open source memory layer with fact extraction.</li>
+      <li><strong>Zep</strong> — conversation memory with entity graphs.</li>
+      <li><strong>LangMem</strong> — LangChain's memory toolkit.</li>
+      <li><strong>DIY</strong> — Postgres + pgvector + a "facts" table + an LLM extractor. Most production memory systems end up here.</li>
+    </ul>
+
+    <div class="callout warn">
+      <div class="callout-title">Memory is a privacy landmine</div>
+      <p>A "memory" feature stores what users tell the model. "I live at 123 Main St." gets extracted and persisted. You now have a PII database with an LLM-written schema. Regulate access, encrypt at rest, allow deletion, and never cross user boundaries.</p>
+    </div>
+
+    <h2>11. Inference Server</h2>
+
+    <p><strong>What.</strong> The engine that runs open-weight models on your own GPUs, serving them as an API.</p>
+
+    <table>
+      <thead><tr><th>Engine</th><th>Strengths</th></tr></thead>
+      <tbody>
+        <tr><td>vLLM</td><td>PagedAttention, continuous batching, wide model support, default choice</td></tr>
+        <tr><td>SGLang</td><td>Fast, structured output / RadixAttention for prefix reuse</td></tr>
+        <tr><td>TGI (Hugging Face)</td><td>HF ecosystem, production-hardened</td></tr>
+        <tr><td>TensorRT-LLM</td><td>NVIDIA-optimized, highest throughput on H100/B200, steep ops curve</td></tr>
+        <tr><td>LMDeploy</td><td>Turbo-engined, strong quantization support</td></tr>
+        <tr><td>llama.cpp / Ollama</td><td>CPU / consumer GPU / laptop inference</td></tr>
+        <tr><td>MLC-LLM</td><td>Mobile, WebGPU, edge</td></tr>
+      </tbody>
+    </table>
+
+    <h3>When to self-host vs use an API</h3>
+
+    <table>
+      <thead><tr><th>Factor</th><th>API</th><th>Self-host</th></tr></thead>
+      <tbody>
+        <tr><td>Volume below ~$10K/month LLM spend</td><td>Yes, always</td><td>No</td></tr>
+        <tr><td>Data residency / compliance</td><td>Only if provider offers in-region</td><td>Yes</td></tr>
+        <tr><td>Fine-tuned model required</td><td>If provider supports (LoRA hosting)</td><td>Yes</td></tr>
+        <tr><td>Peak latency predictability</td><td>Variable</td><td>Controllable</td></tr>
+        <tr><td>Ops burden</td><td>None</td><td>Significant — GPUs, Kubernetes, autoscaling, monitoring</td></tr>
+        <tr><td>High-volume steady-state (&gt;$50K/mo)</td><td>Getting expensive</td><td>Break-even, then advantage</td></tr>
+      </tbody>
+    </table>
+
+    <h3>Key concepts</h3>
+
+    <ul>
+      <li><strong>Continuous batching.</strong> Merge requests of different lengths into a single GPU batch, filling in new requests as old ones finish. Doubles or triples throughput vs static batching.</li>
+      <li><strong>PagedAttention.</strong> Manages the KV cache like virtual memory — pages of cache across requests, reducing fragmentation. vLLM's signature feature.</li>
+      <li><strong>Speculative decoding.</strong> Draft small model proposes N tokens; big model verifies in one pass. Can 2–3x decode speed.</li>
+      <li><strong>Quantization.</strong> FP8, INT8, INT4 to shrink memory and speed inference at small quality cost.</li>
+    </ul>
+
+    <h2>12. Fine-tuning Infrastructure</h2>
+
+    <p><strong>What.</strong> Pipelines to adapt a base model on your own data — either to teach it domain knowledge, style, or a specific behavior pattern.</p>
+
+    <h3>Types</h3>
+
+    <ul>
+      <li><strong>Full fine-tune.</strong> Update every weight. Expensive, memory-heavy, risk of catastrophic forgetting. Rarely the right call.</li>
+      <li><strong>LoRA (Low-Rank Adaptation).</strong> Train small adapter matrices on top of frozen base weights. ~1% of full FT cost. Can serve many LoRAs on one base model.</li>
+      <li><strong>QLoRA.</strong> LoRA on a 4-bit quantized base. Fine-tune 70B models on a single 48GB GPU.</li>
+      <li><strong>DPO / ORPO / KTO.</strong> Preference-optimization — train on pairs of "good" vs "bad" outputs. Replaces the complexity of full RLHF.</li>
+    </ul>
+
+    <h3>Tools</h3>
+
+    <ul>
+      <li><strong>Axolotl</strong> — YAML-configured fine-tuning, all the methods.</li>
+      <li><strong>Unsloth</strong> — 2–5x faster fine-tuning on a single GPU.</li>
+      <li><strong>TRL (HF)</strong> — reference library for RLHF, DPO, etc.</li>
+      <li><strong>Together AI, Modal, RunPod, AWS SageMaker</strong> — managed training.</li>
+      <li><strong>OpenAI / Anthropic / Cohere fine-tuning APIs</strong> — closed-model fine-tuning.</li>
+    </ul>
+
+    <div class="callout">
+      <div class="callout-title">When fine-tuning beats RAG</div>
+      <p>Fine-tune for <em>style, format, and behavior</em> (always respond in JSON, always use this tone, always follow this 8-step workflow). RAG for <em>knowledge</em> (the latest support ticket, the current product catalog). Most teams reach for fine-tuning too early. Try RAG + few-shot first; fine-tune when the eval ceiling is clearly hit.</p>
+    </div>
+
+    <h2>13. Evaluation Harness</h2>
+
+    <p><strong>What.</strong> The test framework for your AI system. Runs on a golden dataset, produces quality scores, blocks regressions.</p>
+
+    <table>
+      <thead><tr><th>Tool</th><th>Strength</th></tr></thead>
+      <tbody>
+        <tr><td>Ragas</td><td>RAG-specific metrics (faithfulness, answer relevance, context recall)</td></tr>
+        <tr><td>DeepEval</td><td>Pytest-style assertions for LLMs, CI-friendly</td></tr>
+        <tr><td>Promptfoo</td><td>YAML-configured prompt eval, great for A/B prompt testing</td></tr>
+        <tr><td>Langfuse Evals</td><td>Hosted LLM-as-judge tied to observability traces</td></tr>
+        <tr><td>Braintrust</td><td>Hosted eval platform, strong dataset management</td></tr>
+        <tr><td>OpenAI Evals</td><td>Template-based evals, works on any model</td></tr>
+        <tr><td>Inspect AI (UK AISI)</td><td>Safety-focused, capability evals</td></tr>
+      </tbody>
+    </table>
+
+    <h3>What a good eval harness does</h3>
+
+    <ol>
+      <li>Runs on every PR that touches prompts, models, or retrieval config.</li>
+      <li>Maintains a golden dataset that grows with every production bug fix.</li>
+      <li>Mixes deterministic checks (JSON-valid, schema-match, length-bounded) with LLM-judge checks (helpfulness, tone).</li>
+      <li>Reports regressions per dimension, not just an aggregate.</li>
+      <li>Feeds into dashboards — trend quality over time, across models, across prompt versions.</li>
+    </ol>
+
+    <h2>14. Observability</h2>
+
+    <p><strong>What.</strong> Distributed tracing for LLM calls. Every request shows every LLM call, tool call, retrieval, and their inputs, outputs, latencies, costs.</p>
+
+    <table>
+      <thead><tr><th>Tool</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td>Langfuse</td><td>Open source, self-host or cloud, strong default</td></tr>
+        <tr><td>LangSmith</td><td>LangChain native, best if you use LangChain</td></tr>
+        <tr><td>Arize Phoenix</td><td>Open source, OpenTelemetry-native</td></tr>
+        <tr><td>Arize AX</td><td>Enterprise ML + LLM obs</td></tr>
+        <tr><td>Helicone</td><td>Header proxy, zero-code integration</td></tr>
+        <tr><td>Weights & Biases Weave</td><td>W&B ecosystem</td></tr>
+        <tr><td>Datadog / New Relic LLM Observability</td><td>If you already have their infra</td></tr>
+      </tbody>
+    </table>
+
+    <h3>What to capture</h3>
+
+    <ul>
+      <li>Full input and output for every LLM call (watch for PII).</li>
+      <li>Token counts in/out, cached tokens, cost, latency (TTFT, TPOT, total).</li>
+      <li>Model name and version.</li>
+      <li>Parent trace linking to user session, request ID.</li>
+      <li>Tool call arguments and results.</li>
+      <li>Retrieval: query, top-k docs, rerank scores.</li>
+      <li>User feedback (thumbs up/down, edit events).</li>
+    </ul>
+
+    <h2>15. Guardrails</h2>
+
+    <p><strong>What.</strong> A runtime layer that inspects inputs going to the LLM and outputs coming back, blocking or transforming unsafe content.</p>
+
+    <table>
+      <thead><tr><th>Tool</th><th>Coverage</th></tr></thead>
+      <tbody>
+        <tr><td>NVIDIA NeMo Guardrails</td><td>DSL for conversational rails, input/output/dialog</td></tr>
+        <tr><td>Guardrails AI</td><td>Validators for structure, PII, toxicity, hallucinations</td></tr>
+        <tr><td>Llama Guard (Meta)</td><td>Open-source classifier for safety categories</td></tr>
+        <tr><td>Prompt Guard (Meta)</td><td>Injection / jailbreak detection</td></tr>
+        <tr><td>Azure Content Safety / OpenAI Moderation</td><td>Hosted content classifiers</td></tr>
+        <tr><td>Lakera Guard, Protect AI</td><td>Commercial injection / DLP</td></tr>
+        <tr><td>Rebuff</td><td>Layered injection defense, open source</td></tr>
+      </tbody>
+    </table>
+
+    <h3>Layered defense</h3>
+
+    <ol>
+      <li><strong>Input</strong> — injection detection, PII redaction before logs, topic out-of-scope rejection.</li>
+      <li><strong>Retrieval</strong> — enforce per-user document permissions; never retrieve docs the user can't see.</li>
+      <li><strong>Model output</strong> — toxicity, PII leak, structured-output validation, citation verification.</li>
+      <li><strong>Tool execution</strong> — least privilege, dry-run, human approval on destructive actions.</li>
+    </ol>
+
+    <h2>16. Cost Tracker</h2>
+
+    <p><strong>What.</strong> Per-user, per-feature, per-tenant cost attribution and budget enforcement for LLM usage.</p>
+
+    <p><strong>Why.</strong> A single user with a runaway agent loop can burn $10K in an hour on a frontier model. A customer on your $20/month tier can cost you $500/month if you don't cap them. Cost is the #1 unmanaged risk in shipping LLM features.</p>
+
+    <h3>What to build</h3>
+
+    <ul>
+      <li>Log token counts and cost <em>per request, per user, per feature, per model</em>.</li>
+      <li>Real-time budget counters in Redis or similar. Reject requests that exceed a per-user or per-org budget.</li>
+      <li>Alerts at 80% of budget thresholds.</li>
+      <li>Dashboards by feature — you will be surprised which feature is 70% of cost.</li>
+      <li>A "kill switch" to disable a feature when cost spikes from a bug or attack.</li>
+    </ul>
+
+    <p>Portkey, Helicone, Langfuse, and gateway layers usually include this; roll your own in production if you care about attribution beyond what they expose.</p>
+
+    <h2>17. Semantic Cache</h2>
+
+    <p><strong>What.</strong> Cache LLM responses keyed by the embedding of the prompt. If a new prompt's embedding is within threshold of a cached prompt, return the cached response.</p>
+
+    <p><strong>Tools.</strong> GPTCache, Langchain's cache backends, Portkey's semantic cache, custom Redis + vector lookup.</p>
+
+    <h3>When safe</h3>
+
+    <ul>
+      <li>Deterministic-ish tasks: FAQ lookup, classification, extraction with stable inputs.</li>
+      <li>High-traffic public content: search, product descriptions.</li>
+      <li>Within a per-user namespace where semantic duplication is common.</li>
+    </ul>
+
+    <h3>When dangerous</h3>
+
+    <ul>
+      <li>Personalized responses — cache hit across users = cross-user data leak.</li>
+      <li>Time-sensitive queries — "what's the status of order X" where the underlying state changes.</li>
+      <li>Agentic workflows — same prompt at different times needs different tool calls.</li>
+    </ul>
+
+    <div class="callout warn">
+      <div class="callout-title">Similarity threshold is a dial</div>
+      <p>Too strict (0.98) → few cache hits. Too loose (0.85) → semantic collisions serve wrong answers. Tune with real traffic and monitor for wrong-answer reports. Always namespace by user and task type.</p>
+    </div>
+
+    <h2>18. Feature Store for AI</h2>
+
+    <p><strong>What.</strong> A real-time store of user context (profile, preferences, recent activity, computed signals) that the LLM pipeline reads on every request.</p>
+
+    <p>Classical ML feature stores (Feast, Tecton, Hopsworks) apply here. Difference: features are often <em>textualized</em> before hitting the prompt. "User signed up 2024-03; subscription tier Pro; last 5 sessions: search for X, viewed Y…"</p>
+
+    <h3>Why separate from memory</h3>
+
+    <ul>
+      <li>Features are structured, deterministic, refreshed on writes to your core system.</li>
+      <li>Memory is LLM-extracted, fuzzy, grown through conversation.</li>
+      <li>Both feed the prompt, but they have different sources of truth and lifecycles.</li>
+    </ul>
+
+    <h2>19. Prompt Injection Detection</h2>
+
+    <p><strong>What.</strong> A specialized classifier — often a small fine-tuned model — that scores user input (and retrieved content) for injection likelihood before it reaches the main LLM.</p>
+
+    <table>
+      <thead><tr><th>Tool</th><th>Approach</th></tr></thead>
+      <tbody>
+        <tr><td>Meta Prompt Guard 2</td><td>Small classifier, open weights</td></tr>
+        <tr><td>Rebuff</td><td>Layered: heuristics + classifier + canary tokens</td></tr>
+        <tr><td>Lakera Guard</td><td>Commercial, continuously updated attack corpus</td></tr>
+        <tr><td>Custom BERT / small-LLM classifier</td><td>Train on known attack corpora (PromptBench, etc.)</td></tr>
+      </tbody>
+    </table>
+
+    <h3>Defense in depth</h3>
+
+    <ol>
+      <li>Classify inbound input before it reaches the main LLM.</li>
+      <li>Classify retrieved documents before they enter context (indirect injection via poisoned docs).</li>
+      <li>Structurally separate instructions from data (XML tags, clear delimiters).</li>
+      <li>Constrain tools to scope — a compromised prompt can only do what the tools allow.</li>
+      <li>Canary tokens — embed a secret in the system prompt; if it appears in output, the prompt was exfiltrated.</li>
+    </ol>
+
+    <h2>20. Distillation Pipeline</h2>
+
+    <p><strong>What.</strong> Use a large expensive model to label a big corpus of inputs, then fine-tune a small cheap model on those (input, output) pairs. The small model approximates the big one on your task domain at a fraction of the cost.</p>
+
+    <p><strong>When economics demand it.</strong></p>
+
+    <ul>
+      <li>A feature costs $0.05/request with GPT-5, $0.002/request with a distilled 8B.</li>
+      <li>You have millions of daily calls and your frontier bill is the majority of COGS.</li>
+      <li>The task is narrow enough that a small model can learn it (classification, structured extraction, specific summarization styles).</li>
+    </ul>
+
+    <h3>Pipeline shape</h3>
+
+    <div class="diagram"><pre>
+  1. Collect prompts from production traffic (de-identified)
+  2. Label with frontier model (Opus/GPT-5) — ground truth set
+  3. Filter with LLM-judge or rules — keep only confident labels
+  4. Fine-tune a base small model (Llama 3 8B, Qwen, Mistral Small)
+  5. Eval against held-out set vs frontier baseline
+  6. Serve small model; keep frontier as fallback on low-confidence inputs
+  7. Continuously re-distill as production traffic shifts
+</pre></div>
+
+    <div class="callout success">
+      <div class="callout-title">The cascade that wins</div>
+      <p>A distilled small model handles 90% of traffic fast and cheap. The frontier model handles the 10% the small model flags as uncertain (log-probability threshold, judge disagreement, or retrieval failure). You get small-model economics with frontier-model quality on the hard cases.</p>
+    </div>
+
+    <h2>Symptom → Component Diagnostic Table</h2>
+
+    <p>When something goes wrong in production, the symptom usually maps to a missing or mis-tuned component. Use this as a first-pass checklist.</p>
+
+    <table>
+      <thead><tr><th>Symptom</th><th>Likely culprit / fix</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>Responses vary every time, users confused</td>
+          <td>Set <code>temperature=0</code>; pass <code>seed</code> if provider supports; pin model version</td>
+        </tr>
+        <tr>
+          <td>LLM confidently makes up facts</td>
+          <td>Add RAG, require citations, add reranker, LLM-judge faithfulness, lower temperature</td>
+        </tr>
+        <tr>
+          <td>Cost blowing up month over month</td>
+          <td>Cost tracker + budgets; semantic cache; cascade (small model routes, frontier only for hard); shorten system prompts; enable prompt caching</td>
+        </tr>
+        <tr>
+          <td>Latency p95 above 10s</td>
+          <td>Stream responses; shorter max-tokens; smaller model; prefix cache; parallel retrievals; reduce context size</td>
+        </tr>
+        <tr>
+          <td>"It worked on my machine" — prompt regresses in prod</td>
+          <td>Prompt versioning + eval harness blocking deploys; pin model version; log prompt version per request</td>
+        </tr>
+        <tr>
+          <td>Retrieval misses obviously-relevant docs</td>
+          <td>Add reranker; switch to hybrid (dense + BM25); revisit chunking; add metadata filters; check embedding model fit</td>
+        </tr>
+        <tr>
+          <td>Users jailbreak the bot into saying weird things</td>
+          <td>Input guardrail (Llama Guard, Prompt Guard); output guardrail; constrained tools; canary tokens</td>
+        </tr>
+        <tr>
+          <td>PII showing up in logs</td>
+          <td>Output guardrail with PII detector; structured redaction in observability pipe; encrypt logs at rest; short retention</td>
+        </tr>
+        <tr>
+          <td>Agent runs forever / burns $$</td>
+          <td>Max steps, max cost, max time bounds in agent framework; circuit breaker on tool error rate</td>
+        </tr>
+        <tr>
+          <td>Cross-user data leak via cache</td>
+          <td>Namespace semantic cache by user_id; verify key construction; add cache-hit audit logging</td>
+        </tr>
+        <tr>
+          <td>Tool called twice, duplicate side effect</td>
+          <td>Idempotency keys on every tool; persist tool-call results; retries check idempotency store</td>
+        </tr>
+        <tr>
+          <td>Output JSON sometimes malformed</td>
+          <td>Use provider structured-output / JSON mode; validate with pydantic; repair loop with one retry; lower temperature</td>
+        </tr>
+        <tr>
+          <td>Model provider outage takes down the product</td>
+          <td>LLM gateway with fallback to secondary provider; graceful degradation messaging</td>
+        </tr>
+        <tr>
+          <td>Evals pass, users complain</td>
+          <td>Eval set doesn't match real traffic — seed golden set from production logs with user feedback signal</td>
+        </tr>
+        <tr>
+          <td>Hallucinations only on rare topics</td>
+          <td>Out-of-distribution detector; abstain instruction ("say you don't know"); escalate to human or stronger model</td>
+        </tr>
+        <tr>
+          <td>Prompt works on GPT, breaks on Claude (or vice versa)</td>
+          <td>Per-model prompt variants; eval suite per model; abstract prompts behind the gateway</td>
+        </tr>
+        <tr>
+          <td>Context window exhausted</td>
+          <td>Rolling summary memory; RAG instead of full-history stuffing; hierarchical chunks; compress tool descriptions</td>
+        </tr>
+        <tr>
+          <td>Fine-tuned model degraded on general queries</td>
+          <td>Catastrophic forgetting — mix general data into FT set, or use LoRA and route only in-domain queries to it</td>
+        </tr>
+        <tr>
+          <td>RAG returns stale info</td>
+          <td>Ingest pipeline lag — event-driven re-indexing; TTL on embeddings; metadata filter on freshness</td>
+        </tr>
+        <tr>
+          <td>Query volume exceeds inference capacity</td>
+          <td>Continuous batching on inference server; autoscale GPU replicas; distill to smaller model; offload classification tasks off the LLM</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div class="callout success">
+      <div class="callout-title">Chapter takeaway</div>
+      <p>An AI system is not "an LLM with a UI." It is twenty components, each with real design decisions, tradeoffs, and failure modes. The next six chapters zoom into the compositions that matter most — RAG, serving, agents, hybrid legacy integration, the war-room playbook, and reference architectures from real production systems.</p>
+    </div>
+
+    <div class="chapter-nav">
+      <a href="01-foundations.html"><div class="label">← Previous</div><div class="title">1. AI Foundations</div></a>
+      <a class="next" href="03-rag.html"><div class="label">Next →</div><div class="title">3. RAG Systems</div></a>
+    </div>
+  </main>
+</div>
+<script src="../assets/js/nav.js"></script>
+</body>
+</html>

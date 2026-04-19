@@ -1,0 +1,680 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Agent Architectures — Book III · AI System Design</title>
+<link rel="stylesheet" href="../assets/css/style.css">
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">System Design Books</div>
+    <div class="brand-sub">by Sanheen · Progressive Learning</div>
+    <div class="nav-section">
+      <h3>Home</h3>
+      <a href="../index.html">Overview</a>
+    </div>
+    <div class="nav-section">
+      <h3>Book I — Low Level Design</h3>
+      <a href="../lld/index.html">LLD Index</a>
+    </div>
+    <div class="nav-section">
+      <h3>Book II — High Level Design</h3>
+      <a href="../hld/index.html">HLD Index</a>
+    </div>
+    <div class="nav-section">
+      <h3>Book III — AI System Design</h3>
+      <a href="index.html">AI Index</a>
+      <a href="01-foundations.html">1. AI Foundations</a>
+      <a href="02-building-blocks.html">2. AI Building Blocks</a>
+      <a href="03-rag.html">3. RAG Systems</a>
+      <a href="04-llm-serving.html">4. LLM Serving</a>
+      <a href="05-agents.html">5. Agent Architectures</a>
+      <a href="06-hybrid-legacy.html">6. Hybrid &amp; Legacy</a>
+      <a href="07-war-room.html">7. AI War Room</a>
+      <a href="08-real-architectures.html">8. Real AI Architectures</a>
+    </div>
+  </aside>
+  <main class="main">
+    <div class="breadcrumb"><a href="../index.html">Home</a> / <a href="index.html">Book III · AI</a> / Chapter 5</div>
+    <h1>Chapter 5: Agent Architectures</h1>
+
+    <p class="lead">An agent is what you get when you stop treating an LLM as a text-completion endpoint and start treating it as a decision-maker sitting inside a loop. The loop has tools. The loop has memory. The loop has budget. Everything in this chapter is about making that loop <em>survive contact with production</em>.</p>
+
+    <div class="callout callout-info">
+      <strong>Mental model.</strong> A chatbot is a function: <code>prompt → text</code>. An agent is a process: <code>goal → (think, act, observe)* → outcome</code>. The second shape is strictly harder to operate — state, cost, latency, failure modes all explode.
+    </div>
+
+    <h2>1. What is an AI agent?</h2>
+
+    <p>An AI agent is an LLM that runs in a loop, can <strong>call tools</strong> to take actions or fetch information, and <strong>maintains state</strong> across iterations. A single LLM call answers a question. An agent pursues a goal — possibly over many LLM calls, many minutes, and many external side-effects — until it decides it is done.</p>
+
+    <table>
+      <thead><tr><th>Dimension</th><th>Chatbot</th><th>Agent</th></tr></thead>
+      <tbody>
+        <tr><td>Shape</td><td>Single turn or simple history replay</td><td>Loop with tool use and state</td></tr>
+        <tr><td>Side effects</td><td>None (usually text only)</td><td>Writes databases, sends emails, edits files, moves money</td></tr>
+        <tr><td>Latency</td><td>1–5 seconds</td><td>Seconds to hours</td></tr>
+        <tr><td>Cost per request</td><td>Pennies</td><td>Cents to dollars (many LLM calls)</td></tr>
+        <tr><td>Failure modes</td><td>Wrong answer</td><td>Wrong answer + wrong actions + infinite loops + cost explosions</td></tr>
+        <tr><td>Observability</td><td>Single span</td><td>Trees of spans across tools, models, sub-agents</td></tr>
+      </tbody>
+    </table>
+
+    <div class="diagram"><pre>
+          CHATBOT                             AGENT
+
+   user ──▶ prompt ──▶ LLM ──▶ reply      user ──▶ goal
+                                                     │
+                                                     ▼
+                                               ┌─────────┐
+                                               │  LLM    │◀─┐
+                                               └────┬────┘  │
+                                                    │       │ observations
+                                            decides │       │
+                                                    ▼       │
+                                               ┌─────────┐  │
+                                               │  tool   │──┘
+                                               └─────────┘
+                                                    │
+                                                (loop until done)
+                                                    │
+                                                    ▼
+                                                 outcome
+</pre></div>
+
+    <h2>2. The ReAct pattern</h2>
+
+    <p>ReAct (<em>Reasoning + Acting</em>) is the foundational agent pattern. The model alternates between <strong>thoughts</strong> (private reasoning in text) and <strong>actions</strong> (tool calls). After each action it receives an <strong>observation</strong> — the tool's output — and uses it to decide the next step.</p>
+
+    <div class="diagram"><pre>
+Thought_1  →  Action_1  →  Observation_1
+    ▲                          │
+    └──────────────────────────┘
+              loop
+
+Thought_N  →  "I have the answer" → final response
+</pre></div>
+
+    <p>A minimal Python ReAct loop:</p>
+
+    <pre><code>def run_agent(goal: str, tools: dict, model, max_iters=10, budget_usd=0.50):
+    history = [{"role": "system", "content": SYSTEM_PROMPT}]
+    history.append({"role": "user", "content": goal})
+    spent = 0.0
+
+    for step in range(max_iters):
+        resp = model.complete(history, tools=list(tools.values()))
+        spent += resp.cost_usd
+        if spent &gt; budget_usd:
+            raise BudgetExceeded(spent)
+
+        history.append(resp.message)
+
+        if not resp.tool_calls:
+            return resp.message.content  # done
+
+        for call in resp.tool_calls:
+            if call.name not in tools:
+                obs = f"ERROR: unknown tool {call.name}"
+            else:
+                try:
+                    obs = tools[call.name].run(**call.args)
+                except Exception as e:
+                    obs = f"ERROR: {e}"
+            history.append({
+                "role": "tool",
+                "tool_call_id": call.id,
+                "content": str(obs)[:4000],  # truncate to prevent context blowup
+            })
+
+    raise IterationLimit(max_iters)</code></pre>
+
+    <div class="callout callout-warn">
+      <strong>Every production ReAct loop has three hard limits.</strong> Max iterations, max tokens, max dollars. Without all three, a bad goal will silently cost you hundreds of dollars before anyone notices.
+    </div>
+
+    <h2>3. Tool calling mechanics</h2>
+
+    <p>Modern models (Claude, GPT, Gemini, Llama) accept a <strong>tool schema</strong> — a JSON description of each callable function — and return structured tool calls as part of their response. The runtime executes the tool and feeds the result back.</p>
+
+    <pre><code>{
+  "name": "search_orders",
+  "description": "Search the orders database by customer email or order id. Returns up to 20 orders, most recent first. Use this when the user asks about their purchase history.",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "customer_email": {"type": "string", "format": "email"},
+      "order_id":       {"type": "string", "pattern": "^ORD-[0-9]{8}$"},
+      "limit":          {"type": "integer", "minimum": 1, "maximum": 20, "default": 10}
+    },
+    "oneOf": [
+      {"required": ["customer_email"]},
+      {"required": ["order_id"]}
+    ]
+  }
+}</code></pre>
+
+    <p>The description field is load-bearing. The model chooses tools based on the description, not the name. Vague descriptions cause wrong-tool selection — the #1 cause of silent agent failures.</p>
+
+    <h3>Parallel tool calls</h3>
+
+    <p>When the model can tell that two tool calls are independent, it emits both in the same response. The runtime should execute them concurrently and return all observations in a single follow-up message. This halves wall-clock latency for independent operations (e.g., fetch user profile + fetch order status).</p>
+
+    <h3>Streaming tool calls</h3>
+
+    <p>For UX-sensitive agents (coding assistants, chat), tool calls are streamed: the name arrives first, then arguments token-by-token. This lets the UI show <em>"Searching orders..."</em> before the call is fully formed, and lets long-running tools start work early if the prefix already commits to the action.</p>
+
+    <h2>4. MCP — Model Context Protocol</h2>
+
+    <p>MCP, introduced in 2024 and broadly adopted through 2025–2026, is an open protocol that standardizes how tools and data sources are exposed to LLMs. Before MCP, every agent framework shipped its own tool format and every integration was a bespoke glue layer.</p>
+
+    <table>
+      <thead><tr><th>MCP concept</th><th>What it is</th></tr></thead>
+      <tbody>
+        <tr><td>Server</td><td>A process exposing tools, resources, and prompts over stdio or HTTP+SSE</td></tr>
+        <tr><td>Client</td><td>The agent runtime (Claude Desktop, VS Code, your own)</td></tr>
+        <tr><td>Tools</td><td>Callable functions with JSON schema</td></tr>
+        <tr><td>Resources</td><td>Readable data (files, DB rows, API responses) addressed by URI</td></tr>
+        <tr><td>Prompts</td><td>Named templates the server offers to the client</td></tr>
+      </tbody>
+    </table>
+
+    <div class="diagram"><pre>
+┌────────────────────┐       MCP       ┌──────────────────┐
+│  Agent runtime     │◀───────────────▶│  GitHub MCP srv  │
+│  (Claude, IDE,     │                 └──────────────────┘
+│   custom)          │◀───────────────▶┌──────────────────┐
+│                    │                 │  Postgres MCP srv│
+│                    │◀───────────────▶└──────────────────┘
+│                    │                 ┌──────────────────┐
+│                    │◀───────────────▶│  Filesystem MCP  │
+└────────────────────┘                 └──────────────────┘
+</pre></div>
+
+    <p>By 2026, the practical effect is that you <em>do not write tool integrations anymore</em> for popular systems. You install an MCP server. Your agent sees the tools. This is the equivalent of what LSP did for editors and language support.</p>
+
+    <h2>5. Agent state machine</h2>
+
+    <p>Under the hood, every non-trivial agent is a state machine. Modeling it explicitly — rather than hiding it in a while-loop — makes it testable, resumable, and debuggable.</p>
+
+    <div class="diagram"><pre>
+                    ┌──────────┐
+        start ─────▶│ PLANNING │
+                    └────┬─────┘
+                         │ plan emitted
+                         ▼
+                    ┌──────────┐     tool error
+         ┌─────────▶│EXECUTING │────────┐
+         │          └────┬─────┘        │
+         │               │ observation  │
+         │               ▼              ▼
+         │          ┌──────────┐   ┌──────────┐
+         └──────────┤REFLECTING│   │ RECOVERY │
+           replan   └────┬─────┘   └────┬─────┘
+                         │ "done"       │
+                         ▼              │
+                    ┌──────────┐        │
+                    │TERMINATE │◀───────┘
+                    └──────────┘
+</pre></div>
+
+    <table>
+      <thead><tr><th>State</th><th>Responsibility</th><th>Exit condition</th></tr></thead>
+      <tbody>
+        <tr><td>PLANNING</td><td>Decompose goal into sub-tasks</td><td>Plan emitted or trivially simple</td></tr>
+        <tr><td>EXECUTING</td><td>Run next planned step (usually a tool call)</td><td>Observation received</td></tr>
+        <tr><td>REFLECTING</td><td>Did the step help? Should we replan?</td><td>Continue, replan, or terminate</td></tr>
+        <tr><td>RECOVERY</td><td>Handle tool failure, retries, fallbacks</td><td>Recovered or give up</td></tr>
+        <tr><td>TERMINATE</td><td>Return final answer, emit audit trail</td><td>Done</td></tr>
+      </tbody>
+    </table>
+
+    <h2>6. Memory architectures</h2>
+
+    <p>LLM context windows are not memory. They are a cache for <em>this</em> request. Real agents need layered memory: short-term chat state, compressed summaries, long-term facts, and learned procedures.</p>
+
+    <div class="diagram"><pre>
+┌────────────────────────────────────────────────────────────┐
+│                       AGENT MEMORY                         │
+├────────────────────────────────────────────────────────────┤
+│ SHORT-TERM     sliding window, last N turns, in-context    │
+│ SUMMARY        rolling summary of older turns              │
+│ LONG-TERM      vector store of facts, episodes             │
+│ PROCEDURAL     learned "how to do X" patterns              │
+│ ENTITY         canonical records of people/things          │
+└────────────────────────────────────────────────────────────┘
+</pre></div>
+
+    <h3>Short-term memory (sliding window)</h3>
+    <p>Simplest possible: keep the last N messages, drop the rest. Works for short conversations; fails the moment a user references something from 30 turns ago. Typical N is 20–50 turns for chat, 200+ for coding agents.</p>
+
+    <h3>Summary memory</h3>
+    <p>When the window fills up, summarize the oldest half with a cheap model and replace those messages with the summary. Recursive: summaries get re-summarized. Cheap and effective; loses fidelity on specific details like IDs or numbers.</p>
+
+    <pre><code>if token_count(history) &gt; SUMMARY_THRESHOLD:
+    old, recent = history[:len(history)//2], history[len(history)//2:]
+    summary = cheap_model.summarize(old)
+    history = [{"role":"system","content":f"Earlier: {summary}"}] + recent</code></pre>
+
+    <h3>Long-term / episodic memory</h3>
+    <p>Embed salient facts and events into a vector store, retrieve by similarity at query time. Examples: <em>"user prefers dark mode"</em>, <em>"user mentioned they have a daughter named Priya"</em>. Write path is where it gets hard — you must decide <em>what</em> is worth remembering without storing the entire conversation.</p>
+
+    <h3>Procedural memory</h3>
+    <p>Learned patterns of <em>how</em> to do something. A coding agent might remember: "when the user says 'add a test for X', I first read existing tests in the same module, then pattern-match." Usually stored as few-shot examples that are retrieved and injected into the system prompt.</p>
+
+    <h3>Off-the-shelf options (2026)</h3>
+    <table>
+      <thead><tr><th>Library</th><th>Strength</th><th>Weakness</th></tr></thead>
+      <tbody>
+        <tr><td>Mem0</td><td>Auto-extracts facts, simple API, layered memory</td><td>Opinionated schema; customization needs forking</td></tr>
+        <tr><td>Zep</td><td>Temporal knowledge graph, fact expiry, graph queries</td><td>More infra to run; overkill for small apps</td></tr>
+        <tr><td>Letta (MemGPT)</td><td>OS-style paging between in-context and archived memory</td><td>Higher LLM cost from self-paging loops</td></tr>
+        <tr><td>Roll-your-own</td><td>Full control</td><td>You own the bugs; write-path heuristics are hard</td></tr>
+      </tbody>
+    </table>
+
+    <div class="callout callout-info">
+      <strong>Rule of thumb.</strong> Start with short-term + summary. Add long-term only when users explicitly complain "it forgot what I said last week." Most production agents never need more than two tiers.
+    </div>
+
+    <h2>7. Planning strategies</h2>
+
+    <table>
+      <thead><tr><th>Strategy</th><th>How it works</th><th>When to use</th></tr></thead>
+      <tbody>
+        <tr><td>One-shot plan</td><td>Model writes full plan up front, then executes step-by-step</td><td>Well-scoped tasks with stable structure (ETL, reports)</td></tr>
+        <tr><td>Iterative (ReAct)</td><td>Decide the next step after each observation</td><td>Exploratory tasks where you don't know what you'll find</td></tr>
+        <tr><td>Plan-and-execute</td><td>Big plan first, but replan when reality diverges</td><td>Multi-hour tasks, coding agents, research</td></tr>
+        <tr><td>Tree of Thoughts</td><td>Branch multiple candidate thoughts, evaluate, keep best</td><td>Hard reasoning tasks (math, puzzles); expensive</td></tr>
+        <tr><td>Reflection / self-critique</td><td>After a proposed answer, critique it and revise</td><td>Quality-sensitive outputs; doubles cost</td></tr>
+      </tbody>
+    </table>
+
+    <div class="diagram"><pre>
+ONE-SHOT PLAN                    ITERATIVE (ReAct)
+
+plan = [s1, s2, s3, s4]          while not done:
+for step in plan:                    thought = llm(history)
+    execute(step)                    action  = thought.action
+return answer                        obs     = execute(action)
+                                     history.append(obs)
+(brittle if reality changes)     (robust, but costs more tokens)
+
+
+PLAN-AND-EXECUTE (best of both)
+
+plan = llm.make_plan(goal)
+for step in plan:
+    result = execute(step)
+    if result.surprising:
+        plan = llm.replan(plan, result)     ← key move
+</pre></div>
+
+    <h2>8. Multi-agent patterns</h2>
+
+    <p>When a single agent's prompt becomes unmanageable or the task has genuinely distinct roles, split it. Four common topologies:</p>
+
+    <h3>Sequential (pipeline)</h3>
+    <div class="diagram"><pre>
+user → [Researcher] → notes → [Writer] → draft → [Editor] → final
+</pre></div>
+    <p>Each agent has a narrow prompt and a narrow tool set. Good for tasks where the stages are genuinely different skills. Bad when stages need to iterate with each other.</p>
+
+    <h3>Hierarchical (supervisor / router)</h3>
+    <div class="diagram"><pre>
+                    ┌─────────────┐
+             user ─▶│  Supervisor │
+                    └──────┬──────┘
+              ┌────────────┼────────────┐
+              ▼            ▼            ▼
+        ┌──────────┐ ┌──────────┐ ┌──────────┐
+        │ Billing  │ │ Support  │ │ Technical│
+        │  agent   │ │  agent   │ │  agent   │
+        └──────────┘ └──────────┘ └──────────┘
+</pre></div>
+    <p>A manager agent reads the request and delegates to a specialist. LangGraph's <code>supervisor</code> pattern is the canonical implementation. Downsides: supervisor itself becomes a bottleneck; specialists can't easily talk to each other.</p>
+
+    <h3>Collaborative (peer debate)</h3>
+    <p>Two or more agents with different personas critique each other's output. Common pattern: <em>Proposer</em> writes, <em>Critic</em> finds flaws, <em>Judge</em> decides. Good for quality-sensitive tasks (legal drafting, code review) where a single agent over-commits to its first answer.</p>
+
+    <h3>Competitive (best-of-N)</h3>
+    <p>N agents independently produce candidates; a cheaper judge ranks and selects one. Used in research systems and coding agents where diversity of approach matters more than coordination.</p>
+
+    <div class="callout callout-warn">
+      <strong>Multi-agent is seductive and expensive.</strong> Every additional agent doubles the LLM bill. Most "multi-agent" architectures work just as well as a single agent with better tools and a clearer prompt. Add agents only when the roles are genuinely distinct and adding tools cannot express it.
+    </div>
+
+    <h2>9. Orchestration frameworks (2026 landscape)</h2>
+
+    <table>
+      <thead><tr><th>Framework</th><th>Paradigm</th><th>Strength</th><th>Watch out</th></tr></thead>
+      <tbody>
+        <tr><td>LangGraph</td><td>Explicit graph of nodes and edges</td><td>Debuggable state machines; checkpointing; streaming</td><td>Verbose; you write more code</td></tr>
+        <tr><td>CrewAI</td><td>Roles, tasks, crews</td><td>Readable for non-engineers; quick prototypes</td><td>Less control over execution; harder to debug</td></tr>
+        <tr><td>AutoGen</td><td>Conversational multi-agent</td><td>Natural for agent-to-agent chat patterns</td><td>Hard to bound cost / iterations</td></tr>
+        <tr><td>Pydantic AI</td><td>Type-safe, function-first</td><td>Strong typing, deps injection, testable</td><td>Younger ecosystem; fewer integrations</td></tr>
+        <tr><td>Claude Agent SDK</td><td>Tool + subagent primitives</td><td>Matches Anthropic's runtime exactly; MCP-first</td><td>Claude-centric</td></tr>
+        <tr><td>OpenAI Agents SDK</td><td>Handoffs, guardrails, tracing</td><td>Built-in tracing; handoff primitive</td><td>OpenAI-centric</td></tr>
+      </tbody>
+    </table>
+
+    <div class="callout callout-info">
+      <strong>Honest take.</strong> For anything you intend to run in production, either LangGraph or a plain Python loop with Pydantic schemas beats a heavy role-based framework. The frameworks that win are the ones that give you observability and checkpointing for free — and that set is small.
+    </div>
+
+    <h2>10. Durable execution</h2>
+
+    <p>Agents that run for minutes or hours cannot be ordinary HTTP request handlers. Process crashes, pod restarts, and deploys will kill them. You need a <strong>workflow engine</strong> that checkpoints state and resumes where it left off.</p>
+
+    <table>
+      <thead><tr><th>Engine</th><th>Model</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td>Temporal</td><td>Workflow + activities, event-sourced history</td><td>Enterprise scale; strong typing in TS/Go/Python</td></tr>
+        <tr><td>Restate</td><td>Durable functions, journaled virtual objects</td><td>Lighter runtime; good for serverless shapes</td></tr>
+        <tr><td>Inngest</td><td>Event-driven durable steps</td><td>Dev experience; built-in retries and throttles</td></tr>
+        <tr><td>Prefect / Dagster</td><td>Data-pipeline flavored</td><td>Good for batch agents, scheduled runs</td></tr>
+      </tbody>
+    </table>
+
+    <div class="diagram"><pre>
+             REQUEST                       ┌──────────────┐
+ user ────▶  start workflow ──────────────▶│  Temporal    │
+                                           │  (history)   │
+                                           └──────┬───────┘
+                                                  │ replays on crash
+             ┌────────────────────────────────────┤
+             ▼                                    ▼
+   activity: llm_call(step1)          activity: llm_call(stepN)
+   activity: tool_call(search)        activity: tool_call(update_db)
+   activity: llm_call(step2)          ...
+             │                                    │
+             └──────────────── checkpoints ──────┘
+</pre></div>
+
+    <p>In Temporal, each LLM call and each tool call is an <em>activity</em>. The workflow code is deterministic; the engine records activity results so it can replay. Your agent can survive node death, deploy, and week-long waits for human approval.</p>
+
+    <h2>11. Tool design principles</h2>
+
+    <p>Tools are the API surface of your agent. Bad tools make a smart model look stupid; good tools make a cheap model look smart.</p>
+
+    <table>
+      <thead><tr><th>Principle</th><th>Why</th><th>Example</th></tr></thead>
+      <tbody>
+        <tr><td>Self-describing</td><td>Model picks tools from description</td><td>"Search orders by email or id" not "query_orders"</td></tr>
+        <tr><td>Bounded scope</td><td>One tool = one verb</td><td><code>cancel_order</code>, not <code>manage_order(action=...)</code></td></tr>
+        <tr><td>Idempotent where possible</td><td>Retries are safe</td><td>Use idempotency keys on writes</td></tr>
+        <tr><td>Structured errors</td><td>Model can recover</td><td><code>{"error":"not_found","hint":"search by email first"}</code></td></tr>
+        <tr><td>Bounded output</td><td>Don't blow the context</td><td>Paginate; return summaries with a "fetch more" tool</td></tr>
+        <tr><td>Deterministic schema</td><td>Avoid "sometimes list, sometimes dict"</td><td>Always return <code>{"items":[...], "next_cursor":null}</code></td></tr>
+      </tbody>
+    </table>
+
+    <h3>What makes a BAD tool</h3>
+
+    <ul>
+      <li><strong>Ambiguous name with vague description.</strong> <code>do_thing(input: str)</code> — the model will misuse it or ignore it.</li>
+      <li><strong>Overlapping tools.</strong> <code>search_customer</code> and <code>find_user</code> do the same thing. Model oscillates between them.</li>
+      <li><strong>Swiss-army tools.</strong> One tool with a <code>mode</code> parameter that branches into ten different behaviors. Merge or split.</li>
+      <li><strong>Free-text args where enums would do.</strong> Asking the model to produce <code>"status"</code> as a string invites typos. Use an enum.</li>
+      <li><strong>Silent truncation.</strong> A tool returns 50 KB when the model asked for 10 results. Return a pagination cursor instead.</li>
+    </ul>
+
+    <h2>12. Observability for agents</h2>
+
+    <p>A single agent invocation is not a request-response — it's a <strong>tree</strong> of LLM calls, tool calls, sub-agents, and retries. Standard APM doesn't cut it. You need traces that understand this shape.</p>
+
+    <div class="diagram"><pre>
+user request ──────────────────────────────────────────┐
+│                                                     │
+├─ plan (llm)           1.2s  $0.004                   │
+├─ search_orders        0.3s  (tool)                   │
+├─ reflect (llm)        0.9s  $0.003                   │
+├─ sub-agent: refund_specialist                        │
+│    ├─ check_policy    0.1s  (tool)                   │
+│    ├─ compose_refund  1.5s  $0.006                   │
+│    └─ issue_refund    0.4s  (tool, write!)           │
+├─ compose reply (llm)  1.1s  $0.005                   │
+└─ TOTAL                5.5s  $0.018 · 7 llm · 3 tools │
+</pre></div>
+
+    <table>
+      <thead><tr><th>Tool</th><th>What it shines at</th></tr></thead>
+      <tbody>
+        <tr><td>Langfuse</td><td>Open source, self-host, session-level views, scoring</td></tr>
+        <tr><td>LangSmith</td><td>First-class for LangChain/LangGraph; evals integrated</td></tr>
+        <tr><td>Arize Phoenix</td><td>OTel-native, open telemetry, good for custom stacks</td></tr>
+        <tr><td>Helicone</td><td>Drop-in proxy, cost dashboards</td></tr>
+        <tr><td>OpenTelemetry GenAI semantic conventions</td><td>Vendor-neutral spans; growing standard in 2026</td></tr>
+      </tbody>
+    </table>
+
+    <p>At minimum, log for every LLM call: model, prompt template, input tokens, output tokens, latency, cost, and the <em>parent span</em> so the tree reconstructs. Attribute cost to user, tenant, and feature — otherwise the bill is a mystery.</p>
+
+    <h2>13. Evaluation for agents</h2>
+
+    <p>Agent evals are two-level:</p>
+
+    <ol>
+      <li><strong>End-to-end task success.</strong> Given a goal, did the agent achieve it? Binary or scalar. This is the only metric that ultimately matters.</li>
+      <li><strong>Step-level quality.</strong> Was each tool call reasonable? Did reasoning drift? This finds why end-to-end fails.</li>
+    </ol>
+
+    <table>
+      <thead><tr><th>Benchmark</th><th>Domain</th><th>Measures</th></tr></thead>
+      <tbody>
+        <tr><td>SWE-bench (Verified)</td><td>Real GitHub issues</td><td>Can the agent patch a repo so tests pass?</td></tr>
+        <tr><td>τ-bench (tau-bench)</td><td>Customer service simulation</td><td>Multi-turn tool use, policy compliance, user satisfaction</td></tr>
+        <tr><td>WebArena / VisualWebArena</td><td>Browsing real web UIs</td><td>Can the agent complete tasks on sites it hasn't seen?</td></tr>
+        <tr><td>GAIA</td><td>General assistant</td><td>Research-style questions requiring multi-step reasoning</td></tr>
+        <tr><td>OSWorld</td><td>Full computer use</td><td>Desktop automation tasks</td></tr>
+      </tbody>
+    </table>
+
+    <p>For your own agent, build a private eval set of 50–200 real tasks with known-good outcomes. Run it on every prompt change. Stop shipping agent changes without eval deltas — it is the single biggest source of regression in production agent systems.</p>
+
+    <h2>14. Failure modes</h2>
+
+    <table>
+      <thead><tr><th>Failure</th><th>Symptom</th><th>Mitigation</th></tr></thead>
+      <tbody>
+        <tr><td>Infinite loop</td><td>Agent keeps calling the same tool with slight variations</td><td>Max iterations; detect repeated calls and abort</td></tr>
+        <tr><td>Tool misuse</td><td>Wrong args, wrong tool picked</td><td>Better descriptions, schema validation, tool allowlists per task</td></tr>
+        <tr><td>Context overflow</td><td>History exceeds window, model forgets early steps</td><td>Summarization, compaction, chunked tool outputs</td></tr>
+        <tr><td>Cost explosion</td><td>$50 single request</td><td>Per-request token + dollar budget with hard cutoff</td></tr>
+        <tr><td>Hallucinated tools</td><td>Model calls <code>delete_everything()</code> which doesn't exist</td><td>Strict schema-enforced calling; return structured error</td></tr>
+        <tr><td>Drift</td><td>Reasoning wanders off-topic after many turns</td><td>Periodic "stay on task" reminders; sub-agent boundaries</td></tr>
+        <tr><td>Silent success</td><td>Agent claims success but didn't actually do it</td><td>Programmatic verification after any write</td></tr>
+        <tr><td>Prompt injection</td><td>Tool output contains malicious instructions</td><td>Treat all tool output as untrusted data; escape; policy filters</td></tr>
+      </tbody>
+    </table>
+
+    <div class="callout callout-danger">
+      <strong>Prompt injection is the SQL injection of agents.</strong> Any time the agent reads data from the world (email bodies, web pages, file contents), that data can contain instructions. Assume it will. Never let a tool's output be treated as higher-privileged than the user's original goal.
+    </div>
+
+    <h2>15. Production hardening</h2>
+
+    <div class="diagram"><pre>
+REQUEST
+   │
+   ▼
+┌─────────────────────────────────────────────┐
+│ Auth + rate limit + tenant quota            │
+└────────────────────┬────────────────────────┘
+                     ▼
+┌─────────────────────────────────────────────┐
+│ Budget guard: tokens, dollars, wall-clock   │
+└────────────────────┬────────────────────────┘
+                     ▼
+┌─────────────────────────────────────────────┐
+│ Tool allowlist for this user / task         │
+└────────────────────┬────────────────────────┘
+                     ▼
+┌─────────────────────────────────────────────┐
+│ Agent loop with checkpointing (Temporal)    │
+│   ├─ prompt injection filter on tool output │
+│   ├─ policy check before destructive tools  │
+│   └─ HITL gate for irreversible actions     │
+└────────────────────┬────────────────────────┘
+                     ▼
+┌─────────────────────────────────────────────┐
+│ Post-hoc verification (did the write land?) │
+└────────────────────┬────────────────────────┘
+                     ▼
+                  RESPONSE + audit log
+</pre></div>
+
+    <ul>
+      <li><strong>Iteration limits.</strong> Hard cap (e.g., 25). Soft cap with warning at half.</li>
+      <li><strong>Token + dollar budget.</strong> Per-request. Per-tenant daily. Per-feature monthly.</li>
+      <li><strong>Tool allowlists.</strong> The customer-support agent cannot call <code>delete_user</code>. The admin agent can. Enforce at the runtime, not the prompt.</li>
+      <li><strong>Human-in-the-loop for destructive actions.</strong> Refund over $500? Pause, email approver, resume when approved. Durable execution makes this trivial.</li>
+      <li><strong>Idempotency keys.</strong> Every write-side tool call carries a key so retries don't double-charge, double-ship, or double-email.</li>
+      <li><strong>Resumable from crash.</strong> Temporal / Restate / Inngest for long-running agents.</li>
+      <li><strong>Canary + rollback.</strong> New prompt or new model goes to 1% first. Auto-rollback on eval regression.</li>
+    </ul>
+
+    <h2>16. Worked example: Customer support agent</h2>
+
+    <p><strong>Scenario.</strong> SaaS company wants an agent that handles tier-1 support: account questions, billing lookups, subscription changes, refund requests under $50 (auto), above $50 (HITL).</p>
+
+    <h3>Requirements</h3>
+    <ul>
+      <li>Tier-1 containment rate: 60%+ of tickets resolved without human.</li>
+      <li>Median latency: &lt; 8 seconds first response, &lt; 30 seconds resolution.</li>
+      <li>Cost: &lt; $0.10 per conversation.</li>
+      <li>No wrong refunds. Ever.</li>
+      <li>Full audit trail for compliance.</li>
+    </ul>
+
+    <h3>Architecture</h3>
+    <div class="diagram"><pre>
+          user ──▶ web chat ──▶ API gateway
+                                  │
+                                  ▼
+                          ┌───────────────┐
+                          │  Auth/Session │  ← SSO token, tenant id
+                          └───────┬───────┘
+                                  ▼
+                          ┌───────────────┐
+                          │  Budget guard │
+                          └───────┬───────┘
+                                  ▼
+                          ┌───────────────┐
+                          │  Temporal WF  │
+                          └───────┬───────┘
+                                  ▼
+                      ┌───────────────────────┐
+                      │   Support Agent       │
+                      │  (Claude Haiku 4.5)   │
+                      └───────────────────────┘
+                                  │
+         ┌────────────┬───────────┼───────────┬────────────┐
+         ▼            ▼           ▼           ▼            ▼
+   kb_search     get_account  get_orders  update_sub   issue_refund
+   (RAG)         (REST)       (REST)      (REST)       (gated)
+</pre></div>
+
+    <h3>Memory design</h3>
+    <ul>
+      <li><strong>Short-term:</strong> full conversation (typical 10–30 turns fits).</li>
+      <li><strong>Summary:</strong> only if conversation exceeds 40 turns.</li>
+      <li><strong>Long-term:</strong> none in v1. Explicitly deferred — users rarely reference past tickets, and privacy review is heavy.</li>
+      <li><strong>Entity:</strong> customer record always loaded from CRM at session start.</li>
+    </ul>
+
+    <h3>Tools (minimum viable set)</h3>
+    <table>
+      <thead><tr><th>Tool</th><th>Side effect</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td><code>kb_search(query)</code></td><td>None</td><td>RAG over help center</td></tr>
+        <tr><td><code>get_account(customer_id)</code></td><td>None</td><td>Plan, seats, status</td></tr>
+        <tr><td><code>get_orders(customer_id, limit)</code></td><td>None</td><td>Paginated</td></tr>
+        <tr><td><code>update_subscription(customer_id, plan)</code></td><td>Write</td><td>Idempotency key required</td></tr>
+        <tr><td><code>issue_refund(order_id, amount)</code></td><td>Write, gated</td><td>Auto if amount &lt; $50; HITL otherwise</td></tr>
+        <tr><td><code>escalate_to_human(reason)</code></td><td>Hands off</td><td>Always available</td></tr>
+      </tbody>
+    </table>
+
+    <h3>Guardrails</h3>
+    <ul>
+      <li>Iteration cap: 12.</li>
+      <li>Token budget: 30k per conversation.</li>
+      <li>Dollar budget: $0.25 per conversation (hard stop).</li>
+      <li>Refunds &gt; $50 pause the workflow, ping the duty queue, resume on approval (durable).</li>
+      <li>Prompt-injection filter on any free-text that came from user-generated content (previous tickets, notes).</li>
+      <li>Agent cannot call <code>update_subscription</code> or <code>issue_refund</code> until <code>get_account</code> has run successfully in this session (enforced by tool allowlist state machine).</li>
+    </ul>
+
+    <h3>Eval strategy</h3>
+    <ul>
+      <li>200 golden tickets with known correct resolution.</li>
+      <li>Weekly run on full set. Block prompt changes that regress containment by &gt; 2pp.</li>
+      <li>Online: CSAT of auto-resolved tickets vs human-handled.</li>
+      <li>Safety eval: 50 "trick" tickets (prompt injection in order notes, social engineering). Zero false refunds allowed.</li>
+    </ul>
+
+    <h2>17. Worked example: Coding agent (Claude Code / Cursor shape)</h2>
+
+    <p><strong>Scenario.</strong> An agent that works inside a developer's repo. Reads files, edits files, runs tests, makes commits. Sessions can last hours.</p>
+
+    <h3>Architecture</h3>
+    <div class="diagram"><pre>
+  IDE / CLI
+     │
+     ▼
+ Agent runtime ─── tool calls ──▶  MCP servers
+     │                                 ├─ filesystem MCP
+     │                                 ├─ git MCP
+     │                                 ├─ shell MCP
+     │                                 ├─ github MCP
+     │                                 └─ language server MCP
+     ▼
+ Planning + reflection loop
+     │
+     ▼
+ Checkpoint store (so "/resume" works after crash)
+</pre></div>
+
+    <h3>Planning</h3>
+    <p>Coding tasks are high-variance. Use <strong>plan-and-execute with replanning</strong>: draft a plan, execute tool-by-tool, replan when tests fail or a file's actual contents disprove an assumption. The plan itself is versioned in the conversation state so the user can see and edit it.</p>
+
+    <h3>Memory</h3>
+    <ul>
+      <li><strong>Short-term:</strong> aggressive — coding sessions routinely cross 200 turns.</li>
+      <li><strong>Summary:</strong> compact older turns into "what we did earlier in this session."</li>
+      <li><strong>Procedural:</strong> learned project-specific conventions ("this repo uses pnpm, not npm").</li>
+      <li><strong>External:</strong> the filesystem itself is the biggest memory. Re-read files on demand rather than caching their contents.</li>
+    </ul>
+
+    <h3>Safety for destructive ops</h3>
+    <table>
+      <thead><tr><th>Op</th><th>Default</th><th>Override</th></tr></thead>
+      <tbody>
+        <tr><td>Read file</td><td>Auto-allow</td><td>—</td></tr>
+        <tr><td>Write new file</td><td>Auto-allow</td><td>—</td></tr>
+        <tr><td>Edit existing file</td><td>Auto-allow</td><td>Diff preview in UI</td></tr>
+        <tr><td>Run shell command</td><td>Prompt user first time per command prefix</td><td>User can "always allow <code>pnpm test</code>"</td></tr>
+        <tr><td><code>git push --force</code>, <code>rm -rf</code>, <code>DROP TABLE</code></td><td>Block or explicit confirm each time</td><td>Never "always allow"</td></tr>
+        <tr><td>Credentials / .env</td><td>Never read</td><td>—</td></tr>
+      </tbody>
+    </table>
+
+    <h3>Long-running sessions</h3>
+    <p>Sessions span hours. IDE restarts, laptop sleeps, network blips. The agent's state is checkpointed to disk after every tool call so <code>/resume</code> after a crash picks up mid-plan. This is why durable execution applies even to "local" agents.</p>
+
+    <div class="callout callout-info">
+      <strong>Takeaway.</strong> The entire chapter collapses to this: an agent is a loop with tools and state, and every production concern — cost, safety, reliability, quality — is about controlling that loop. If you instrument it, bound it, checkpoint it, and evaluate it, you have an agent. If you don't, you have a bill.
+    </div>
+
+    <div class="chapter-nav">
+      <a href="04-llm-serving.html"><div class="label">← Previous</div><div class="title">LLM Serving</div></a>
+      <a class="next" href="06-hybrid-legacy.html"><div class="label">Next →</div><div class="title">Hybrid &amp; Legacy Integration</div></a>
+    </div>
+  </main>
+</div>
+<script src="../assets/js/nav.js"></script>
+</body>
+</html>
