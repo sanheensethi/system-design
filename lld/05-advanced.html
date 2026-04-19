@@ -1,0 +1,935 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Advanced Problems — Book I · LLD</title>
+<link rel="stylesheet" href="../assets/css/style.css">
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">System Design Books</div>
+    <div class="brand-sub">by Sanheen · Progressive Learning</div>
+    <div class="nav-section">
+      <h3>Home</h3>
+      <a href="../index.html">Overview</a>
+    </div>
+    <div class="nav-section">
+      <h3>Book I — Low Level Design</h3>
+      <a href="index.html">LLD Index</a>
+      <a href="01-foundations.html">1. Foundations (OOP, SOLID)</a>
+      <a href="02-patterns.html">2. Design Patterns Primer</a>
+      <a href="03-basic-problems.html">3. Basic Problems</a>
+      <a href="04-intermediate.html">4. Intermediate Problems</a>
+      <a href="05-advanced.html">5. Advanced Problems</a>
+      <a href="06-concurrency.html">6. Concurrency in LLD</a>
+      <a href="07-war-room.html">7. War Room Scenarios</a>
+      <a href="08-real-code.html">8. Real Company Code</a>
+    </div>
+    <div class="nav-section">
+      <h3>Book II — High Level Design</h3>
+      <a href="../hld/index.html">HLD Index</a>
+    </div>
+  </aside>
+  <main class="main">
+    <div class="breadcrumb"><a href="../index.html">Home</a> / <a href="index.html">Book I · LLD</a> / Chapter 5</div>
+    <h1>Chapter 5: Advanced Problems</h1>
+
+    <p>Now the gloves come off. These five problems combine most of the patterns from Chapter 2 and expose you to the real weight of production-grade object design. For each one we start from the laziest version a junior engineer might ship, find the pain point, patch it, find the <em>next</em> pain point, patch that, and keep going until we have a design that survives review.</p>
+
+    <div class="callout">
+      <div class="callout-title">How to read this chapter</div>
+      Don't skim. For each version, cover the next code block with your hand and ask: "what's wrong with the previous version?" If you can name it, you're learning. If you can't, re-read the previous version before moving on.
+    </div>
+
+    <h2>1. Chess Engine</h2>
+
+    <p>Chess is the classic "show me you know OOP" interview problem. It punishes bad abstractions cruelly because the rules have so many special cases (castling, en passant, promotion, check, checkmate, stalemate, threefold repetition) that a flat design collapses into a spaghetti of <code>if</code> branches.</p>
+
+    <h3>v1 — The array-of-chars disaster</h3>
+    <pre><code># BAD: Everything is a character in an 8x8 grid.
+board = [
+    ['r','n','b','q','k','b','n','r'],
+    ['p','p','p','p','p','p','p','p'],
+    ['.']*8, ['.']*8, ['.']*8, ['.']*8,
+    ['P','P','P','P','P','P','P','P'],
+    ['R','N','B','Q','K','B','N','R'],
+]
+
+def move(board, frm, to):
+    piece = board[frm[0]][frm[1]]
+    if piece.lower() == 'p':
+        # ... 40 lines of pawn rules
+        pass
+    elif piece.lower() == 'r':
+        # ... 20 lines of rook rules
+        pass
+    # ... and so on
+    board[to[0]][to[1]] = piece
+    board[frm[0]][frm[1]] = '.'
+</code></pre>
+
+    <div class="callout danger">
+      <div class="callout-title">Why this fails</div>
+      The <code>move</code> function becomes a 400-line branch. Every new rule (castling, promotion) means editing the same function — Open/Closed principle violated. Testing a single piece's movement requires setting up a full board. No way to represent color cleanly ('P' vs 'p' is a hack).
+    </div>
+
+    <h3>v2 — Piece hierarchy with polymorphism</h3>
+    <pre><code>from abc import ABC, abstractmethod
+from enum import Enum
+
+class Color(Enum):
+    WHITE = "white"
+    BLACK = "black"
+
+class Piece(ABC):
+    def __init__(self, color: Color):
+        self.color = color
+        self.has_moved = False
+
+    @abstractmethod
+    def valid_moves(self, board, pos): ...
+
+class Rook(Piece):
+    def valid_moves(self, board, pos):
+        moves = []
+        r, c = pos
+        for dr, dc in [(-1,0),(1,0),(0,-1),(0,1)]:
+            nr, nc = r+dr, c+dc
+            while 0 &lt;= nr &lt; 8 and 0 &lt;= nc &lt; 8:
+                target = board[nr][nc]
+                if target is None:
+                    moves.append((nr, nc))
+                elif target.color != self.color:
+                    moves.append((nr, nc)); break
+                else:
+                    break
+                nr += dr; nc += dc
+        return moves
+
+class Knight(Piece):
+    def valid_moves(self, board, pos):
+        r, c = pos
+        deltas = [(2,1),(2,-1),(-2,1),(-2,-1),(1,2),(1,-2),(-1,2),(-1,-2)]
+        out = []
+        for dr, dc in deltas:
+            nr, nc = r+dr, c+dc
+            if 0 &lt;= nr &lt; 8 and 0 &lt;= nc &lt; 8:
+                t = board[nr][nc]
+                if t is None or t.color != self.color:
+                    out.append((nr, nc))
+        return out
+</code></pre>
+
+    <p>Better. Each piece owns its movement rules. Adding a Bishop doesn't touch Rook code. But the <code>Piece</code> needs to know about <code>board</code>, and the global <code>move</code> function still mixes concerns.</p>
+
+    <h3>v3 — Board, Move, Game separation</h3>
+    <pre><code>class Move:
+    def __init__(self, frm, to, piece, captured=None, promotion=None):
+        self.frm = frm
+        self.to = to
+        self.piece = piece
+        self.captured = captured
+        self.promotion = promotion
+
+class Board:
+    def __init__(self):
+        self.grid = [[None]*8 for _ in range(8)]
+        self._setup()
+
+    def _setup(self):
+        # ... place pieces ...
+        pass
+
+    def piece_at(self, pos):
+        return self.grid[pos[0]][pos[1]]
+
+    def apply(self, move: Move):
+        self.grid[move.to[0]][move.to[1]] = move.piece
+        self.grid[move.frm[0]][move.frm[1]] = None
+        move.piece.has_moved = True
+
+class Game:
+    def __init__(self):
+        self.board = Board()
+        self.turn = Color.WHITE
+        self.history = []
+
+    def play(self, frm, to):
+        piece = self.board.piece_at(frm)
+        if piece is None or piece.color != self.turn:
+            raise ValueError("not your piece")
+        if to not in piece.valid_moves(self.board.grid, frm):
+            raise ValueError("illegal move")
+        move = Move(frm, to, piece, captured=self.board.piece_at(to))
+        self.board.apply(move)
+        self.history.append(move)
+        self.turn = Color.BLACK if self.turn == Color.WHITE else Color.WHITE
+</code></pre>
+
+    <h3>v4 — Special moves via Strategy</h3>
+    <p>Castling, en passant, and promotion don't fit <code>valid_moves</code> cleanly. They depend on game state (has the king moved? was the last move a 2-square pawn push?). Wrap them as move strategies.</p>
+    <pre><code>class MoveRule(ABC):
+    @abstractmethod
+    def applies(self, game, frm, to): ...
+    @abstractmethod
+    def execute(self, game, frm, to): ...
+
+class CastlingRule(MoveRule):
+    def applies(self, game, frm, to):
+        piece = game.board.piece_at(frm)
+        if not isinstance(piece, King) or piece.has_moved:
+            return False
+        if abs(to[1] - frm[1]) != 2 or frm[0] != to[0]:
+            return False
+        rook_col = 7 if to[1] &gt; frm[1] else 0
+        rook = game.board.piece_at((frm[0], rook_col))
+        return isinstance(rook, Rook) and not rook.has_moved
+
+    def execute(self, game, frm, to):
+        # move king, then rook
+        ...
+
+class EnPassantRule(MoveRule):
+    def applies(self, game, frm, to):
+        if not game.history: return False
+        last = game.history[-1]
+        # last move was a 2-square pawn push adjacent to our pawn
+        ...
+</code></pre>
+
+    <h3>v5 — Observer for check/checkmate</h3>
+    <pre><code>class CheckDetector:
+    def on_move(self, game, move):
+        opponent = Color.BLACK if move.piece.color == Color.WHITE else Color.WHITE
+        king_pos = game.board.find_king(opponent)
+        for r in range(8):
+            for c in range(8):
+                p = game.board.piece_at((r,c))
+                if p and p.color != opponent:
+                    if king_pos in p.valid_moves(game.board.grid, (r,c)):
+                        game.in_check = opponent
+                        if self._is_checkmate(game, opponent):
+                            game.winner = move.piece.color
+                        return
+
+class Game:
+    def __init__(self):
+        ...
+        self.observers = [CheckDetector()]
+
+    def play(self, frm, to):
+        ...
+        for obs in self.observers:
+            obs.on_move(self, move)
+</code></pre>
+
+    <h3>v6 — Undo via Memento</h3>
+    <pre><code>class BoardSnapshot:
+    def __init__(self, board):
+        self.grid = [row[:] for row in board.grid]
+        # also snapshot has_moved flags, en-passant square, castling rights
+
+class Game:
+    def play(self, frm, to):
+        snapshot = BoardSnapshot(self.board)
+        try:
+            # ... apply move, run observers
+            self.undo_stack.append(snapshot)
+        except Exception:
+            # board untouched
+            raise
+
+    def undo(self):
+        snap = self.undo_stack.pop()
+        self.board.grid = snap.grid
+        self.turn = Color.BLACK if self.turn == Color.WHITE else Color.WHITE
+</code></pre>
+
+    <div class="callout success">
+      <div class="callout-title">What we gained</div>
+      A chess engine where adding a new rule (e.g., three-check variant, Fischer Random) is a matter of writing a new <code>MoveRule</code> or a new observer, not editing existing code.
+    </div>
+
+    <h2>2. Snake and Ladder</h2>
+
+    <p>Snake and Ladder looks trivial — roll a dice, move a token, handle jumps — but it's a great playground for composition and Strategy because the rules have variants (crooked dice, multiple dice, teleport bonuses) that beg for plug-in design.</p>
+
+    <h3>v1 — Array with jump lookup</h3>
+    <pre><code># BAD: everything in one place
+snakes = {17: 7, 54: 34, 62: 19, 98: 79}
+ladders = {3: 22, 8: 30, 28: 84, 80: 99}
+
+pos = [0, 0]  # two players
+turn = 0
+while max(pos) &lt; 100:
+    roll = random.randint(1, 6)
+    pos[turn] += roll
+    if pos[turn] in snakes: pos[turn] = snakes[pos[turn]]
+    if pos[turn] in ladders: pos[turn] = ladders[pos[turn]]
+    turn = 1 - turn
+</code></pre>
+
+    <div class="callout warn">
+      <div class="callout-title">Problems</div>
+      Two players hardcoded. Dice is fixed. Snakes and ladders are just dict keys — they can't have animations, descriptions, or custom effects. No state tracking (who won, when did they land on a snake?).
+    </div>
+
+    <h3>v2 — Board + Cell + Player</h3>
+    <pre><code>class Cell:
+    def __init__(self, number):
+        self.number = number
+        self.jumper = None  # Snake or Ladder
+
+class Board:
+    def __init__(self, size=100):
+        self.cells = [Cell(i) for i in range(size+1)]
+
+    def set_jumper(self, frm, jumper):
+        self.cells[frm].jumper = jumper
+
+class Player:
+    def __init__(self, name):
+        self.name = name
+        self.position = 0
+</code></pre>
+
+    <h3>v3 — Polymorphic Jumpers</h3>
+    <pre><code>class Jumper(ABC):
+    def __init__(self, start, end):
+        self.start = start
+        self.end = end
+    @abstractmethod
+    def traverse(self, player): ...
+
+class Snake(Jumper):
+    def __init__(self, start, end):
+        assert end &lt; start, "snake goes down"
+        super().__init__(start, end)
+    def traverse(self, player):
+        print(f"{player.name} got bitten by snake at {self.start}!")
+        player.position = self.end
+
+class Ladder(Jumper):
+    def __init__(self, start, end):
+        assert end &gt; start, "ladder goes up"
+        super().__init__(start, end)
+    def traverse(self, player):
+        print(f"{player.name} climbed ladder to {self.end}!")
+        player.position = self.end
+</code></pre>
+
+    <p>Now we can add <code>Teleporter</code>, <code>Trampoline</code>, <code>MysteryBox</code> by subclassing — no changes to Board code.</p>
+
+    <h3>v4 — Dice as Strategy</h3>
+    <pre><code>class DiceStrategy(ABC):
+    @abstractmethod
+    def roll(self) -&gt; int: ...
+
+class FairDice(DiceStrategy):
+    def roll(self): return random.randint(1, 6)
+
+class CrookedDice(DiceStrategy):
+    """Always rolls high — for testing or a rigged variant."""
+    def roll(self): return random.randint(4, 6)
+
+class MultipleDice(DiceStrategy):
+    def __init__(self, count=2):
+        self.count = count
+    def roll(self):
+        return sum(random.randint(1,6) for _ in range(self.count))
+
+class Game:
+    def __init__(self, board, players, dice: DiceStrategy):
+        self.board = board
+        self.players = players
+        self.dice = dice
+</code></pre>
+
+    <h3>v5 — State machine</h3>
+    <pre><code>class GameState(Enum):
+    WAITING = "waiting"
+    IN_PROGRESS = "in_progress"
+    FINISHED = "finished"
+
+class Game:
+    def __init__(self, ...):
+        self.state = GameState.WAITING
+
+    def start(self):
+        if self.state != GameState.WAITING:
+            raise RuntimeError("already started")
+        if len(self.players) &lt; 2:
+            raise RuntimeError("need 2+ players")
+        self.state = GameState.IN_PROGRESS
+
+    def take_turn(self):
+        if self.state != GameState.IN_PROGRESS:
+            raise RuntimeError("game not active")
+        # ... roll, move, check win
+        if self._current_player().position == self.board.size:
+            self.state = GameState.FINISHED
+            self.winner = self._current_player()
+</code></pre>
+
+    <h3>v6 — Multi-player turn manager</h3>
+    <pre><code>from collections import deque
+
+class TurnManager:
+    def __init__(self, players):
+        self.queue = deque(players)
+
+    def current(self):
+        return self.queue[0]
+
+    def advance(self, extra_turn=False):
+        if not extra_turn:
+            self.queue.rotate(-1)
+
+class Game:
+    def take_turn(self):
+        player = self.turn_manager.current()
+        roll = self.dice.roll()
+        new_pos = player.position + roll
+        if new_pos &gt; self.board.size:
+            self.turn_manager.advance()  # overshoot, no move
+            return
+        player.position = new_pos
+        cell = self.board.cells[new_pos]
+        if cell.jumper:
+            cell.jumper.traverse(player)
+        # Rule variant: rolling a 6 gives an extra turn
+        extra = (roll == 6)
+        self.turn_manager.advance(extra_turn=extra)
+</code></pre>
+
+    <h2>3. In-Memory File System</h2>
+
+    <p>This one appears in interviews at Google, Amazon, and Dropbox. The naive version mashes everything into a dict. The elegant version uses Composite + Visitor and reads like a real kernel structure.</p>
+
+    <h3>v1 — Flat dict</h3>
+    <pre><code># BAD
+fs = {
+    "/a/b/c.txt": "hello",
+    "/a/b/d.txt": "world",
+    "/a/e/f.txt": "foo",
+}
+
+def ls(path):
+    return [k for k in fs if k.startswith(path)]
+</code></pre>
+
+    <p>Directories don't exist as first-class objects. An empty directory can't be represented. Renaming <code>/a/b</code> to <code>/a/x</code> is O(N) string surgery across every key.</p>
+
+    <h3>v2 — Tree of Nodes</h3>
+    <pre><code>class Node:
+    def __init__(self, name, parent=None):
+        self.name = name
+        self.parent = parent
+
+class File(Node):
+    def __init__(self, name, parent=None, content=""):
+        super().__init__(name, parent)
+        self.content = content
+
+class Directory(Node):
+    def __init__(self, name, parent=None):
+        super().__init__(name, parent)
+        self.children = {}
+
+    def add(self, node):
+        node.parent = self
+        self.children[node.name] = node
+</code></pre>
+
+    <h3>v3 — Composite Pattern</h3>
+    <p>We want to call <code>size()</code> on any Node and have it Just Work — a file returns its byte count, a directory sums its children recursively.</p>
+    <pre><code>class Node(ABC):
+    def __init__(self, name, parent=None):
+        self.name = name
+        self.parent = parent
+    @abstractmethod
+    def size(self) -&gt; int: ...
+    def path(self):
+        if self.parent is None: return "/"
+        parent_path = self.parent.path()
+        sep = "" if parent_path == "/" else "/"
+        return parent_path + sep + self.name
+
+class File(Node):
+    def size(self): return len(self.content.encode())
+
+class Directory(Node):
+    def size(self): return sum(c.size() for c in self.children.values())
+</code></pre>
+
+    <h3>v4 — Visitor for traversal/search</h3>
+    <pre><code>class Visitor(ABC):
+    @abstractmethod
+    def visit_file(self, f: File): ...
+    @abstractmethod
+    def visit_directory(self, d: Directory): ...
+
+class Node:
+    @abstractmethod
+    def accept(self, visitor): ...
+
+class File(Node):
+    def accept(self, v): v.visit_file(self)
+
+class Directory(Node):
+    def accept(self, v):
+        v.visit_directory(self)
+        for c in self.children.values():
+            c.accept(v)
+
+class SearchVisitor(Visitor):
+    def __init__(self, query):
+        self.query = query
+        self.hits = []
+    def visit_file(self, f):
+        if self.query in f.content:
+            self.hits.append(f.path())
+    def visit_directory(self, d): pass
+
+class DiskUsageVisitor(Visitor):
+    def __init__(self):
+        self.by_dir = {}
+    def visit_file(self, f): pass
+    def visit_directory(self, d):
+        self.by_dir[d.path()] = d.size()
+</code></pre>
+
+    <h3>v5 — Permissions (ACL)</h3>
+    <pre><code>from dataclasses import dataclass, field
+
+@dataclass
+class ACL:
+    owner: str
+    mode: int = 0o644  # rwxr-xr-x style
+    acl_extra: dict = field(default_factory=dict)  # user -&gt; mask
+
+    def can_read(self, user): ...
+    def can_write(self, user): ...
+
+class Node:
+    def __init__(self, name, parent=None, owner="root"):
+        ...
+        self.acl = ACL(owner=owner)
+
+class FileSystem:
+    def read(self, path, user):
+        node = self._resolve(path)
+        if not node.acl.can_read(user):
+            raise PermissionError(path)
+        return node.content
+</code></pre>
+
+    <h3>v6 — Symbolic links</h3>
+    <pre><code>class Symlink(Node):
+    def __init__(self, name, target_path, parent=None):
+        super().__init__(name, parent)
+        self.target_path = target_path
+
+    def size(self): return len(self.target_path)
+
+class FileSystem:
+    def _resolve(self, path, follow_links=True, depth=0):
+        if depth &gt; 40:
+            raise OSError("too many levels of symbolic links")
+        parts = [p for p in path.split("/") if p]
+        node = self.root
+        for i, part in enumerate(parts):
+            node = node.children[part]
+            if isinstance(node, Symlink) and (follow_links or i &lt; len(parts)-1):
+                node = self._resolve(node.target_path, True, depth+1)
+        return node
+</code></pre>
+
+    <div class="callout">
+      <div class="callout-title">Interview tip</div>
+      When you hit the symlink stage, the interviewer's eyes light up. Mention loop detection (<code>depth</code> counter, matching Linux's <code>ELOOP</code>) without prompting — it signals you've thought about real-world edge cases.
+    </div>
+
+    <h2>4. Stack Overflow Clone</h2>
+
+    <p>This is LLD catnip: many entities, many relationships, obvious opportunities for Observer, Strategy, and State. Don't try to model the entire product — focus on the core Q&amp;A loop.</p>
+
+    <h3>Core entities</h3>
+    <pre><code>from datetime import datetime
+from enum import Enum
+from typing import List
+
+class QuestionStatus(Enum):
+    OPEN = "open"
+    CLOSED = "closed"
+    DUPLICATE = "duplicate"
+    DELETED = "deleted"
+
+class User:
+    def __init__(self, username):
+        self.username = username
+        self.reputation = 1
+        self.badges: List[Badge] = []
+
+class Tag:
+    def __init__(self, name):
+        self.name = name
+
+class Vote:
+    def __init__(self, user, value):  # +1 or -1
+        self.user = user
+        self.value = value
+        self.at = datetime.utcnow()
+
+class Post:
+    def __init__(self, author, body):
+        self.author = author
+        self.body = body
+        self.votes: List[Vote] = []
+        self.comments: List[Comment] = []
+
+    def score(self):
+        return sum(v.value for v in self.votes)
+
+class Question(Post):
+    def __init__(self, author, title, body, tags):
+        super().__init__(author, body)
+        self.title = title
+        self.tags = tags
+        self.answers: List[Answer] = []
+        self.status = QuestionStatus.OPEN
+        self.accepted_answer = None
+
+class Answer(Post):
+    def __init__(self, author, body, question):
+        super().__init__(author, body)
+        self.question = question
+        self.accepted = False
+
+class Comment:
+    def __init__(self, author, body):
+        self.author = author
+        self.body = body
+</code></pre>
+
+    <h3>Strategy — reputation calculation</h3>
+    <pre><code>class ReputationStrategy(ABC):
+    @abstractmethod
+    def on_upvote(self, post) -&gt; int: ...
+    @abstractmethod
+    def on_downvote_receiver(self, post) -&gt; int: ...
+    @abstractmethod
+    def on_accept(self, answer) -&gt; int: ...
+
+class DefaultReputation(ReputationStrategy):
+    def on_upvote(self, post):
+        return 10 if isinstance(post, Answer) else 5
+    def on_downvote_receiver(self, post):
+        return -2
+    def on_accept(self, answer):
+        return 15
+
+class HighStakesReputation(ReputationStrategy):
+    """Experimental: bigger swings, encourages quality."""
+    def on_upvote(self, post):
+        return 25 if isinstance(post, Answer) else 10
+    def on_downvote_receiver(self, post):
+        return -10
+    def on_accept(self, answer):
+        return 50
+
+class VotingService:
+    def __init__(self, rep_strategy: ReputationStrategy):
+        self.rep = rep_strategy
+
+    def upvote(self, voter, post):
+        post.votes.append(Vote(voter, +1))
+        post.author.reputation += self.rep.on_upvote(post)
+</code></pre>
+
+    <h3>Observer — notifications</h3>
+    <pre><code>class Event:
+    def __init__(self, kind, payload): self.kind, self.payload = kind, payload
+
+class EventBus:
+    def __init__(self):
+        self.listeners = defaultdict(list)
+    def subscribe(self, kind, handler):
+        self.listeners[kind].append(handler)
+    def publish(self, event):
+        for h in self.listeners[event.kind]:
+            h(event)
+
+class EmailNotifier:
+    def __call__(self, event):
+        if event.kind == "answer_posted":
+            q = event.payload["question"]
+            a = event.payload["answer"]
+            self.send(q.author.email, f"New answer on '{q.title}'")
+
+class BadgeAwarder:
+    def __call__(self, event):
+        if event.kind == "question_upvoted":
+            q = event.payload["question"]
+            if q.score() &gt;= 100 and not self._has(q.author, "GreatQuestion"):
+                q.author.badges.append(Badge("GreatQuestion"))
+</code></pre>
+
+    <h3>State — Question lifecycle</h3>
+    <pre><code>class QuestionState(ABC):
+    @abstractmethod
+    def close(self, question, reason): ...
+    @abstractmethod
+    def reopen(self, question): ...
+    @abstractmethod
+    def mark_duplicate(self, question, of): ...
+
+class OpenState(QuestionState):
+    def close(self, q, reason):
+        q.state = ClosedState(); q.close_reason = reason
+    def reopen(self, q):
+        raise RuntimeError("already open")
+    def mark_duplicate(self, q, of):
+        q.state = DuplicateState(); q.duplicate_of = of
+
+class ClosedState(QuestionState):
+    def close(self, q, reason): raise RuntimeError("already closed")
+    def reopen(self, q): q.state = OpenState()
+    def mark_duplicate(self, q, of):
+        q.state = DuplicateState(); q.duplicate_of = of
+
+class DuplicateState(QuestionState):
+    def close(self, q, reason): raise RuntimeError("locked as duplicate")
+    def reopen(self, q): q.state = OpenState(); q.duplicate_of = None
+    def mark_duplicate(self, q, of): q.duplicate_of = of
+</code></pre>
+
+    <h2>5. Hotel Booking</h2>
+
+    <p>The final boss of LLD interviews. It touches pricing logic (Strategy), booking lifecycle (State), distributed concerns (concurrency, Saga), and data modeling all at once. We'll deliberately shave it to the most pedagogical slice.</p>
+
+    <h3>Entities</h3>
+    <pre><code>from decimal import Decimal
+from datetime import date, timedelta
+from enum import Enum
+import threading
+
+class RoomType(Enum):
+    STANDARD = "standard"
+    DELUXE = "deluxe"
+    SUITE = "suite"
+
+class Room:
+    def __init__(self, number, room_type, base_rate):
+        self.number = number
+        self.room_type = room_type
+        self.base_rate = Decimal(base_rate)
+
+class Guest:
+    def __init__(self, name, email):
+        self.name = name
+        self.email = email
+
+class Reservation:
+    def __init__(self, guest, room, check_in, check_out):
+        self.id = uuid.uuid4()
+        self.guest = guest
+        self.room = room
+        self.check_in = check_in
+        self.check_out = check_out
+        self.state = PendingState()
+        self.total = None
+        self.payment_id = None
+</code></pre>
+
+    <h3>Strategy — pricing</h3>
+    <pre><code>class PricingStrategy(ABC):
+    @abstractmethod
+    def price_for_night(self, room: Room, night: date) -&gt; Decimal: ...
+
+class WeekdayRate(PricingStrategy):
+    def price_for_night(self, room, night):
+        return room.base_rate
+
+class WeekendRate(PricingStrategy):
+    def price_for_night(self, room, night):
+        if night.weekday() &gt;= 5:  # Sat, Sun
+            return room.base_rate * Decimal("1.4")
+        return room.base_rate
+
+class SeasonalRate(PricingStrategy):
+    def __init__(self, high_season_months, multiplier):
+        self.months = set(high_season_months)
+        self.multiplier = Decimal(str(multiplier))
+    def price_for_night(self, room, night):
+        if night.month in self.months:
+            return room.base_rate * self.multiplier
+        return room.base_rate
+
+class CompositePricing(PricingStrategy):
+    """Apply multiple strategies; take the max (greedy hotel)."""
+    def __init__(self, strategies):
+        self.strategies = strategies
+    def price_for_night(self, room, night):
+        return max(s.price_for_night(room, night) for s in self.strategies)
+
+def total_price(room, check_in, check_out, pricing):
+    total = Decimal(0)
+    cur = check_in
+    while cur &lt; check_out:
+        total += pricing.price_for_night(room, cur)
+        cur += timedelta(days=1)
+    return total
+</code></pre>
+
+    <h3>State — reservation lifecycle</h3>
+    <pre><code>class ReservationState(ABC):
+    @abstractmethod
+    def confirm(self, r): ...
+    @abstractmethod
+    def cancel(self, r): ...
+    @abstractmethod
+    def check_in(self, r): ...
+
+class PendingState(ReservationState):
+    def confirm(self, r): r.state = ConfirmedState()
+    def cancel(self, r): r.state = CancelledState()
+    def check_in(self, r): raise RuntimeError("not confirmed")
+
+class ConfirmedState(ReservationState):
+    def confirm(self, r): pass  # idempotent
+    def cancel(self, r): r.state = CancelledState()
+    def check_in(self, r): r.state = CheckedInState()
+
+class CheckedInState(ReservationState):
+    def confirm(self, r): raise RuntimeError("already here")
+    def cancel(self, r): raise RuntimeError("check out instead")
+    def check_in(self, r): raise RuntimeError("already in")
+
+class CancelledState(ReservationState):
+    def confirm(self, r): raise RuntimeError("cancelled")
+    def cancel(self, r): pass
+    def check_in(self, r): raise RuntimeError("cancelled")
+</code></pre>
+
+    <h3>Concurrency — preventing double booking</h3>
+    <pre><code>class BookingService:
+    def __init__(self, rooms, pricing):
+        self.rooms = rooms
+        self.pricing = pricing
+        # Per-room lock so two bookings for DIFFERENT rooms don't block each other.
+        self._locks = {r.number: threading.Lock() for r in rooms}
+        self._ledger = defaultdict(list)  # room_number -&gt; list[(in, out)]
+
+    def _overlaps(self, room_number, check_in, check_out):
+        for (i, o) in self._ledger[room_number]:
+            if check_in &lt; o and i &lt; check_out:
+                return True
+        return False
+
+    def reserve(self, guest, room, check_in, check_out) -&gt; Reservation:
+        lock = self._locks[room.number]
+        with lock:
+            if self._overlaps(room.number, check_in, check_out):
+                raise ConflictError(f"Room {room.number} already booked for those dates")
+            res = Reservation(guest, room, check_in, check_out)
+            res.total = total_price(room, check_in, check_out, self.pricing)
+            self._ledger[room.number].append((check_in, check_out))
+            return res
+</code></pre>
+
+    <div class="callout warn">
+      <div class="callout-title">Why a lock per room?</div>
+      A single global lock would serialize all bookings across the entire hotel — fine for a 10-room B&amp;B, catastrophic for a 500-room resort with concurrent web traffic. Per-room locks let bookings for different rooms proceed in parallel. This is <em>lock striping</em> and we'll see it again in Chapter 6.
+    </div>
+
+    <h3>Saga — payment + booking as a transaction</h3>
+    <p>Reserving a room and charging a card are two operations against two systems. If the charge fails, we must release the room. If the charge succeeds but we crash before confirming, we've taken money without a booking. A Saga solves this by recording every step and providing compensations.</p>
+
+    <pre><code>class SagaStep:
+    def __init__(self, name, action, compensate):
+        self.name = name
+        self.action = action
+        self.compensate = compensate
+
+class Saga:
+    def __init__(self, steps):
+        self.steps = steps
+
+    def execute(self, context):
+        completed = []
+        try:
+            for step in self.steps:
+                step.action(context)
+                completed.append(step)
+            return context
+        except Exception as e:
+            # Run compensations in reverse order
+            for step in reversed(completed):
+                try:
+                    step.compensate(context)
+                except Exception as comp_err:
+                    logger.error(f"compensation for {step.name} failed: {comp_err}")
+            raise
+
+# Usage
+def book_with_payment(guest, room, check_in, check_out, card, booking_svc, payment_svc):
+    ctx = {"guest": guest, "room": room, "ci": check_in, "co": check_out, "card": card}
+
+    def hold_room(ctx):
+        ctx["res"] = booking_svc.reserve(ctx["guest"], ctx["room"], ctx["ci"], ctx["co"])
+
+    def release_room(ctx):
+        if "res" in ctx:
+            booking_svc.cancel(ctx["res"].id)
+
+    def charge_card(ctx):
+        ctx["payment"] = payment_svc.charge(ctx["card"], ctx["res"].total)
+
+    def refund_card(ctx):
+        if "payment" in ctx:
+            payment_svc.refund(ctx["payment"].id)
+
+    def confirm_reservation(ctx):
+        ctx["res"].state.confirm(ctx["res"])
+        ctx["res"].payment_id = ctx["payment"].id
+
+    # no compensation needed for confirm — it's the last step
+    saga = Saga([
+        SagaStep("hold_room",     hold_room,     release_room),
+        SagaStep("charge_card",   charge_card,   refund_card),
+        SagaStep("confirm",       confirm_reservation, lambda c: None),
+    ])
+    return saga.execute(ctx)
+</code></pre>
+
+    <div class="callout success">
+      <div class="callout-title">The interview punchline</div>
+      If a payment service call times out, you don't know whether the charge went through. The saga's compensation (refund) must be idempotent so retrying it is safe. Mention this and you've just described distributed-transaction thinking — which is Chapter 6 of Book II territory, but showing it here makes a senior engineer smile.
+    </div>
+
+    <h2>Recap</h2>
+    <table>
+      <thead><tr><th>Problem</th><th>Patterns Used</th><th>Key Lesson</th></tr></thead>
+      <tbody>
+        <tr><td>Chess</td><td>Strategy, Observer, Memento</td><td>Special rules belong in separate classes, not inside <code>move()</code></td></tr>
+        <tr><td>Snake &amp; Ladder</td><td>Strategy, State</td><td>Polymorphic jumpers scale; dict lookups don't</td></tr>
+        <tr><td>File System</td><td>Composite, Visitor</td><td>Trees beg for Composite; operations beg for Visitor</td></tr>
+        <tr><td>Stack Overflow</td><td>Observer, Strategy, State</td><td>Lifecycle state machines prevent illegal transitions at compile-thought-time</td></tr>
+        <tr><td>Hotel Booking</td><td>Strategy, State, Saga, lock striping</td><td>Concurrency and transactional boundaries are LLD's hardest test</td></tr>
+      </tbody>
+    </table>
+
+    <p>Notice a recurring shape: each problem starts as a dict or list, grows into classes, then earns a pattern per emerging axis of change. You didn't memorize the patterns — you re-discovered them because the code forced your hand. That's the goal.</p>
+
+    <div class="chapter-nav">
+      <a href="04-intermediate.html"><div class="label">← Previous</div><div class="title">Intermediate Problems</div></a>
+      <a class="next" href="06-concurrency.html"><div class="label">Next →</div><div class="title">Concurrency in LLD</div></a>
+    </div>
+  </main>
+</div>
+<script src="../assets/js/nav.js"></script>
+</body>
+</html>

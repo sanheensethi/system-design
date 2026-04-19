@@ -1,0 +1,560 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Real Architectures — Book II · HLD</title>
+<link rel="stylesheet" href="../assets/css/style.css">
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">System Design Books</div>
+    <div class="brand-sub">by Sanheen · Progressive Learning</div>
+    <div class="nav-section">
+      <h3>Home</h3>
+      <a href="../index.html">Overview</a>
+    </div>
+    <div class="nav-section">
+      <h3>Book I — Low Level Design</h3>
+      <a href="../lld/index.html">LLD Index</a>
+    </div>
+    <div class="nav-section">
+      <h3>Book II — High Level Design</h3>
+      <a href="index.html">HLD Index</a>
+      <a href="01-foundations.html">1. Foundations &amp; Capacity</a>
+      <a href="02-building-blocks.html">2. Building Blocks</a>
+      <a href="03-basic-systems.html">3. Basic Systems</a>
+      <a href="04-intermediate.html">4. Intermediate Systems</a>
+      <a href="05-advanced.html">5. Advanced Systems</a>
+      <a href="06-very-high-scale.html">6. Very High Scale</a>
+      <a href="07-war-room.html">7. War Room Scenarios</a>
+      <a href="08-real-architectures.html">8. Real Architectures</a>
+    </div>
+  </aside>
+  <main class="main">
+    <div class="breadcrumb"><a href="../index.html">Home</a> / <a href="index.html">Book II · HLD</a> / Chapter 8</div>
+    <h1>Chapter 8: Real Architectures</h1>
+
+    <p class="lede">Every chapter before this has been abstract — patterns, tradeoffs, generic systems. This final chapter looks at eight real companies whose architectures have been documented publicly through engineering blogs, conference talks, and open-source releases. Every pattern from the preceding chapters shows up in at least one of these systems, usually several. The point is not to copy these architectures. The point is to see how the patterns compose when a real business with real constraints has to ship and scale.</p>
+
+    <p>All information here is drawn from public sources: company engineering blogs, QCon / Strange Loop / KubeCon talks, academic papers, and OSS project READMEs. Numbers are approximate and change constantly.</p>
+
+    <h2>1. Netflix</h2>
+
+    <p><strong>Scale:</strong> 270M+ subscribers across 190+ countries. Peak streaming traffic &gt; 200 Tbps at the edge. 1B+ hours watched per week. 700+ microservices in production. Zero on-premises infrastructure; everything runs on AWS, plus their own CDN (Open Connect) in ISP data centers.</p>
+
+    <h3>Architecture Sketch</h3>
+
+    <div class="diagram"><pre>
+                    [Member Devices: TVs, phones, browsers]
+                              |
+                     [Open Connect CDN]       &lt;-- video bytes
+                  (10,000+ edge boxes inside ISPs)
+                              |
+                           [Zuul 2]            &lt;-- API gateway / edge
+                              |
+         +--------------------+--------------------+
+         |                    |                    |
+     [Playback API]     [Discovery API]      [Account API]
+         |                    |                    |
+         +---- service mesh (gRPC + Envoy) ----+
+         |          |          |          |
+   [Licensing]  [Bookmarks]  [Personal]  [Search]
+         |          |          |          |
+         +-- EVCache --+-- Cassandra --+-- S3/Iceberg --+
+</pre></div>
+
+    <h3>Tech Stack</h3>
+    <ul>
+      <li><strong>Compute:</strong> AWS EC2, Titus (their container platform, pre-Kubernetes), some Kubernetes more recently.</li>
+      <li><strong>API gateway:</strong> Zuul 2 — async, non-blocking Netty-based gateway.</li>
+      <li><strong>Service communication:</strong> gRPC, recently moving to a service mesh with Envoy.</li>
+      <li><strong>Resilience:</strong> Hystrix (now deprecated internally in favor of resilience4j + adaptive concurrency limits).</li>
+      <li><strong>Data stores:</strong> Cassandra (primary OLTP for things like viewing history, user profiles), EVCache (Memcached-based distributed cache), MySQL (for billing), S3 + Iceberg for data lake.</li>
+      <li><strong>Streaming:</strong> Kafka, Keystone pipeline — moves trillions of events per day.</li>
+      <li><strong>Video delivery:</strong> Open Connect — custom OS-level CDN appliances deployed inside ISPs.</li>
+      <li><strong>Chaos:</strong> Simian Army — Chaos Monkey, Chaos Gorilla (region failure), Latency Monkey.</li>
+    </ul>
+
+    <h3>Key Design Decisions and Why</h3>
+
+    <p><strong>1. Open Connect instead of a third-party CDN.</strong> At Netflix's scale, paying Akamai or CloudFront per GB is economically untenable. They built their own CDN and <em>gave appliances to ISPs for free</em>. The ISP saves transit costs; Netflix saves delivery costs; the customer gets 4K at 80ms. Win-win-win.</p>
+
+    <p><strong>2. Microservices from necessity, not fashion.</strong> They broke up their monolith in 2008-2012 because the monolith was the single biggest source of outages — any team's deploy could take down all of Netflix. Microservices let teams deploy independently. The cost was operational complexity, which they paid for with investments in observability and chaos engineering.</p>
+
+    <p><strong>3. Cassandra for viewing history.</strong> Netflix's viewing history is append-mostly, eventually consistent is fine (no one cares if "continue watching" updates 2 seconds late), and must survive AZ/region failures. Cassandra's multi-master write-anywhere model fits exactly.</p>
+
+    <p><strong>4. EVCache as a tier.</strong> EVCache sits between services and Cassandra. Hit rates &gt;99% on hot paths. Each region has its own EVCache; writes fan out cross-region asynchronously.</p>
+
+    <p><strong>5. Chaos engineering as a first-class discipline.</strong> Chaos Monkey kills random production instances. Chaos Gorilla kills an entire AWS AZ. This forces engineers to build for resilience; you cannot accidentally depend on a specific instance staying alive.</p>
+
+    <h3>War Stories</h3>
+
+    <div class="callout danger">
+      <strong>The Christmas Eve 2012 AWS outage.</strong> US-East-1 ELB service failed. Netflix was heavily dependent on US-East-1. Streaming was down for many customers for hours on Christmas Eve — the worst possible day for a streaming company. The response: multi-region active-active architecture. Today Netflix can lose an entire AWS region and the service stays up.
+    </div>
+
+    <h3>Evolution</h3>
+    <ul>
+      <li><strong>2008:</strong> Monolithic Java DVD-rental backend.</li>
+      <li><strong>2008–2012:</strong> Migrated everything to AWS, broke into microservices.</li>
+      <li><strong>2011–2015:</strong> Built Hystrix, Eureka, Zuul, Simian Army — the "Netflix OSS" era.</li>
+      <li><strong>2015–2020:</strong> Multi-region active-active, Open Connect buildout.</li>
+      <li><strong>2020–present:</strong> Service mesh, adaptive concurrency (replacing fixed Hystrix thresholds), ML-driven personalization baked deeper into the core.</li>
+    </ul>
+
+    <h2>2. Uber</h2>
+
+    <p><strong>Scale:</strong> 137M+ monthly active riders, 7M+ active drivers, 25M+ trips per day. 4,000+ microservices. Ingests &gt;1 trillion Kafka messages per day.</p>
+
+    <h3>Architecture Sketch</h3>
+
+    <div class="diagram"><pre>
+  [Rider app]                                  [Driver app]
+      |                                             |
+      +----------- Edge / API gateway --------------+
+                         |
+                    [DISCO matching]   &lt;-- the heart of Uber
+                    /       |        \
+           [Ringpop HRing] [H3 geo] [Cadence workflows]
+                    \       |        /
+                     [Schemaless (MySQL layer)]
+                         |
+                    [M3 metrics TSDB]
+                         |
+                    [Kafka event bus]
+</pre></div>
+
+    <h3>Tech Stack</h3>
+    <ul>
+      <li><strong>Services:</strong> Polyglot — Go dominant, Java for payments, Python for ML, Node.js for edge.</li>
+      <li><strong>Data:</strong> Schemaless — Uber's own sharded MySQL abstraction providing schema-agnostic key-value semantics on top of InnoDB.</li>
+      <li><strong>Workflows:</strong> Cadence — durable long-running workflow engine Uber built and open-sourced; now also exists as Temporal.</li>
+      <li><strong>Geospatial:</strong> H3 — Uber's hex-based geocoding system for indexing locations. Open source.</li>
+      <li><strong>Consistent hashing:</strong> Ringpop — service-discovery + consistent-hash membership layer used by matching and location services.</li>
+      <li><strong>Metrics:</strong> M3 — their TSDB, built because Graphite/Prometheus alone could not scale to their metric cardinality.</li>
+      <li><strong>Streaming:</strong> Kafka everywhere. Flink for real-time analytics.</li>
+    </ul>
+
+    <h3>Key Design Decisions and Why</h3>
+
+    <p><strong>1. H3 hex geospatial index.</strong> Rectangular lat/lon grids have varying area near the poles; hexagonal grids have uniform distance from center to neighbors, making "cars within 2km of this rider" a simple set operation. Also supports hierarchical resolutions — zoom out for demand forecasting, zoom in for matching.</p>
+
+    <p><strong>2. Schemaless.</strong> They outgrew Postgres. Moving to Cassandra seemed risky for money transactions (tip drivers, charge riders). So they built Schemaless: a sharded-MySQL key-value-like layer that gives them the ops maturity of MySQL with the horizontal scale of a NoSQL system. Every cell is a versioned JSON blob on an append-only log; secondary indexes are separate MySQL tables kept in sync asynchronously.</p>
+
+    <p><strong>3. Cadence / workflows as a first-class primitive.</strong> Uber realized that a ride is not an RPC — it is a multi-hour stateful workflow (request → match → pickup → in-progress → drop-off → rate → pay). Modeling it as a durable workflow with timers, retries, and explicit state eliminated whole classes of bug.</p>
+
+    <p><strong>4. DISCO matching engine.</strong> The core business logic: given a rider request and a set of nearby drivers, compute the best matching. DISCO runs in-memory on sharded cells (one cell per geographic region via H3). Location updates stream in via a separate pipeline.</p>
+
+    <h3>War Stories</h3>
+
+    <div class="callout danger">
+      <strong>The Go migration (circa 2015).</strong> Uber's geofence service was in Node.js; memory leaks and GC pauses under heavy load caused mis-pricing and mis-matching. Rewrote in Go, p99 latency dropped 10×. Go became the default for new services, but the Node.js → Go rewrite cost months and had to be done while the rocketship was flying.
+    </div>
+
+    <h3>Evolution</h3>
+    <ul>
+      <li><strong>2009–2014:</strong> Python/Postgres monolith, nicknamed "god classes."</li>
+      <li><strong>2014–2018:</strong> SOA explosion — 2000+ services. Observability crisis.</li>
+      <li><strong>2018+:</strong> DOMA ("Domain-Oriented Microservice Architecture") — group microservices into domains with clear ownership; fewer cross-domain dependencies.</li>
+      <li><strong>Present:</strong> ML-driven everything (ETA, pricing, demand prediction), Michelangelo ML platform.</li>
+    </ul>
+
+    <h2>3. Meta / Facebook</h2>
+
+    <p><strong>Scale:</strong> 3B+ daily active users across Meta family. News Feed serves tens of billions of posts per day. Photos stored: trillions. Messages: hundreds of billions per day.</p>
+
+    <h3>Architecture Sketch</h3>
+
+    <div class="diagram"><pre>
+    [Browser / App]
+         |
+    [Edge PoP (L4 + TLS)]
+         |
+    [Front-end web tier: HHVM/Hack]
+         |
+    +---- TAO (graph cache) ----+
+    |             |              |
+  Memcached    MySQL         Haystack
+  (session,    (source of    (photo blob
+   counters)    truth graph)   store)
+         |
+    [Gorilla TSDB] for metrics
+    [Scribe / Scuba] for logs
+</pre></div>
+
+    <h3>Tech Stack</h3>
+    <ul>
+      <li><strong>Web tier:</strong> HHVM running Hack (typed PHP). Originally PHP; HHVM JITs it.</li>
+      <li><strong>Graph cache:</strong> TAO — the social graph cache. Read-optimized, eventually consistent. Every friendship, like, comment lives here.</li>
+      <li><strong>Key-value cache:</strong> Memcached — Meta is one of the largest Memcached deployments on Earth.</li>
+      <li><strong>Source-of-truth storage:</strong> Sharded MySQL for the graph; Haystack for photos; f4 for cold photos.</li>
+      <li><strong>Messenger storage:</strong> HBase historically; MyRocks (RocksDB + MySQL) increasingly.</li>
+      <li><strong>Time series:</strong> Gorilla — in-memory TSDB optimized for 16-byte doubles with delta-of-delta compression.</li>
+      <li><strong>Data warehouse:</strong> Presto, Hive, Spark on exabytes of data.</li>
+    </ul>
+
+    <h3>Key Design Decisions and Why</h3>
+
+    <p><strong>1. TAO — a separate cache for the graph.</strong> MySQL was authoritative but slow for the fan-out reads required by News Feed. TAO sits in front: every object (user, post, photo) and edge (friend, like, comment) is cached. Writes go to MySQL then invalidate TAO; reads go to TAO and fall back to MySQL. TAO handles &gt;1 billion reads per second.</p>
+
+    <p><strong>2. News Feed = pull, not push.</strong> Unlike Twitter's famous fan-out-on-write, Facebook's News Feed assembles the feed on read: fetch the list of friends, fetch their recent posts, score with an ML model, return the top N. Caching makes this fast. Push would be cheaper for celebrities with billions of followers (they have very few true celebrities in the Twitter sense).</p>
+
+    <p><strong>3. Haystack for photos.</strong> Traditional filesystems (one inode per file) do not scale to billions of photos because metadata overhead dominates. Haystack packs many photos into a single large file with an in-memory index; a photo fetch is one disk seek.</p>
+
+    <p><strong>4. HHVM for PHP performance.</strong> Meta's codebase was PHP; rewriting was not an option. HHVM JIT-compiles PHP/Hack, giving them C++-level performance on a productive language. This is a "we had to invent our own tool because no existing tool fit" move.</p>
+
+    <h3>War Stories</h3>
+
+    <div class="callout danger">
+      <strong>The 2021 6-hour outage.</strong> A BGP withdrawal during a routine config change took all of Facebook's IP ranges off the internet, including their internal tools and physical badge readers (they couldn't get into their own data centers). The fix required physically walking into secured data centers. The postmortem lesson: out-of-band management channels must be truly out-of-band.
+    </div>
+
+    <h3>Evolution</h3>
+    <ul>
+      <li><strong>2004–2008:</strong> LAMP monolith.</li>
+      <li><strong>2008–2013:</strong> Cache tier (Memcached) became dominant; TAO built.</li>
+      <li><strong>2013–2018:</strong> Hack + HHVM, Gorilla TSDB, MyRocks.</li>
+      <li><strong>2018–present:</strong> AI infra explosion — PyTorch, NVLink clusters, specialized silicon (MTIA).</li>
+    </ul>
+
+    <h2>4. Stripe</h2>
+
+    <p><strong>Scale:</strong> Processes hundreds of billions of USD in payments annually. Serves millions of businesses. API availability SLO: 99.999%+. Every request must be idempotent by design.</p>
+
+    <h3>Architecture Sketch</h3>
+
+    <div class="diagram"><pre>
+       [Merchant server]  -- HTTPS --&gt;  [Stripe API edge]
+                                            |
+                                     [Rainier routing]
+                                            |
+                      +---------------------+---------------------+
+                      |                     |                     |
+             [Charges service]     [Accounts service]   [Payouts service]
+                      |                     |                     |
+                      +------ Event bus ----+-----Webhooks--&gt; merchant
+                      |
+                 [MongoDB clusters + DocDB-style custom storage]
+                      |
+                 [Ledger / reconciliation pipelines]
+</pre></div>
+
+    <h3>Tech Stack</h3>
+    <ul>
+      <li><strong>Primary service language:</strong> Ruby (Stripe-flavored, heavily typed with Sorbet, their own gradual type checker).</li>
+      <li><strong>Storage:</strong> MongoDB at massive scale. Stripe operated one of the largest MongoDB deployments in existence. They have steadily been moving hot workloads to internal MongoDB-compatible systems and specialized stores.</li>
+      <li><strong>Event streaming:</strong> Kafka + in-house event bus for webhooks.</li>
+      <li><strong>Data warehouse:</strong> Custom pipelines feeding into Snowflake / Iceberg.</li>
+      <li><strong>Testing:</strong> Strong culture of integration tests hitting real sandbox networks; production mirrored traffic replay.</li>
+    </ul>
+
+    <h3>Key Design Decisions and Why</h3>
+
+    <p><strong>1. Idempotency keys on every mutating API call.</strong> Payments are the canonical domain where at-least-once retries must never charge twice. Stripe bakes idempotency keys into the API contract: every POST accepts an <code>Idempotency-Key</code> header; the server deduplicates by that key for 24 hours. This is arguably Stripe's single most important design decision.</p>
+
+    <p><strong>2. API-first design.</strong> The API is the product. Everything else is in service of it. This forced Stripe into clean contract evolution practices (additive changes only, versioned API surface pinned per-merchant forever).</p>
+
+    <p><strong>3. Event-driven architecture internally.</strong> Services communicate via events on a bus, not RPCs. This decouples teams; new consumers can subscribe without upstream changes. Webhooks to merchants are the external manifestation of this.</p>
+
+    <p><strong>4. MongoDB — then custom.</strong> Early Stripe chose MongoDB because flexible schemas fit payment data's reality (cards have different fields than bank transfers). At scale, they hit operational walls and built a custom storage layer — MongoDB-compatible wire protocol on their own sharded backend.</p>
+
+    <p><strong>5. Strong typing retrofit via Sorbet.</strong> Ruby is dynamic. At millions of LOC and thousands of engineers, dynamic typing becomes expensive. Stripe built Sorbet (open-sourced) to add gradual types without rewriting the codebase.</p>
+
+    <h3>War Stories</h3>
+
+    <div class="callout warn">
+      <strong>MongoDB operational complexity.</strong> Stripe publicly discussed the challenges of operating Mongo clusters at their scale — rebalance storms, replica lag cascades, query planner regressions. The migration to a custom Mongo-compatible layer took years and is still ongoing for some workloads. Lesson: "use the industry default" works until you are 10× larger than anyone else using it.
+    </div>
+
+    <h3>Evolution</h3>
+    <ul>
+      <li><strong>2010–2014:</strong> Ruby + MongoDB on AWS.</li>
+      <li><strong>2014–2019:</strong> Service-oriented, Kafka-based event fabric, Sorbet for typing.</li>
+      <li><strong>2019–present:</strong> Custom storage layers, ML for fraud (Radar), global compliance infrastructure across dozens of regulatory regimes.</li>
+    </ul>
+
+    <h2>5. Discord</h2>
+
+    <p><strong>Scale:</strong> 200M+ MAUs. 4 billion messages per day. 19M active servers (guilds). Millions of concurrent WebSocket connections per gateway cluster.</p>
+
+    <h3>Architecture Sketch</h3>
+
+    <div class="diagram"><pre>
+   [Client (Electron/RN)] -- WebSocket --&gt; [Gateway: Elixir]
+                                                |
+                                          [API: Python]
+                                          /    |    \
+                                 [Messages] [Presence] [Guilds]
+                                    |
+                              [ScyllaDB cluster]
+                                    |
+                            [Rust-written data service
+                             in front of Scylla: "Ling"]
+                                    |
+                          [Voice server cluster: Rust]
+</pre></div>
+
+    <h3>Tech Stack</h3>
+    <ul>
+      <li><strong>WebSocket gateway:</strong> Elixir — BEAM VM gives them millions of lightweight processes per node, perfect for fanning out presence updates.</li>
+      <li><strong>API:</strong> Python (historically), transitioning more functions to Rust and Go.</li>
+      <li><strong>Voice:</strong> Rust — low-latency, no GC pauses, memory-safe.</li>
+      <li><strong>Message store:</strong> Migrated from Cassandra to ScyllaDB (same wire protocol, C++ implementation, better tail latencies).</li>
+      <li><strong>Data service tier:</strong> Rust service wrapping Scylla to shield application code from tail latency spikes via request coalescing.</li>
+      <li><strong>Real-time:</strong> Custom protocols over WebSocket; UDP for voice (Opus codec).</li>
+    </ul>
+
+    <h3>Key Design Decisions and Why</h3>
+
+    <p><strong>1. Elixir for the gateway.</strong> A chat app is a pub-sub fan-out problem: one person types, N others must receive. The BEAM's actor model maps one Erlang process per connected user; sending a message is passing a message between processes. Scaling is about spreading processes across nodes with cluster-aware routing.</p>
+
+    <p><strong>2. Cassandra → ScyllaDB migration.</strong> Cassandra's GC pauses caused p99 latency spikes. Scylla has the same API but is written in C++ with a shard-per-core thread-per-core model. The migration involved live double-writes and took months; Discord engineers have written excellent postmortems on it.</p>
+
+    <p><strong>3. Rust for voice and data services.</strong> Voice is real-time; a GC pause = audible glitch. Rust gives them the performance of C++ with memory safety. They also rewrote a hot data path ("Ling") in Rust to shield Python from Scylla tail-latency spikes via request deduplication.</p>
+
+    <p><strong>4. Denormalized message storage.</strong> Messages are stored by <code>(channel_id, timestamp)</code>. Reads are "get last N messages in channel X," which maps to a single partition range scan.</p>
+
+    <h3>War Stories</h3>
+
+    <div class="callout danger">
+      <strong>Python GIL + Cassandra tail latency = death by a thousand paper cuts.</strong> Python's GIL meant API workers blocked on slow Scylla reads, cascading into 5xx bursts. The Rust rewrite of the hot data path (with request coalescing — if 100 users request the same uncached thing, only one goes to Scylla) dropped p99 by 10× on affected endpoints.
+    </div>
+
+    <h3>Evolution</h3>
+    <ul>
+      <li><strong>2015:</strong> Launch — Python API + Elixir gateway + Cassandra.</li>
+      <li><strong>2017–2020:</strong> Growth to hundreds of millions of users; operational pain on Cassandra.</li>
+      <li><strong>2021–2023:</strong> ScyllaDB migration; Rust rewrites of hot paths; Elixir clustering improvements.</li>
+      <li><strong>Present:</strong> Multi-region active-active, soundboard / video features, ML moderation.</li>
+    </ul>
+
+    <h2>6. Shopify</h2>
+
+    <p><strong>Scale:</strong> Millions of merchants. Processes hundreds of billions of USD in GMV. Black Friday/Cyber Monday peak: &gt;1M requests/sec across the platform.</p>
+
+    <h3>Architecture Sketch</h3>
+
+    <div class="diagram"><pre>
+      [Buyer checkout]
+            |
+     [Edge (Cloudflare / GCP LB)]
+            |
+     [Storefront renderer (Ruby on Rails)]
+            |
+       +--- Pod 01 ---+    +--- Pod 02 ---+    ... +--- Pod N ---+
+       | Rails app    |    | Rails app    |        | Rails app  |
+       | MySQL shard  |    | MySQL shard  |        | MySQL shard|
+       | Redis        |    | Redis        |        | Redis      |
+       | Memcached    |    | Memcached    |        | Memcached  |
+       +--------------+    +--------------+        +------------+
+                     \          |           /
+                      [Kafka global event bus]
+                              |
+                         [BigQuery / data lake]
+</pre></div>
+
+    <h3>Tech Stack</h3>
+    <ul>
+      <li><strong>App:</strong> One of the largest Ruby on Rails codebases in existence. Actively scaled Rails rather than abandoning it.</li>
+      <li><strong>Database:</strong> Sharded MySQL (Vitess-adjacent approach, their own sharding layer).</li>
+      <li><strong>Pods:</strong> Each pod is an isolated stack of web + DB + cache + workers, hosting a subset of merchants.</li>
+      <li><strong>Cache:</strong> Memcached for HTML/Liquid fragments; Redis for sessions/rate limits.</li>
+      <li><strong>Event stream:</strong> Kafka for cross-pod eventing.</li>
+      <li><strong>Edge:</strong> Cloudflare + GCP (primary cloud).</li>
+    </ul>
+
+    <h3>Key Design Decisions and Why</h3>
+
+    <p><strong>1. The Pod architecture.</strong> Each merchant lives in exactly one pod. A pod has its own DB, cache, and workers. This means: (a) a bad query by merchant X cannot crash merchant Y's store; (b) you can scale by adding pods rather than scaling a single giant DB; (c) you can isolate "whale" merchants to dedicated pods. This is multi-tenancy done right.</p>
+
+    <p><strong>2. Stay on Rails, fix Rails.</strong> Shopify's thesis: a well-maintained Rails monolith is more productive than a sprawling microservice mesh, as long as you solve the specific scaling problems. They invest heavily in Ruby performance (YJIT), tooling, and modular monoliths ("componentized monolith").</p>
+
+    <p><strong>3. Flash sales as a forcing function.</strong> Kylie Cosmetics launches. One merchant, one product, 1M concurrent buyers, all in 30 seconds. Shopify built "checkout throttle" — a queue-based system that lets buyers into a protected checkout in controlled bursts, preventing DB overload. The waiting-room UX is a feature, not a bug.</p>
+
+    <p><strong>4. Kafka as the nervous system.</strong> Every meaningful event (order placed, inventory changed, customer updated) goes on Kafka. Downstream consumers (analytics, recommendations, fraud) are decoupled. This also enables per-merchant webhook fan-out reliably.</p>
+
+    <h3>War Stories</h3>
+
+    <div class="callout warn">
+      <strong>"Hot merchants" before the pod era.</strong> Pre-2018-ish, a single viral merchant could saturate the shared DB, hurting all merchants. The pod architecture specifically solved this; subsequently, hot merchants just need to be moved to a dedicated pod, no one else is affected.
+    </div>
+
+    <h3>Evolution</h3>
+    <ul>
+      <li><strong>2004–2014:</strong> Rails monolith on a few large DBs.</li>
+      <li><strong>2014–2018:</strong> Vertical sharding, Kafka, Cloud migration.</li>
+      <li><strong>2018–present:</strong> Pod architecture, componentized monolith, YJIT contributions, checkout throttle.</li>
+    </ul>
+
+    <h2>7. Slack</h2>
+
+    <p><strong>Scale:</strong> 10M+ daily active users, with single workspaces exceeding 500K users. Millions of concurrent WebSocket connections. 1.5B+ messages/week (ballpark).</p>
+
+    <h3>Architecture Sketch</h3>
+
+    <div class="diagram"><pre>
+     [Slack client]
+          |
+     [Edge LB] ---- WebSocket ----&gt; [Gateway / MS]
+          |                              |
+     [HTTP API: Hacklang/PHP]       [Channel server shards]
+          |                              |
+          +--- MySQL (sharded) ----------+
+          |
+     [Search: Solr -&gt; Elasticsearch]
+          |
+     [File storage: S3]
+          |
+     [Enterprise Grid orchestration layer]
+</pre></div>
+
+    <h3>Tech Stack</h3>
+    <ul>
+      <li><strong>API:</strong> Historically PHP, migrated to Hacklang (same HHVM that Meta runs).</li>
+      <li><strong>Real-time:</strong> Custom WebSocket gateway; each client holds a persistent connection.</li>
+      <li><strong>Channel sharding:</strong> Channels (the primary unit of concurrency) are sharded across channel servers.</li>
+      <li><strong>Storage:</strong> Sharded MySQL for messages, metadata.</li>
+      <li><strong>Search:</strong> Migrated from Solr to Elasticsearch for scale and richer query needs.</li>
+      <li><strong>Enterprise Grid:</strong> A "workspace of workspaces" abstraction for large enterprises spanning many teams.</li>
+    </ul>
+
+    <h3>Key Design Decisions and Why</h3>
+
+    <p><strong>1. Channel-level sharding.</strong> A channel is the concurrency unit — many users talking in one channel generates a fanout workload. Sharding by channel keeps the fanout local to a single shard. User state (e.g. unread counts) is distributed across shards.</p>
+
+    <p><strong>2. Persistent WebSocket per client.</strong> Unlike pull-based clients, Slack keeps a persistent connection to push messages in real time. Cost: many concurrent connections, expensive idle resources. Benefit: instant delivery, typing indicators, presence.</p>
+
+    <p><strong>3. Search migration to Elasticsearch.</strong> Solr hit scaling and feature limits (aggregations, relevance tuning, multi-tenancy). The migration was multi-year, double-indexed during transition, and validated with shadow traffic.</p>
+
+    <p><strong>4. Enterprise Grid as a business + technical construct.</strong> Large companies wanted to run Slack across hundreds of teams with a single admin plane. Grid layered on top of the existing workspace concept, providing cross-workspace search, SSO, DLP, and billing. This required significant architectural changes to the sharding model.</p>
+
+    <h3>War Stories</h3>
+
+    <div class="callout danger">
+      <strong>January 4, 2021 outage.</strong> Slack went down for most of a business day, right when everyone was returning from holidays. Root cause: a scaling event in their provisioning tier triggered a thundering herd of clients all retrying at once, overwhelming the load balancers. Postmortem led to smarter client retry backoff and capacity planning for "everyone returns from vacation Monday" as a specific traffic archetype.
+    </div>
+
+    <h3>Evolution</h3>
+    <ul>
+      <li><strong>2014:</strong> Launch — LAMP-ish stack.</li>
+      <li><strong>2015–2018:</strong> Hacklang adoption, growing scale, early sharding.</li>
+      <li><strong>2018–2020:</strong> Enterprise Grid, Elasticsearch migration.</li>
+      <li><strong>Present (under Salesforce):</strong> Integration into broader Salesforce suite, continuing investments in search and AI-in-Slack features.</li>
+    </ul>
+
+    <h2>8. Airbnb</h2>
+
+    <p><strong>Scale:</strong> 5M+ hosts, 150M+ users, 1.5B+ cumulative guest arrivals. Search must handle complex availability + pricing + ranking in &lt;300ms.</p>
+
+    <h3>Architecture Sketch</h3>
+
+    <div class="diagram"><pre>
+    [Traveler client]
+         |
+    [Edge + API gateway]
+         |
+    +--- Search service ----+--- Listing service ---+--- Booking service ---+
+    |    (ML ranking)       |    (availability)     |    (payments + trust) |
+    +----------- service mesh ----------------------+
+         |
+    [MySQL (sharded) + DynamoDB for certain hot tables]
+         |
+    [Airflow for batch pipelines (they built Airflow)]
+         |
+    [Druid + Presto for analytics]
+         |
+    [SpinnakerCD for continuous delivery]
+</pre></div>
+
+    <h3>Tech Stack</h3>
+    <ul>
+      <li><strong>App:</strong> Historically Ruby on Rails "monorail"; migrated to service-oriented architecture with Java/Kotlin services.</li>
+      <li><strong>Data:</strong> Sharded MySQL, DynamoDB for specific hot-write tables, S3 + Parquet for data lake.</li>
+      <li><strong>Pipelines:</strong> Airflow — originally built at Airbnb to manage their ETL DAGs; open-sourced and now an industry standard (Apache Airflow).</li>
+      <li><strong>Deployments:</strong> Spinnaker (Netflix OSS) for multi-stage continuous delivery.</li>
+      <li><strong>Search:</strong> Elasticsearch-based with custom ML ranking on top.</li>
+      <li><strong>ML platform:</strong> Bighead — their internal ML infra platform.</li>
+    </ul>
+
+    <h3>Key Design Decisions and Why</h3>
+
+    <p><strong>1. SOA migration from Rails monorail.</strong> By 2016 the Rails monolith was a productivity bottleneck. Airbnb methodically extracted services, starting with the highest-ownership-boundary areas (payments, messaging). Unlike Shopify, they decided the monolith's ceiling was too low.</p>
+
+    <p><strong>2. Airflow for batch pipelines.</strong> Cron + shell scripts didn't scale. Airbnb built Airflow to declaratively define DAGs of tasks with dependencies, retries, and monitoring. They then open-sourced it, creating a de facto industry standard.</p>
+
+    <p><strong>3. Search = availability + price + ranking, all in 300ms.</strong> A hard problem: availability must be real-time (a listing just booked is no longer available), pricing must reflect dynamic pricing signals, ranking must personalize. They use a mix of Elasticsearch for candidate retrieval and a custom ML ranking layer atop it.</p>
+
+    <p><strong>4. Photo search + ML pricing.</strong> Airbnb built models to analyze listing photos for quality signals and to suggest optimal prices to hosts — both running on the Bighead ML platform. Non-trivial infra: feature stores, offline training, online serving with consistent feature computation.</p>
+
+    <h3>War Stories</h3>
+
+    <div class="callout warn">
+      <strong>The "search is slow" era.</strong> Pre-2018, search latency crept up as listings grew past 5M. Classic Elasticsearch cluster hot-spotting on popular geographies (NYC, Paris). They addressed this with geo-aware shard routing, result-set caching, and aggressive pre-computation of common filters.
+    </div>
+
+    <h3>Evolution</h3>
+    <ul>
+      <li><strong>2008–2015:</strong> Rails monolith.</li>
+      <li><strong>2015–2020:</strong> SOA extraction; Airflow; Bighead; Spinnaker adoption.</li>
+      <li><strong>2020 (COVID):</strong> Massive shock — they had to lay off and refocus. Technical result: leaner, more focused platform; rewrite of the search ranking stack for the "stay somewhere new" era.</li>
+      <li><strong>Present:</strong> More aggressive use of ML for host-side tools, stronger trust/safety systems.</li>
+    </ul>
+
+    <h2>Pattern Map — What Does Each Company Use?</h2>
+
+    <p>This table traces each major pattern from Chapters 2–6 through the eight architectures above. It is not exhaustive; it is a map for your intuition.</p>
+
+    <table>
+      <thead>
+        <tr>
+          <th>Pattern</th>
+          <th>Netflix</th>
+          <th>Uber</th>
+          <th>Meta</th>
+          <th>Stripe</th>
+          <th>Discord</th>
+          <th>Shopify</th>
+          <th>Slack</th>
+          <th>Airbnb</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td>Microservices</td><td>Yes (700+)</td><td>Yes (4000+)</td><td>Yes</td><td>Yes</td><td>Yes</td><td>Modular monolith</td><td>Yes</td><td>Yes</td></tr>
+        <tr><td>Cache-aside (Memcached/Redis)</td><td>EVCache</td><td>Redis</td><td>Memcached (huge)</td><td>Redis</td><td>Redis</td><td>Memcached</td><td>Memcached</td><td>Redis</td></tr>
+        <tr><td>Consistent hashing</td><td>EVCache</td><td>Ringpop</td><td>Internal</td><td>Internal</td><td>Gateway routing</td><td>Pod routing</td><td>Channel shards</td><td>Internal</td></tr>
+        <tr><td>Wide-column (Cassandra/Scylla)</td><td>Cassandra</td><td>Some</td><td>MyRocks</td><td>-</td><td>ScyllaDB</td><td>-</td><td>-</td><td>-</td></tr>
+        <tr><td>Sharded RDBMS</td><td>MySQL (billing)</td><td>Schemaless (MySQL)</td><td>MySQL (huge)</td><td>Internal</td><td>-</td><td>Pods = shards</td><td>MySQL</td><td>MySQL</td></tr>
+        <tr><td>Event bus (Kafka)</td><td>Keystone</td><td>Kafka (trillions/day)</td><td>Scribe</td><td>Kafka + custom</td><td>-</td><td>Kafka</td><td>Kafka</td><td>Kafka</td></tr>
+        <tr><td>Workflow engine</td><td>Conductor</td><td>Cadence</td><td>Internal</td><td>Internal</td><td>-</td><td>Internal</td><td>-</td><td>Airflow</td></tr>
+        <tr><td>API gateway</td><td>Zuul 2</td><td>Edge</td><td>Edge</td><td>Rainier</td><td>Gateway</td><td>Edge</td><td>Edge</td><td>Edge</td></tr>
+        <tr><td>Circuit breaker</td><td>Hystrix → resilience4j</td><td>Internal</td><td>Internal</td><td>Internal</td><td>Rust layer</td><td>Internal</td><td>Internal</td><td>Internal</td></tr>
+        <tr><td>Chaos engineering</td><td>Simian Army (origin)</td><td>Yes</td><td>Storm</td><td>GameDays</td><td>Yes</td><td>Yes</td><td>Yes</td><td>Yes</td></tr>
+        <tr><td>Multi-region active-active</td><td>Yes</td><td>Yes</td><td>Yes</td><td>Yes</td><td>Growing</td><td>Regional pods</td><td>Yes</td><td>Yes</td></tr>
+        <tr><td>Own CDN</td><td>Open Connect</td><td>-</td><td>Yes (FBNA)</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td></tr>
+        <tr><td>Multi-tenancy isolation</td><td>-</td><td>-</td><td>-</td><td>Per-merchant</td><td>Per-guild</td><td>Pods</td><td>Workspaces</td><td>-</td></tr>
+        <tr><td>Time-series DB (custom)</td><td>Atlas</td><td>M3</td><td>Gorilla</td><td>Internal</td><td>Internal</td><td>Internal</td><td>Internal</td><td>Internal</td></tr>
+        <tr><td>Idempotency keys</td><td>-</td><td>Yes</td><td>Yes</td><td>Canonical</td><td>Yes</td><td>Yes</td><td>Yes</td><td>Yes</td></tr>
+      </tbody>
+    </table>
+
+    <h2>Closing Thoughts</h2>
+
+    <p>Patterns repeat. Kafka shows up in almost every large architecture. Memcached or Redis sits in front of almost every database. Some form of consistent hashing underpins every stateful service cluster. Circuit breakers, idempotency keys, multi-region active-active, chaos engineering — these are not fashions. They are load-bearing engineering primitives at scale.</p>
+
+    <p>What differs is the <em>shape</em> of the business, and therefore the hot path. Netflix's hot path is video bytes, so they invented Open Connect. Uber's hot path is the matching engine, so they invented H3 and Ringpop. Stripe's hot path is idempotent money movement, so they made idempotency part of their public contract. Discord's hot path is real-time fanout, so they bet on Elixir. Each of these companies solved the same foundational problems you read about in Chapters 2–6 — and then built something distinctive around their specific hot path.</p>
+
+    <p>That is the final lesson of this book. Architecture is not about memorizing components. It is about understanding what each component buys you, what it costs, and how they compose. Then you look hard at your business, find your hot path, and make the right tradeoffs. Everything else — the patterns, the tools, the war stories — is a library of moves you can reach for once you know what problem you are solving.</p>
+
+    <p>Good luck. Go build.</p>
+
+    <div class="chapter-nav">
+      <a href="07-war-room.html"><div class="label">← Previous</div><div class="title">7. War Room Scenarios</div></a>
+      <a class="next" href="../index.html"><div class="label">Next →</div><div class="title">Back to Home</div></a>
+    </div>
+  </main>
+</div>
+<script src="../assets/js/nav.js"></script>
+</body>
+</html>

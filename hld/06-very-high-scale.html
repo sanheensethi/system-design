@@ -1,0 +1,529 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Very High Scale — Book II · HLD</title>
+<link rel="stylesheet" href="../assets/css/style.css">
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">System Design Books</div>
+    <div class="brand-sub">by Sanheen · Progressive Learning</div>
+    <div class="nav-section">
+      <h3>Home</h3>
+      <a href="../index.html">Overview</a>
+    </div>
+    <div class="nav-section">
+      <h3>Book I — Low Level Design</h3>
+      <a href="../lld/index.html">LLD Index</a>
+    </div>
+    <div class="nav-section">
+      <h3>Book II — High Level Design</h3>
+      <a href="index.html">HLD Index</a>
+      <a href="01-foundations.html">1. Foundations & Capacity</a>
+      <a href="02-building-blocks.html">2. Building Blocks</a>
+      <a href="03-basic-systems.html">3. Basic Systems</a>
+      <a href="04-intermediate.html">4. Intermediate Systems</a>
+      <a href="05-advanced.html">5. Advanced Systems</a>
+      <a href="06-very-high-scale.html">6. Very High Scale</a>
+      <a href="07-war-room.html">7. War Room Scenarios</a>
+      <a href="08-real-architectures.html">8. Real Architectures</a>
+    </div>
+  </aside>
+  <main class="main">
+    <div class="breadcrumb"><a href="../index.html">Home</a> / <a href="index.html">Book II · HLD</a> / Chapter 6</div>
+    <h1>Chapter 6: Very High Scale</h1>
+
+    <div class="callout">
+      <strong>The jump.</strong> Chapter 5 systems handle millions of QPS. These handle <em>billions of events per day</em>, which is a different world. You cannot store everything, you cannot count exactly, you cannot retry synchronously, and your batch job and your streaming job must return compatible answers. This is where Lambda/Kappa architectures, probabilistic data structures, and kernel-bypass networking earn their keep.
+    </div>
+
+    <h2>6.1 Ad Click Aggregator</h2>
+
+    <p>Every ad click must be counted — accurately enough to bill advertisers, fast enough to power a live dashboard, and robustly enough to shed 30% fraud without flinching. At scale, that means <strong>100B clicks/day</strong>.</p>
+
+    <h3>Capacity</h3>
+
+    <ul>
+      <li>100B clicks/day = 1.15M clicks/s avg, ~5M/s peak.</li>
+      <li>Payload ~500 B (user_id, ad_id, campaign, ts, geo, device, referrer) ⇒ 500 MB/s ingress, ~45 TB/day raw.</li>
+      <li>Aggregations served: clicks per (ad, minute), (campaign, hour), (advertiser, day). Read QPS from dashboards: 50k.</li>
+      <li>Billing SLA: aggregate counts must be correct within ±0.01% within 24 hours.</li>
+    </ul>
+
+    <h3>Lambda architecture</h3>
+
+    <div class="diagram"><pre>
+   Ad Server emits click
+          |
+          v
+       Kafka topic: clicks   (replication 3, 72h retention)
+        |                \
+        | speed           \ batch
+        v                  v
+   Flink job           S3 raw log
+   (1-min windows)          |
+        |                   v
+        v              Spark nightly job
+   Redis / Druid     (exact counts, fraud
+   (approx, fresh)    model retrain, billing)
+        |                   |
+        +---------+---------+
+                  v
+             Dashboard / Billing
+                (serves speed layer now,
+                 reconciles with batch at T+1d)
+    </pre></div>
+
+    <p>The <strong>speed layer</strong> gives you answers in seconds; the <strong>batch layer</strong> gives you the truth tomorrow. Dashboards show the speed layer; billing uses batch. This is the textbook Lambda pattern and it is still the right default at 100B events/day.</p>
+
+    <h3>Deep dive: approximate counting with HyperLogLog</h3>
+
+    <p>Dashboards want "unique users who clicked this ad in the last hour" at sub-second latency. Exact distinct count across 100M users requires a set; HLL gives you ±2% error in 12 KB, mergeable across shards.</p>
+
+    <pre><code># conceptual HLL
+def update(hll, item):
+    h = hash(item)                    # 64-bit
+    bucket = h & ((1 &lt;&lt; P) - 1)       # P bits pick a register
+    rank = leading_zeros(h &gt;&gt; P) + 1  # how "rare" is this hash
+    hll[bucket] = max(hll[bucket], rank)
+
+def estimate(hll):
+    return alpha(m) * m * m / sum(2 ** -r for r in hll)</code></pre>
+
+    <p>Two HLLs can be unioned by taking element-wise max of registers — enabling per-minute HLLs to roll up to hourly, daily, etc. Redis, Druid, and ClickHouse all support HLL natively.</p>
+
+    <h3>Deduplication and idempotency</h3>
+
+    <p>Ad SDKs retry on network hiccups, so the same click may arrive 2–5 times. Every click gets a client-generated UUID (<code>click_id</code>). The Flink job maintains a 10-minute Bloom filter per partition; duplicates inside the window are dropped. For the batch layer, Spark uses <code>dropDuplicates(click_id)</code> over a sliding 24 h window — cheap because ordering is by time.</p>
+
+    <h3>Fraud detection</h3>
+
+    <ul>
+      <li>Bot filter: clicks-per-IP rate &gt; threshold, or suspicious user-agent.</li>
+      <li>Geo impossibility: user clicked from NY and Tokyo 30 s apart.</li>
+      <li>Model-based: gradient-boosted tree scoring each click on 50+ features; anything with score &gt; 0.9 is quarantined, not billed.</li>
+      <li>Publisher-level anomaly: sudden 10× click rate triggers review.</li>
+    </ul>
+
+    <h3>Serving the dashboard</h3>
+
+    <p>Druid or ClickHouse is the right sink: columnar, time-partitioned, pre-aggregated roll-ups. Queries like "top 10 campaigns by clicks last hour" return in &lt; 200 ms over billions of rows because they scan only the relevant time shards and exploit bitmap indexes.</p>
+
+    <h2>6.2 Web Crawler (Google-scale)</h2>
+
+    <p>Crawling the web is the single largest data-movement job humans routinely run. Google's crawler fetches tens of billions of URLs a day, politely, from a URL space that is hostile, adversarial, and infinite.</p>
+
+    <h3>Capacity</h3>
+
+    <ul>
+      <li>~500B pages indexed; refresh hot pages hourly, cold pages monthly. ⇒ target ~20B fetches/day = 230k QPS.</li>
+      <li>Avg page 100 KB after gzip ⇒ 20 GB/s = 160 Gbps egress/ingress.</li>
+      <li>URL frontier: 10<sup>12</sup> URLs queued at any time. Needs disk-backed priority queue.</li>
+      <li>Duplicate detection: for every fetched page, is this content already seen? ~10<sup>11</sup> fingerprints.</li>
+    </ul>
+
+    <h3>Architecture</h3>
+
+    <div class="diagram"><pre>
+    +-------------------+
+    | URL Frontier      |  <-- priority queue sharded by host
+    |   (RocksDB)       |
+    +-------------------+
+            |
+            v pops URL
+    +-------------------+     +------------------+
+    | DNS Resolver      |<--->| DNS Cache        |
+    +-------------------+     +------------------+
+            |
+            v
+    +-------------------+     +------------------+
+    | robots.txt Cache  |<--->| Host Politeness  |
+    +-------------------+     |  (rate limit     |
+            |                 |   per host)      |
+            v                 +------------------+
+    +-------------------+
+    | Fetcher workers   |  --- HTTP GET --->  Internet
+    +-------------------+
+            |
+            v page bytes
+    +-------------------+     +------------------+
+    | Parser / Extractor| --> | Content Store    |
+    |  (HTML -> links,  |     |   (S3 / GFS)     |
+    |   text, metadata) |     +------------------+
+    +-------------------+
+            |
+            | new URLs
+            v
+    +-------------------+     +------------------+
+    | URL Dedupe        | --> | Frontier (loop)  |
+    |  (Bloom filter +  |     +------------------+
+    |   canonical hash) |
+    +-------------------+
+    </pre></div>
+
+    <h3>Deep dive: the URL frontier</h3>
+
+    <p>Not a single queue. It must balance three dimensions:</p>
+    <ol>
+      <li><strong>Priority</strong> — PageRank, freshness of change, commercial intent.</li>
+      <li><strong>Politeness</strong> — never hit <code>example.com</code> more than ~1 QPS (configurable per host).</li>
+      <li><strong>Diversity</strong> — across millions of hosts in parallel.</li>
+    </ol>
+
+    <p>Classic design (Mercator-style): two layers of queues. Front queues by priority (say 5 levels). Back queues by host, one per fetcher thread. A scheduler pulls from front queues, hashes the URL's host into a back queue, and pauses back queues until their per-host timer expires.</p>
+
+    <h3>Deep dive: duplicate detection with Bloom filters</h3>
+
+    <p>Before enqueueing a URL, you must answer "have I crawled this already?" 10<sup>11</sup> URLs at 50 B each would be 5 TB of hash table. A Bloom filter gives you 1% false-positive rate in ~1.2 bytes per item — 120 GB, easily partitioned across nodes.</p>
+
+    <pre><code>class BloomFilter:
+    def __init__(self, n_items, fp_rate):
+        m = int(-n_items * math.log(fp_rate) / (math.log(2) ** 2))
+        k = int(m / n_items * math.log(2))
+        self.bits = bitarray(m); self.bits.setall(0)
+        self.k = k; self.m = m
+
+    def add(self, x):
+        for seed in range(self.k):
+            self.bits[mmh3.hash(x, seed) % self.m] = 1
+
+    def contains(self, x):
+        return all(self.bits[mmh3.hash(x, s) % self.m] for s in range(self.k))</code></pre>
+
+    <p>False positives just mean "we may skip a real URL" — acceptable. No false negatives means "we will never recrawl unnecessarily". For content-level dedup (same page at different URLs), use SimHash over the rendered text — near-duplicate pages collapse.</p>
+
+    <h3>robots.txt &amp; DNS</h3>
+
+    <p>Fetch <code>robots.txt</code> once per day per host and cache. A stampede of DNS lookups would melt recursive resolvers — run your own resolver fleet with a local LRU, TTL-respecting cache. Google operates this at such scale they essentially run the internet's largest DNS resolver.</p>
+
+    <h3>Crawl budget</h3>
+
+    <p>Per-host daily fetch cap, derived from the host's size × importance × server health signals (latency, 5xx rate). If the host starts returning 500s, back off exponentially — a polite crawler protects the sites it depends on.</p>
+
+    <h2>6.3 Search Engine</h2>
+
+    <p>The crawler feeds raw pages; the search engine turns them into sub-second answers. The design divides cleanly: an <strong>indexing pipeline</strong> (offline, batch, massive) and a <strong>query pipeline</strong> (online, scatter-gather, latency-critical).</p>
+
+    <h3>Capacity</h3>
+
+    <ul>
+      <li>500B pages × avg 1 KB extracted text = 500 TB corpus. Inverted index ~100 TB compressed.</li>
+      <li>Query load: 100k QPS peak globally. p99 &lt; 200 ms end-to-end.</li>
+      <li>Per-query compute: scatter across 1000s of shards, each scans its slice of the index.</li>
+    </ul>
+
+    <h3>Architecture</h3>
+
+    <div class="diagram"><pre>
+   Indexing (offline):
+     Crawler --> Doc store (GFS/S3)
+                      |
+                      v
+               Tokenizer / Analyzer
+                      |
+                      v
+               MapReduce: build inverted index
+                      |
+                      v
+               Shard by doc_id range (say 10,000 shards)
+                      |
+                      v
+               Push to index servers
+
+   Query (online):
+     User query
+         |
+         v
+     +-----------------+
+     | Query Rewriter  |  (spellcheck, synonyms, entity linking)
+     +-----------------+
+         |
+         v  scatter
+     +-----------------+     +-----------------+     +-----------------+
+     | Index shard 1   | ... | Index shard N   | ... | Index shard 10k |
+     | top-K by BM25   |     | top-K by BM25   |     | top-K by BM25   |
+     +-----------------+     +-----------------+     +-----------------+
+             \                    |                    /
+              +-----> Aggregator <+<------------------+
+                          |
+                          v
+                    Re-ranker (ML model w/ PageRank, freshness, personalization)
+                          |
+                          v
+                    Snippet generator
+                          |
+                          v
+                    Response
+    </pre></div>
+
+    <h3>Deep dive: sharded inverted index</h3>
+
+    <p>An inverted index maps <em>term → posting list</em> of (doc_id, term_frequency, positions). At 100 TB, it cannot live on one box. Two sharding strategies:</p>
+
+    <table>
+      <tr><th>Strategy</th><th>How</th><th>Pro</th><th>Con</th></tr>
+      <tr><td>Doc partitioning</td><td>Each shard holds full index for 1/N documents</td><td>Every query scatters to every shard but each does little work; easy to add capacity</td><td>Fan-out cost: tail latency = slowest shard</td></tr>
+      <tr><td>Term partitioning</td><td>Each shard holds full posting lists for 1/N terms</td><td>Query hits only shards for query terms</td><td>Hot terms ("the") destroy one shard; harder to balance</td></tr>
+    </table>
+
+    <p>Google, Bing, Elasticsearch all use <strong>document partitioning</strong> — scatter-gather over ~10,000 shards. A replica group behind each shard gives redundancy and read throughput.</p>
+
+    <h3>Ranking: BM25 + PageRank + ML</h3>
+
+    <ul>
+      <li><strong>Stage 1 (per-shard top-K):</strong> BM25 — classical TF-IDF variant. Cheap, returns top 1000 candidates per shard.</li>
+      <li><strong>Stage 2 (aggregator):</strong> merge shard top-Ks, keep top 1000 global.</li>
+      <li><strong>Stage 3 (re-ranker):</strong> learned model with hundreds of features — PageRank score, click-through history, freshness, query-doc embedding similarity, device, location. Re-ranks down to final 10.</li>
+    </ul>
+
+    <p>Why the cascade? Stage 1 must be cheap (runs on 10k shards × 100k QPS). Stage 3 can be expensive because it only runs on ~10k pages after the funnel.</p>
+
+    <h3>Query understanding</h3>
+
+    <p>"weather in nyc" → intent: weather, location: New York. Done by a sequence of models: spellcheck (noisy channel), entity linking against a knowledge graph, intent classifier. The rewritten query may bypass the index entirely and return a structured card.</p>
+
+    <h3>Autocomplete</h3>
+
+    <p>Typed prefix → top completions. Implemented as a trie of query-log prefixes, with aggregated popularity scores at each node. Top-K suggestions are precomputed at each trie node. Served from a dedicated edge tier at &lt; 50 ms. Personalization adds your history as a secondary trie merged client-side.</p>
+
+    <h2>6.4 Stock Exchange Order Book</h2>
+
+    <p>A stock exchange is the most extreme latency system in commercial computing. Match latency is measured in microseconds, fairness is regulated by law, and a double-spent share is a crime. The ideas here are radically different from every other system in this book.</p>
+
+    <h3>Capacity and SLA</h3>
+
+    <ul>
+      <li>NASDAQ peak: ~10M orders/sec, ~100M market-data messages/sec.</li>
+      <li>Match latency target: &lt; 10 μs wire-to-wire.</li>
+      <li>Determinism: if you replay the input tape, you must get the exact same output tape. Regulators require it.</li>
+      <li>No data loss, ever. After a crash, the tape reconstructs state.</li>
+    </ul>
+
+    <h3>Architecture</h3>
+
+    <div class="diagram"><pre>
+   Member firms (banks, HFT)
+          |
+          | FIX / binary over 10/40/100 GbE, kernel-bypass
+          v
+   +-------------------+
+   | Gateway / OMS     |  (risk checks, entitlements)
+   +-------------------+
+          |
+          v sequenced event
+   +-------------------+
+   | Sequencer         |  single writer, assigns global seq_no
+   +-------------------+
+          |
+          v tape (disk + multicast)
+   +-------------------+     +---------------------+
+   | Matching Engine   | --> | Market Data Fanout  |
+   |  (per symbol)     |     |   UDP multicast     |
+   +-------------------+     +---------------------+
+          |
+          v trades
+   +-------------------+
+   | Clearing / DROP   |  end-of-day settlement to custodian
+   +-------------------+
+    </pre></div>
+
+    <h3>Deep dive: the matching engine (price-time priority)</h3>
+
+    <p>Per symbol, two sorted data structures: bids (buys, max-heap by price) and asks (sells, min-heap by price). At each price level, orders are a FIFO queue. Incoming buy at price P:</p>
+
+    <pre><code>def match_buy(order):
+    while order.qty &gt; 0 and ask_book and ask_book.best().price &lt;= order.price:
+        level = ask_book.best()            # lowest ask
+        resting = level.front()            # oldest at that price
+        fill = min(order.qty, resting.qty)
+        emit_trade(order, resting, level.price, fill)
+        order.qty -= fill
+        resting.qty -= fill
+        if resting.qty == 0:
+            level.pop_front()
+            if level.empty(): ask_book.remove_level(level.price)
+    if order.qty &gt; 0:
+        bid_book.insert(order)   # resting order
+    emit_book_update()</code></pre>
+
+    <p>The whole thing runs single-threaded per symbol. Parallelism is per-symbol, not per-order — ordering within a symbol is the product. That is why serialisation cost dominates and why exchanges obsess over cache locality and lock-free queues.</p>
+
+    <h3>Kernel bypass and FPGAs</h3>
+
+    <ul>
+      <li><strong>Kernel bypass</strong> (DPDK, Solarflare OpenOnload): the NIC DMA-writes packets into user-space ring buffers, skipping the kernel TCP/IP stack. 1 μs latency instead of 30 μs.</li>
+      <li><strong>FPGAs</strong>: risk checks and pre-trade filters implemented in hardware — 100 ns per check. Some engines do full matching on FPGA.</li>
+      <li><strong>Colocation</strong>: customers literally rent rack space meters from the matching engine. Light-speed latency (3 ns/meter) becomes the binding constraint.</li>
+    </ul>
+
+    <h3>Market data multicast</h3>
+
+    <p>Every trade and every book change is broadcast on a UDP multicast group. All subscribers receive the same bytes at the same time. TCP would introduce head-of-line blocking and fairness problems. UDP is lossy, so the protocol includes sequence numbers and a TCP retransmit channel for gap fills.</p>
+
+    <h3>Deterministic replay</h3>
+
+    <p>The sequencer writes every event to a replicated log (a "tape") <em>before</em> the matching engine sees it. Crash recovery = replay the tape. Regulator audit = replay the tape with the day's code version and verify trade-by-trade. This design (single-writer sequencer → deterministic state machine) is the LMAX Disruptor pattern.</p>
+
+    <h2>6.5 Distributed File System (GFS/HDFS Style)</h2>
+
+    <p>The substrate under every big-data system. GFS/HDFS traded away POSIX semantics to get petabyte scale and sequential-read throughput on commodity disks.</p>
+
+    <h3>Design assumptions (and why they mattered)</h3>
+
+    <ul>
+      <li>Component failures are the norm, not the exception (thousands of disks).</li>
+      <li>Files are huge (GB+). Small files are the unusual case.</li>
+      <li>Reads are mostly sequential streaming; random reads are rare.</li>
+      <li>Writes are mostly <em>append</em>. Random overwrites are rare.</li>
+      <li>High sustained bandwidth &gt; low latency.</li>
+    </ul>
+
+    <h3>Architecture</h3>
+
+    <div class="diagram"><pre>
+   Client
+      | 1. open("/path/bigfile")
+      v
+   +-----------------+        (metadata only)
+   | Master          |<--- heartbeats from chunkservers
+   | (in-RAM tree,   |
+   |  chunk map)     |
+   +-----------------+
+      |
+      | 2. returns chunk locations (cs1, cs2, cs3)
+      v
+   Client --- 3. reads/writes chunks direct ---> ChunkServer 1
+                                                 ChunkServer 2 (replicas)
+                                                 ChunkServer 3
+
+   Chunks: 64 MB (GFS) or 128 MB (HDFS), replicated x3,
+           placed with rack-awareness (2 same rack, 1 cross rack)
+    </pre></div>
+
+    <h3>Deep dive: write pipeline</h3>
+
+    <p>A client appending to a file does NOT broadcast data to all replicas. The master picks a <strong>primary replica</strong>; the client sends data linearly:</p>
+
+    <ol>
+      <li>Client asks master for current primary and replica locations.</li>
+      <li>Client pushes data to the <em>closest</em> replica. That replica forwards to the next, which forwards to the third. Pipeline style — uses all NICs, minimises bottleneck.</li>
+      <li>Once data is buffered at all replicas, client sends <em>commit</em> to primary.</li>
+      <li>Primary assigns a serial number, applies locally, forwards commit to secondaries, collects acks, replies to client.</li>
+    </ol>
+
+    <p>This separates <em>data flow</em> (linear pipeline, bandwidth-optimal) from <em>control flow</em> (primary decides order). Write bandwidth per client is network-limited by a single link, not by the slowest replica's link.</p>
+
+    <h3>Consistency model</h3>
+
+    <div class="callout warn">
+      <strong>Not POSIX.</strong> GFS offers "record append" atomicity — an append appears at least once at the same offset on all replicas. Under failure, an append may be duplicated or padded with junk. Applications (MapReduce, BigTable) are designed to tolerate this: readers skip records with bad checksums, dedupe on record IDs.
+    </div>
+
+    <h3>Master scale</h3>
+
+    <p>A single master holds the entire metadata tree in RAM. At 64 MB chunks × 64 B metadata each, a 10 PB filesystem needs ~10 GB of master RAM. Cheap. When metadata outgrows one machine, you shard namespaces (HDFS Federation) or shift to an object store (S3) that uses consistent-hash partitioning for metadata.</p>
+
+    <h3>Rack-aware placement</h3>
+
+    <p>Replicas placed: 1 local rack, 1 same-rack different host, 1 different rack. Survives single-rack power failure. Reads prefer the closest replica, reducing cross-rack bisection bandwidth.</p>
+
+    <h2>6.6 Notification System (10B/day)</h2>
+
+    <p>Push, email, SMS — one internal API called from hundreds of services. Looks trivial; at 10B/day it is a surprisingly dense systems problem.</p>
+
+    <h3>Capacity</h3>
+
+    <ul>
+      <li>10B/day = 115k notifications/s avg, 500k peak.</li>
+      <li>Mix: 70% push, 20% email, 10% SMS. Each channel has its own provider constraints.</li>
+      <li>APNs/FCM rate limits: ~10k connections per app; each connection ~1k msg/s.</li>
+      <li>SMS providers charge per message; we bid across providers for cost and reliability.</li>
+    </ul>
+
+    <h3>Architecture</h3>
+
+    <div class="diagram"><pre>
+   Callers (product services)
+          |
+          | enqueue Notification(user, template, params)
+          v
+   +--------------------+
+   | Ingest API         |  (rate limit per caller)
+   +--------------------+
+          |
+          v
+   Kafka: notifications
+          |
+          v
+   +--------------------+    +-----------------------+
+   | Preference Filter  |<---| User Prefs (KV store) |
+   | (opt-out, quiet hrs)    +-----------------------+
+   +--------------------+
+          |
+          v
+   +--------------------+    +-----------------------+
+   | Template Renderer  |<---| Template Store        |
+   +--------------------+    +-----------------------+
+          |
+          v
+   +--------------------+
+   | Channel Router     |   --- push --> APNs / FCM
+   |                    |   --- email -> SES / Sendgrid
+   |                    |   --- sms   -> Twilio / MessageBird
+   +--------------------+
+          |
+          v
+   +--------------------+
+   | Delivery Tracker   |   (webhooks back from providers)
+   +--------------------+
+          |
+          v
+   Kafka: delivery_events   ---> analytics, retry logic
+    </pre></div>
+
+    <h3>Deep dive: delivery guarantees and retries</h3>
+
+    <p>Providers fail all the time. A push to APNs may get a 503. Our contract with callers is <strong>at-least-once</strong> delivery, which means:</p>
+
+    <ul>
+      <li>Every notification has a deterministic <code>notification_id</code>. Clients dedupe on display.</li>
+      <li>Failed attempts go to a retry topic with exponential backoff (1 min, 5 min, 30 min, 2 h). After N retries → dead-letter.</li>
+      <li>Some channels are <em>idempotent by nature</em> (push with same ID collapses on device); SMS is not, so we must be stricter about retries (risk of duplicate charge).</li>
+    </ul>
+
+    <h3>Rate limiting per user</h3>
+
+    <p>Spam is a churn event. Per user, per channel, we enforce a token bucket: max 10 pushes/hour, 3 emails/day. Implemented with Redis + Lua for atomic check-and-decrement. Quiet hours are a user-preference overlay: notifications arriving between 22:00 and 07:00 local are either delayed or silenced based on priority.</p>
+
+    <h3>Throttling providers</h3>
+
+    <p>APNs has a per-connection rate limit and a per-app QPS cap. We keep a pool of long-lived HTTP/2 connections to APNs and round-robin. FCM similarly. Sendgrid and SES give us sustained-send caps measured in emails/second — if we exceed we get 429s and blacklisted. Channel Router implements a token bucket per provider, sized below the declared cap.</p>
+
+    <h3>Template engine</h3>
+
+    <p>Templates are stored with versioned i18n bundles. At render time: <code>template.render(locale=user.locale, params=payload)</code>. A/B tests are done at template level — 10% of users get template_v2. The same notification_id renders the same template for the same user to keep A/B assignment stable across retries.</p>
+
+    <h3>Why Kafka and not an RPC?</h3>
+
+    <div class="callout good">
+      <strong>Buffer for bursts.</strong> A product launch sends 50M notifications in 5 minutes — 170k/s, far above steady state. Kafka absorbs the burst; downstream workers drain at their safe rate over the next hour. An RPC-based design would overload APNs and get the whole app's push privileges throttled for an entire day.
+    </div>
+
+    <h2>Summary</h2>
+
+    <div class="callout">
+      <strong>Patterns at very high scale.</strong> When a system handles billions of events, five techniques recur: <em>lambda/kappa architectures</em> to combine streaming and batch, <em>probabilistic data structures</em> (Bloom, HLL, SimHash) to trade accuracy for space, <em>append-only pipelines and deterministic replay</em> for audit and recovery, <em>single-writer sequencers</em> to preserve ordering without locks, and <em>client-coordinated partitioning</em> so servers stay dumb. If you see a problem at this scale, try those five before reaching for anything fancier.
+    </div>
+
+    <div class="chapter-nav">
+      <a href="05-advanced.html"><div class="label">← Previous</div><div class="title">5. Advanced Systems</div></a>
+      <a class="next" href="07-war-room.html"><div class="label">Next →</div><div class="title">7. War Room Scenarios</div></a>
+    </div>
+  </main>
+</div>
+<script src="../assets/js/nav.js"></script>
+</body>
+</html>

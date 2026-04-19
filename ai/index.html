@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Book III — AI System Design</title>
+<link rel="stylesheet" href="../assets/css/style.css">
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">System Design Books</div>
+    <div class="brand-sub">by Sanheen · Progressive Learning</div>
+    <div class="nav-section">
+      <h3>Home</h3>
+      <a href="../index.html">Overview</a>
+    </div>
+    <div class="nav-section">
+      <h3>Book I — Low Level Design</h3>
+      <a href="../lld/index.html">LLD Index</a>
+    </div>
+    <div class="nav-section">
+      <h3>Book II — High Level Design</h3>
+      <a href="../hld/index.html">HLD Index</a>
+    </div>
+    <div class="nav-section">
+      <h3>Book III — AI System Design</h3>
+      <a href="index.html">AI Index</a>
+      <a href="01-foundations.html">1. AI Foundations</a>
+      <a href="02-building-blocks.html">2. AI Building Blocks</a>
+      <a href="03-rag.html">3. RAG Systems</a>
+      <a href="04-llm-serving.html">4. LLM Serving Infrastructure</a>
+      <a href="05-agents.html">5. Agent Architectures</a>
+      <a href="06-hybrid-legacy.html">6. Hybrid & Legacy Integration</a>
+      <a href="07-war-room.html">7. AI War Room</a>
+      <a href="08-real-architectures.html">8. Real AI Architectures</a>
+    </div>
+  </aside>
+
+  <main class="main">
+    <div class="breadcrumb"><a href="../index.html">Home</a> / Book III · AI System Design</div>
+    <h1>Book III — AI System Design</h1>
+    <p style="font-size:1.15rem;color:var(--text-dim);">Design production AI systems: LLM serving, RAG pipelines, agent architectures, and how to integrate AI with existing systems without a rewrite. Current as of 2026.</p>
+
+    <div class="pills">
+      <span class="pill">LLM Infrastructure</span>
+      <span class="pill">RAG</span>
+      <span class="pill">Agents</span>
+      <span class="pill">Hybrid Systems</span>
+      <span class="pill">FAANG GenAI Interviews</span>
+    </div>
+
+    <h2>Table of Contents</h2>
+
+    <div class="cards">
+      <a class="card" href="01-foundations.html">
+        <div class="card-badge badge-basic">Chapter 1</div>
+        <div class="card-title">AI Foundations</div>
+        <div class="card-desc">LLMs, tokens, embeddings, vectors, attention. Just enough to design systems. Probabilistic vs deterministic mental model.</div>
+      </a>
+      <a class="card" href="02-building-blocks.html">
+        <div class="card-badge badge-basic">Chapter 2</div>
+        <div class="card-title">AI Building Blocks</div>
+        <div class="card-desc">Vector DBs, embedding models, LLM gateways, prompt orchestrators, guardrails, observability, evaluation harnesses.</div>
+      </a>
+      <a class="card" href="03-rag.html">
+        <div class="card-badge badge-medium">Chapter 3</div>
+        <div class="card-title">RAG Systems (Progressive)</div>
+        <div class="card-desc">v1 basic vector search → v2 chunking → v3 hybrid search → v4 reranking → v5 multi-stage → v6 contextual/agentic RAG.</div>
+      </a>
+      <a class="card" href="04-llm-serving.html">
+        <div class="card-badge badge-medium">Chapter 4</div>
+        <div class="card-title">LLM Serving Infrastructure</div>
+        <div class="card-desc">Continuous batching, PagedAttention, KV cache, speculative decoding, quantization, vLLM vs TGI vs SGLang, capacity math.</div>
+      </a>
+      <a class="card" href="05-agents.html">
+        <div class="card-badge badge-advanced">Chapter 5</div>
+        <div class="card-title">Agent Architectures</div>
+        <div class="card-desc">ReAct loop, tool calling, memory systems, orchestration patterns, multi-agent coordination, durable workflows.</div>
+      </a>
+      <a class="card" href="06-hybrid-legacy.html">
+        <div class="card-badge badge-advanced">Chapter 6</div>
+        <div class="card-title">Hybrid & Legacy Integration</div>
+        <div class="card-desc">Strangler Fig for AI, Anti-Corruption Layer, sidecar inference, LLM-as-middleware, rollback strategies, shadow deployment.</div>
+      </a>
+      <a class="card" href="07-war-room.html">
+        <div class="card-badge badge-warroom">Chapter 7</div>
+        <div class="card-title">AI War Room Scenarios</div>
+        <div class="card-desc">Prompt injection in prod, hallucination cascades, token cost explosions, vector index corruption, agent loops, model deprecation.</div>
+      </a>
+      <a class="card" href="08-real-architectures.html">
+        <div class="card-badge badge-advanced">Chapter 8</div>
+        <div class="card-title">Real AI Architectures</div>
+        <div class="card-desc">ChatGPT, Claude Code, Cursor, Perplexity, GitHub Copilot, Anthropic API — how they're actually built.</div>
+      </a>
+    </div>
+
+    <h2>Why This Book Matters Now</h2>
+    <p>In 2026, AI system design has become its own category in FAANG interviews. The common prompt: <em>"Design a conversational AI agent for our enterprise knowledge base."</em> The answer requires fluency across RAG, vector DBs, LLM orchestration, cost/latency tradeoffs, and production evaluation — topics that didn't exist in classical system design.</p>
+
+    <div class="callout">
+      <div class="callout-title">What's Different About AI Systems</div>
+      Classical systems are deterministic. You know the inputs, you know the outputs. AI systems are <strong>probabilistic</strong> — the same input can produce different outputs. This changes EVERY layer: you need evaluation harnesses instead of unit tests, cost budgets instead of RPS targets, hallucination detection instead of null checks, and rollback strategies when a model upgrade silently regresses quality.
+    </div>
+
+    <h3>The 4 New Tradeoffs You Must Navigate</h3>
+    <table>
+      <thead><tr><th>Tradeoff</th><th>Classical System</th><th>AI System</th></tr></thead>
+      <tbody>
+        <tr><td>Correctness</td><td>Pass/fail tests</td><td>Eval set + human review</td></tr>
+        <tr><td>Latency</td><td>p50/p99 in ms</td><td>Time to first token + total tokens</td></tr>
+        <tr><td>Cost</td><td>CPU + RAM</td><td>$/1M tokens, scales with input</td></tr>
+        <tr><td>Safety</td><td>Input validation</td><td>Prompt injection, PII leakage, jailbreaks</td></tr>
+      </tbody>
+    </table>
+
+    <h3>How to Read This Book</h3>
+    <ol>
+      <li><strong>Start:</strong> Ch 1 to build the AI mental model if you're new to LLMs.</li>
+      <li><strong>If you know LLMs:</strong> Jump to Ch 3 (RAG) — this is THE most-asked interview topic in 2026.</li>
+      <li><strong>For infra roles:</strong> Ch 4 (serving) is your bread and butter.</li>
+      <li><strong>For integration roles:</strong> Ch 6 (hybrid/legacy) is the pattern library you'll actually use at work.</li>
+      <li><strong>Before any interview:</strong> Ch 7 (war room) and Ch 8 (real architectures).</li>
+    </ol>
+
+    <div class="callout warn">
+      <div class="callout-title">Interview Strategy (2026)</div>
+      A GenAI system design interview follows the classical 5-question funnel PLUS four AI-specific ones: (1) What's the eval set and how do we measure quality? (2) What's the cost per request? (3) How do we detect & contain hallucinations? (4) What happens when the model provider goes down or deprecates the model? Answering these four separates senior from junior responses.
+    </div>
+
+    <div class="chapter-nav">
+      <a href="../index.html">
+        <div class="label">← Back</div>
+        <div class="title">Home</div>
+      </a>
+      <a class="next" href="01-foundations.html">
+        <div class="label">Next →</div>
+        <div class="title">Chapter 1: AI Foundations</div>
+      </a>
+    </div>
+  </main>
+</div>
+<script src="../assets/js/nav.js"></script>
+</body>
+</html>

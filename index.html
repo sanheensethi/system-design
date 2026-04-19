@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>System Design Books — LLD & HLD Mastery</title>
+<link rel="stylesheet" href="assets/css/style.css">
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">System Design Books</div>
+    <div class="brand-sub">by Sanheen · Progressive Learning</div>
+    <div class="nav-section">
+      <h3>Home</h3>
+      <a href="index.html">Overview</a>
+    </div>
+    <div class="nav-section">
+      <h3>Book I — Low Level Design</h3>
+      <a href="lld/index.html">LLD Index</a>
+      <a href="lld/01-foundations.html">1. Foundations (OOP, SOLID)</a>
+      <a href="lld/02-patterns.html">2. Design Patterns Primer</a>
+      <a href="lld/03-basic-problems.html">3. Basic Problems</a>
+      <a href="lld/04-intermediate.html">4. Intermediate Problems</a>
+      <a href="lld/05-advanced.html">5. Advanced Problems</a>
+      <a href="lld/06-concurrency.html">6. Concurrency in LLD</a>
+      <a href="lld/07-war-room.html">7. War Room Scenarios</a>
+      <a href="lld/08-real-code.html">8. Real Company Code</a>
+    </div>
+    <div class="nav-section">
+      <h3>Book II — High Level Design</h3>
+      <a href="hld/index.html">HLD Index</a>
+      <a href="hld/01-foundations.html">1. Foundations & Capacity</a>
+      <a href="hld/02-building-blocks.html">2. Building Blocks</a>
+      <a href="hld/03-basic-systems.html">3. Basic Systems</a>
+      <a href="hld/04-intermediate.html">4. Intermediate Systems</a>
+      <a href="hld/05-advanced.html">5. Advanced Systems</a>
+      <a href="hld/06-very-high-scale.html">6. Very High Scale</a>
+      <a href="hld/07-war-room.html">7. War Room Scenarios</a>
+      <a href="hld/08-real-architectures.html">8. Real Architectures</a>
+    </div>
+    <div class="nav-section">
+      <h3>Book III — AI System Design</h3>
+      <a href="ai/index.html">AI Index</a>
+      <a href="ai/01-foundations.html">1. AI Foundations</a>
+      <a href="ai/02-building-blocks.html">2. AI Building Blocks</a>
+      <a href="ai/03-rag.html">3. RAG Systems</a>
+      <a href="ai/04-llm-serving.html">4. LLM Serving</a>
+      <a href="ai/05-agents.html">5. Agent Architectures</a>
+      <a href="ai/06-hybrid-legacy.html">6. Hybrid & Legacy</a>
+      <a href="ai/07-war-room.html">7. AI War Room</a>
+      <a href="ai/08-real-architectures.html">8. Real AI Architectures</a>
+    </div>
+  </aside>
+
+  <main class="main">
+    <section class="hero">
+      <h1>System Design Mastery</h1>
+      <p>A progressive, first-principles curriculum for Low Level Design and High Level Design — from brute force to production scale, with war room scenarios, real company code, and complete solutions.</p>
+      <div class="pills">
+        <span class="pill">Progressive Learning</span>
+        <span class="pill">Production Code</span>
+        <span class="pill">War Room Ready</span>
+        <span class="pill">FAANG Interview Prep</span>
+      </div>
+    </section>
+
+    <div class="cards">
+      <a class="card" href="lld/index.html">
+        <div class="card-badge badge-medium">Book I</div>
+        <div class="card-title">Low Level Design</div>
+        <div class="card-desc">OOP principles, SOLID, 24+ design patterns, 15 classic problems (Parking Lot → Chess), concurrency, war rooms, and real-world application.</div>
+      </a>
+      <a class="card" href="hld/index.html">
+        <div class="card-badge badge-advanced">Book II</div>
+        <div class="card-title">High Level Design</div>
+        <div class="card-desc">Distributed systems from first principles. Capacity estimation, 5 fundamental levers, 15 system designs (URL shortener → Google Maps), real architectures.</div>
+      </a>
+      <a class="card" href="ai/index.html">
+        <div class="card-badge badge-warroom">Book III · NEW</div>
+        <div class="card-title">AI System Design</div>
+        <div class="card-desc">Production AI systems for 2026: RAG pipelines, LLM serving, agent architectures, and integrating AI with legacy systems without a rewrite.</div>
+      </a>
+    </div>
+
+    <h2>How to Use These Books</h2>
+    <p>Each book is structured <strong>progressively</strong>: start with foundations, work through basic problems, then escalate to advanced. Every problem is solved multiple times — starting from a naive brute-force version, then identifying what breaks, then fixing it. You learn patterns by feeling the pain they solve.</p>
+
+    <h3>The Progressive Method</h3>
+    <ol>
+      <li><strong>Brute force version</strong> — the simplest possible implementation</li>
+      <li><strong>Identify what breaks</strong> — concrete scenarios where it fails</li>
+      <li><strong>Apply the fix</strong> — introduce a pattern or technique</li>
+      <li><strong>What new problem does the fix create?</strong> — honest tradeoff view</li>
+      <li><strong>Iterate</strong> — until you reach production-grade</li>
+    </ol>
+
+    <div class="callout">
+      <div class="callout-title">★ Why This Works</div>
+      Traditional textbooks list patterns abstractly and you forget them. This book makes you <em>feel the pain</em> each pattern solves. You won't memorize — you'll derive.
+    </div>
+
+    <h3>Study Path</h3>
+    <table>
+      <thead><tr><th>Week</th><th>Focus</th><th>Outcome</th></tr></thead>
+      <tbody>
+        <tr><td>1</td><td>LLD Foundations + Patterns (Ch 1-2)</td><td>Fluent in SOLID + 8 core patterns</td></tr>
+        <tr><td>2</td><td>LLD Basic + Intermediate (Ch 3-4)</td><td>Can solve Parking Lot, LRU Cache, Vending Machine</td></tr>
+        <tr><td>3</td><td>HLD Foundations + Building Blocks (Ch 1-2)</td><td>Capacity estimation, component library</td></tr>
+        <tr><td>4</td><td>HLD Basic + Intermediate (Ch 3-4)</td><td>URL shortener, Twitter, Instagram</td></tr>
+        <tr><td>5</td><td>LLD Advanced + Concurrency (Ch 5-6)</td><td>Chess, distributed locks, thread safety</td></tr>
+        <tr><td>6</td><td>HLD Advanced + Very High Scale (Ch 5-6)</td><td>Uber, Netflix, Google Maps</td></tr>
+        <tr><td>7</td><td>War Room scenarios (both books, Ch 7)</td><td>Production incident response</td></tr>
+        <tr><td>8</td><td>Real company code (Ch 8)</td><td>How Netflix, Uber, Meta actually build</td></tr>
+      </tbody>
+    </table>
+
+    <h2>Quick Start</h2>
+    <div class="cards">
+      <a class="card" href="lld/01-foundations.html">
+        <div class="card-badge badge-basic">Start Here</div>
+        <div class="card-title">LLD Chapter 1: Foundations</div>
+        <div class="card-desc">OOP, SOLID, why patterns exist.</div>
+      </a>
+      <a class="card" href="hld/01-foundations.html">
+        <div class="card-badge badge-basic">Start Here</div>
+        <div class="card-title">HLD Chapter 1: Foundations</div>
+        <div class="card-desc">Capacity math, 5 levers, CAP theorem.</div>
+      </a>
+      <a class="card" href="lld/07-war-room.html">
+        <div class="card-badge badge-warroom">Advanced</div>
+        <div class="card-title">LLD War Room</div>
+        <div class="card-desc">Debug production issues live.</div>
+      </a>
+      <a class="card" href="hld/07-war-room.html">
+        <div class="card-badge badge-warroom">Advanced</div>
+        <div class="card-title">HLD War Room</div>
+        <div class="card-desc">Cascading failures, noisy neighbors, migrations.</div>
+      </a>
+    </div>
+  </main>
+</div>
+<script src="assets/js/nav.js"></script>
+</body>
+</html>

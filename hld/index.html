@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Book II — High Level Design</title>
+<link rel="stylesheet" href="../assets/css/style.css">
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">System Design Books</div>
+    <div class="brand-sub">by Sanheen · Progressive Learning</div>
+    <div class="nav-section">
+      <h3>Home</h3>
+      <a href="../index.html">Overview</a>
+    </div>
+    <div class="nav-section">
+      <h3>Book I — Low Level Design</h3>
+      <a href="../lld/index.html">LLD Index</a>
+    </div>
+    <div class="nav-section">
+      <h3>Book II — High Level Design</h3>
+      <a href="index.html">HLD Index</a>
+      <a href="01-foundations.html">1. Foundations & Capacity</a>
+      <a href="02-building-blocks.html">2. Building Blocks</a>
+      <a href="03-basic-systems.html">3. Basic Systems</a>
+      <a href="04-intermediate.html">4. Intermediate Systems</a>
+      <a href="05-advanced.html">5. Advanced Systems</a>
+      <a href="06-very-high-scale.html">6. Very High Scale</a>
+      <a href="07-war-room.html">7. War Room Scenarios</a>
+      <a href="08-real-architectures.html">8. Real Architectures</a>
+    </div>
+  </aside>
+
+  <main class="main">
+    <div class="breadcrumb"><a href="../index.html">Home</a> / Book II · High Level Design</div>
+    <h1>Book II — High Level Design</h1>
+    <p style="font-size:1.15rem;color:var(--text-dim);">Master distributed systems from first principles. Learn the 5 fundamental levers that every architecture composes — and derive any system from scratch.</p>
+
+    <h2>Table of Contents</h2>
+
+    <div class="cards">
+      <a class="card" href="01-foundations.html">
+        <div class="card-badge badge-basic">Chapter 1</div>
+        <div class="card-title">Foundations & Capacity Estimation</div>
+        <div class="card-desc">Latency numbers, data sizes, QPS calculations, the 5 fundamental levers, CAP theorem, PACELC.</div>
+      </a>
+      <a class="card" href="02-building-blocks.html">
+        <div class="card-badge badge-basic">Chapter 2</div>
+        <div class="card-title">Building Blocks</div>
+        <div class="card-desc">Load balancer, DB, cache, CDN, message queue, object storage, API gateway. When to use each, what breaks without it.</div>
+      </a>
+      <a class="card" href="03-basic-systems.html">
+        <div class="card-badge badge-basic">Chapter 3</div>
+        <div class="card-title">Basic Systems (Progressive)</div>
+        <div class="card-desc">URL shortener, Pastebin, Rate Limiter, Key-Value Store. Each built v1 → v6, scaling one bottleneck at a time.</div>
+      </a>
+      <a class="card" href="04-intermediate.html">
+        <div class="card-badge badge-medium">Chapter 4</div>
+        <div class="card-title">Intermediate Systems</div>
+        <div class="card-desc">Twitter, Instagram, WhatsApp, YouTube, Dropbox. Feed design, chat, video streaming.</div>
+      </a>
+      <a class="card" href="05-advanced.html">
+        <div class="card-badge badge-advanced">Chapter 5</div>
+        <div class="card-title">Advanced Systems</div>
+        <div class="card-desc">Uber, Netflix, Google Maps, Distributed Cache. Geospatial, CDN, caching at global scale.</div>
+      </a>
+      <a class="card" href="06-very-high-scale.html">
+        <div class="card-badge badge-advanced">Chapter 6</div>
+        <div class="card-title">Very High Scale</div>
+        <div class="card-desc">Ad click aggregator, web crawler, search engine, stock exchange. Billions of events/day.</div>
+      </a>
+      <a class="card" href="07-war-room.html">
+        <div class="card-badge badge-warroom">Chapter 7</div>
+        <div class="card-title">War Room Scenarios</div>
+        <div class="card-desc">Black Friday meltdown, cascading failure, data corruption, zero-downtime migration. Live incident response.</div>
+      </a>
+      <a class="card" href="08-real-architectures.html">
+        <div class="card-badge badge-advanced">Chapter 8</div>
+        <div class="card-title">Real Architectures</div>
+        <div class="card-desc">How Netflix, Uber, Meta, Stripe actually build. Real tech stacks, tradeoffs they made, lessons learned.</div>
+      </a>
+    </div>
+
+    <h2>How to Read This Book</h2>
+    <p>HLD is best learned by <strong>deriving</strong> architectures, not memorizing them. Chapter 1 gives you the framework. Chapter 3 shows that framework applied to simple problems progressively. By Chapter 5, you'll see how the same levers scale to billion-user systems.</p>
+
+    <div class="callout">
+      <div class="callout-title">Interview Strategy</div>
+      A 45-60 min HLD interview follows this script: 5 min requirements, 5 min capacity estimation, 5 min API design, 5 min data model, 10 min architecture diagram, 15-20 min deep dives on bottlenecks. Chapter 1 gives you this framework; Chapters 3-5 give you the practiced examples.
+    </div>
+
+    <div class="chapter-nav">
+      <a href="../index.html">
+        <div class="label">← Back</div>
+        <div class="title">Home</div>
+      </a>
+      <a class="next" href="01-foundations.html">
+        <div class="label">Next →</div>
+        <div class="title">Chapter 1: Foundations</div>
+      </a>
+    </div>
+  </main>
+</div>
+<script src="../assets/js/nav.js"></script>
+</body>
+</html>

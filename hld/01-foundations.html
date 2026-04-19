@@ -1,0 +1,500 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Foundations & Capacity — Book II · HLD</title>
+<link rel="stylesheet" href="../assets/css/style.css">
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">System Design Books</div>
+    <div class="brand-sub">by Sanheen · Progressive Learning</div>
+    <div class="nav-section">
+      <h3>Home</h3>
+      <a href="../index.html">Overview</a>
+    </div>
+    <div class="nav-section">
+      <h3>Book I — Low Level Design</h3>
+      <a href="../lld/index.html">LLD Index</a>
+    </div>
+    <div class="nav-section">
+      <h3>Book II — High Level Design</h3>
+      <a href="index.html">HLD Index</a>
+      <a href="01-foundations.html">1. Foundations & Capacity</a>
+      <a href="02-building-blocks.html">2. Building Blocks</a>
+      <a href="03-basic-systems.html">3. Basic Systems</a>
+      <a href="04-intermediate.html">4. Intermediate Systems</a>
+      <a href="05-advanced.html">5. Advanced Systems</a>
+      <a href="06-very-high-scale.html">6. Very High Scale</a>
+      <a href="07-war-room.html">7. War Room Scenarios</a>
+      <a href="08-real-architectures.html">8. Real Architectures</a>
+    </div>
+  </aside>
+  <main class="main">
+    <div class="breadcrumb"><a href="../index.html">Home</a> / <a href="index.html">Book II · HLD</a> / Chapter 1</div>
+    <h1>Chapter 1: Foundations & Capacity</h1>
+
+    <p class="lead">Before you can design a system, you need to understand <em>why</em> distributed systems exist at all, and you need a mental model of the raw numbers — how fast a CPU is, how slow a disk is, how much a server can hold, and how much traffic a single process can sustain. This chapter gives you that model. Every later chapter is applied arithmetic on top of what you learn here.</p>
+
+    <h2>1. Why Distributed Systems Exist</h2>
+
+    <p>A single machine is a beautiful thing. Memory is local, function calls are nanoseconds, there are no network partitions, and there is one clock. If we could serve every product from one laptop, we would. We can't. Every distributed system is an answer to one of five limits that a single machine eventually hits.</p>
+
+    <table>
+      <thead><tr><th>Limit</th><th>Hard ceiling</th><th>What breaks first</th></tr></thead>
+      <tbody>
+        <tr><td>CPU</td><td>~64–128 cores per socket</td><td>Request throughput; tail latency under contention</td></tr>
+        <tr><td>RAM</td><td>1–4 TB on large servers; ~128 GB is the commodity sweet spot</td><td>Working set no longer fits; you start paging or evicting from cache</td></tr>
+        <tr><td>Disk</td><td>~30 TB per NVMe, ~100 TB per node</td><td>Dataset no longer fits; backup/restore time becomes hours</td></tr>
+        <tr><td>Network</td><td>10–100 Gbps per NIC</td><td>Egress bandwidth saturates before CPU does</td></tr>
+        <tr><td>Failure</td><td>A single box <em>will</em> fail — MTBF for a server is ~3 years</td><td>Availability: one box = one SPOF. 99.9% uptime is impossible with one node</td></tr>
+      </tbody>
+    </table>
+
+    <div class="callout">
+      <strong>The real reason.</strong> People say "we scale horizontally for performance." That is half the story. The other half is failure. Even if one machine were infinitely fast, you would still need at least two for the day that one dies. Distributed systems are a tax you pay for availability; performance is a bonus.
+    </div>
+
+    <p>Once you accept that you need more than one machine, the entire field of distributed systems opens up: how do those machines agree, how do they replicate data, what do they do when they can't talk to each other, and how do you keep it fast. The rest of this book is essentially a tour of the answers.</p>
+
+    <h2>2. The 5 Fundamental Levers</h2>
+
+    <p>Every high-level design, no matter how exotic, is some combination of five moves. When you are stuck in an interview or a real design review, ask which lever you haven't pulled yet.</p>
+
+    <table>
+      <thead><tr><th>Lever</th><th>What it does</th><th>Pull it when</th><th>Cost</th></tr></thead>
+      <tbody>
+        <tr><td><strong>Partition</strong> (shard)</td><td>Split data or traffic across N nodes so each node owns 1/N</td><td>Dataset or write rate exceeds a single node</td><td>Cross-shard queries become expensive; rebalancing is hard</td></tr>
+        <tr><td><strong>Replicate</strong></td><td>Copy data to multiple nodes for read scale and durability</td><td>Reads outnumber writes, or you need to survive node loss</td><td>Write amplification; replication lag → staleness</td></tr>
+        <tr><td><strong>Cache</strong></td><td>Keep hot data in a faster layer (RAM, edge)</td><td>Read-heavy, skewed access, expensive origin</td><td>Invalidation is hard; stale reads; warmup cost</td></tr>
+        <tr><td><strong>Asynchronize</strong></td><td>Return now, do the work later via queue/stream</td><td>User doesn't need the answer immediately</td><td>Eventual consistency; harder error handling; ordering</td></tr>
+        <tr><td><strong>Localize</strong></td><td>Move data and compute close to the user (geo, edge, CDN)</td><td>Global users, latency-sensitive, bandwidth-heavy</td><td>Multi-region consistency; data residency; more infra</td></tr>
+      </tbody>
+    </table>
+
+    <p><strong>Partition.</strong> Partitioning is the only lever that truly buys you more resources. Caching and replicating add speed, but partitioning is how you go from "one machine's worth of writes" to a million. Shard keys define your destiny: pick a key that spreads load evenly and that most queries can be answered from a single shard. The wrong shard key (e.g. sharding tweets by timestamp) concentrates all new writes on one node and ruins you.</p>
+
+    <p><strong>Replicate.</strong> Replication turns read-heavy workloads into a scalability problem you can throw money at: add read replicas. It also turns "the database died" into "we failed over in 30 seconds." The price is lag — replicas are behind the leader by milliseconds to seconds, and users who expect read-your-writes will be surprised when they aren't there.</p>
+
+    <p><strong>Cache.</strong> A cache is a bet that most requests look like recent requests. When the bet is right (social feeds, product pages, user profiles), a small amount of RAM absorbs 90%+ of your read traffic and your database breathes. When the bet is wrong (uniform access over TB of data) you get a cache that holds nothing useful and an extra hop on every request.</p>
+
+    <p><strong>Asynchronize.</strong> The cheapest latency improvement is the work you don't do synchronously. Payment confirmation can be async from email; image upload can be sync, but thumbnail generation is async; order placement is sync, but inventory decrement can be async if you reconcile. Every async hop is a new failure mode, but it decouples producers from consumers and lets each scale independently.</p>
+
+    <p><strong>Localize.</strong> Speed of light is the one constant no engineer has negotiated down. NYC to Singapore is ~230ms round-trip and always will be. If users are global, you must put bytes and compute near them: CDNs for static, multi-region databases for dynamic, edge workers for logic. Localization is the hardest lever because now you have consistency problems across oceans.</p>
+
+    <h2>3. Latency Numbers Every Engineer Should Know</h2>
+
+    <p>Jeff Dean's famous table. Memorize the orders of magnitude. If you recall nothing else, remember that <strong>RAM is 100ns, SSD is 100µs, a same-datacenter round trip is 500µs, and a transcontinental round trip is 150ms</strong> — those four numbers alone make you dangerous in a design review.</p>
+
+    <table>
+      <thead><tr><th>Operation</th><th>Latency</th><th>Relative (if L1 = 1 second)</th></tr></thead>
+      <tbody>
+        <tr><td>L1 cache reference</td><td>0.5 ns</td><td>1 s</td></tr>
+        <tr><td>Branch mispredict</td><td>5 ns</td><td>10 s</td></tr>
+        <tr><td>L2 cache reference</td><td>7 ns</td><td>14 s</td></tr>
+        <tr><td>Mutex lock/unlock</td><td>25 ns</td><td>50 s</td></tr>
+        <tr><td>Main memory (RAM) reference</td><td>100 ns</td><td>3 min 20 s</td></tr>
+        <tr><td>Compress 1 KB with zippy/snappy</td><td>3 µs</td><td>~100 min</td></tr>
+        <tr><td>Send 1 KB over 1 Gbps network</td><td>10 µs</td><td>~5 hr</td></tr>
+        <tr><td>SSD random read</td><td>150 µs</td><td>~3.5 days</td></tr>
+        <tr><td>Read 1 MB sequentially from RAM</td><td>250 µs</td><td>~6 days</td></tr>
+        <tr><td>Round trip within same datacenter</td><td>500 µs</td><td>~11 days</td></tr>
+        <tr><td>Read 1 MB sequentially from SSD</td><td>1 ms</td><td>~25 days</td></tr>
+        <tr><td>HDD seek</td><td>10 ms</td><td>~8 months</td></tr>
+        <tr><td>Read 1 MB sequentially from HDD</td><td>20 ms</td><td>~16 months</td></tr>
+        <tr><td>Packet California → Netherlands → California</td><td>150 ms</td><td>~10 years</td></tr>
+      </tbody>
+    </table>
+
+    <div class="callout success">
+      <strong>Mental shortcuts.</strong>
+      <ul>
+        <li>RAM is ~100× faster than SSD; SSD is ~100× faster than a transcontinental round-trip.</li>
+        <li>Compression is usually a win over the network — 3 µs of CPU saves 10 µs of transfer per KB, and that multiplies over MB.</li>
+        <li>A same-DC RPC is 500 µs. Ten synchronous RPCs in a request path = 5 ms just in network. That's your p50 budget gone before you've done any work.</li>
+      </ul>
+    </div>
+
+    <h2>4. Data Size Reference</h2>
+
+    <p>You can't estimate storage if you don't know the size of the things you're storing. The sizes below are the ones that come up in every back-of-envelope calculation.</p>
+
+    <table>
+      <thead><tr><th>Type</th><th>Size</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td>char (ASCII)</td><td>1 B</td><td>UTF-8: 1–4 B depending on codepoint</td></tr>
+        <tr><td>int</td><td>4 B</td><td>32-bit integer</td></tr>
+        <tr><td>long / int64 / timestamp</td><td>8 B</td><td>Unix timestamps, IDs, counters</td></tr>
+        <tr><td>UUID</td><td>16 B raw, 36 B as string</td><td>Store as binary when you can</td></tr>
+        <tr><td>Tweet / short text</td><td>100–300 B</td><td>280 chars ≈ 280 B + metadata</td></tr>
+        <tr><td>Typical JSON row (user, order)</td><td>1–4 KB</td><td>With field names and whitespace</td></tr>
+        <tr><td>Thumbnail image</td><td>10–50 KB</td><td>Compressed JPEG</td></tr>
+        <tr><td>Full photo</td><td>500 KB – 2 MB</td><td>Instagram-quality</td></tr>
+        <tr><td>1 minute HD video (1080p)</td><td>~50 MB</td><td>4K ≈ 4× that</td></tr>
+        <tr><td>1 hour HD video</td><td>~3 GB</td><td>Netflix-quality H.264</td></tr>
+      </tbody>
+    </table>
+
+    <h2>5. Powers of 10</h2>
+
+    <p>Back-of-envelope math is multiplication and division of powers of ten. If you can juggle the exponents, you don't need a calculator.</p>
+
+    <table>
+      <thead><tr><th>Symbol</th><th>Value</th><th>Comes up as</th></tr></thead>
+      <tbody>
+        <tr><td>KB</td><td>10³ bytes</td><td>JSON rows, headers</td></tr>
+        <tr><td>MB</td><td>10⁶ bytes</td><td>Photos, code bundles</td></tr>
+        <tr><td>GB</td><td>10⁹ bytes</td><td>Server RAM, small databases</td></tr>
+        <tr><td>TB</td><td>10¹² bytes</td><td>Disk per node, mid-size datasets</td></tr>
+        <tr><td>PB</td><td>10¹⁵ bytes</td><td>Data lakes, warehouses</td></tr>
+        <tr><td>Seconds in a day</td><td>86,400 ≈ 10⁵</td><td>QPS from DAU: DAU × actions ÷ 10⁵</td></tr>
+        <tr><td>Seconds in a year</td><td>3.15 × 10⁷</td><td>Storage over time</td></tr>
+        <tr><td>Seconds in a month</td><td>~2.6 × 10⁶</td><td>Monthly metrics</td></tr>
+      </tbody>
+    </table>
+
+    <div class="callout">
+      <strong>The 86,400 trick.</strong> Seconds in a day is <em>approximately 10⁵</em>. So if you have 100M DAU and each user does 10 actions a day, QPS ≈ (10⁸ × 10) / 10⁵ = 10⁴ = 10,000 QPS average. You just did distributed systems capacity planning in your head.
+    </div>
+
+    <h2>6. Standard Server Capacities</h2>
+
+    <p>Pick one "standard box" shape and use it everywhere. Mine is below. These are 2025 commodity numbers — cloud VMs and on-prem servers converge on something like this.</p>
+
+    <table>
+      <thead><tr><th>Resource</th><th>Commodity node</th><th>Big node</th></tr></thead>
+      <tbody>
+        <tr><td>CPU</td><td>16–32 cores</td><td>64–128 cores</td></tr>
+        <tr><td>RAM</td><td>64–128 GB</td><td>512 GB – 2 TB</td></tr>
+        <tr><td>SSD</td><td>1–2 TB NVMe</td><td>8–30 TB NVMe</td></tr>
+        <tr><td>Network</td><td>1–10 Gbps</td><td>25–100 Gbps</td></tr>
+      </tbody>
+    </table>
+
+    <p>In an interview, default to "32 cores, 128 GB RAM, 2 TB SSD, 1 Gbps" for every server you mention unless the problem demands something different. It makes your arithmetic consistent and easy to check.</p>
+
+    <h2>7. Throughput per Node</h2>
+
+    <p>This is the table that turns QPS into server count. Commit it.</p>
+
+    <table>
+      <thead><tr><th>Component</th><th>Per-node throughput</th><th>Bottleneck</th></tr></thead>
+      <tbody>
+        <tr><td>REST / HTTP app server</td><td>1K – 10K QPS</td><td>CPU, heap, connections</td></tr>
+        <tr><td>gRPC service (tight)</td><td>10K – 50K QPS</td><td>CPU, network</td></tr>
+        <tr><td>SQL database — reads</td><td>~10K QPS</td><td>Buffer pool, index lookups</td></tr>
+        <tr><td>SQL database — writes</td><td>~5K QPS</td><td>WAL fsync, lock contention</td></tr>
+        <tr><td>Redis / Memcached</td><td>100K – 200K ops/sec</td><td>Network, single-threaded event loop</td></tr>
+        <tr><td>Cassandra / DynamoDB node</td><td>10K – 50K ops/sec</td><td>Compactions, commit log</td></tr>
+        <tr><td>Kafka broker</td><td>~1M msgs/sec (small messages)</td><td>Disk sequential throughput, NIC</td></tr>
+        <tr><td>Elasticsearch shard</td><td>1K – 5K QPS</td><td>JVM heap, segment merges</td></tr>
+        <tr><td>Object store (S3) per prefix</td><td>3,500 writes/s, 5,500 reads/s</td><td>Partition; spread across prefixes</td></tr>
+      </tbody>
+    </table>
+
+    <div class="callout warn">
+      <strong>Read this twice.</strong> A single SQL box gives you ~10K reads/sec. Not 100K. Not 1M. Most junior designs fail because someone said "Postgres can handle it" for a million QPS system. It can't. One box never can. You need replicas or a different store.
+    </div>
+
+    <h2>8. The 6 Capacity Formulas</h2>
+
+    <p>Six formulas answer 95% of back-of-envelope questions in an HLD interview. Memorize them like multiplication tables.</p>
+
+    <pre><code>1. QPS (average)   = DAU × actions_per_user / 86,400
+2. Peak QPS        = average QPS × 3     (spikes, bursts)
+3. Storage         = records × size_per_record × years × replication_factor
+4. Bandwidth       = QPS × average_payload_size
+5. Servers needed  = peak_QPS / per_server_capacity × 2   (×2 for HA headroom)
+6. Cache size      = 20% × hot_dataset_size              (80/20 rule)</code></pre>
+
+    <p><strong>1. QPS from DAU.</strong> DAU times actions per user divided by seconds in a day. If each user does 10 actions, QPS is roughly DAU/10,000. If each user does 1 action, QPS is DAU/100,000.</p>
+
+    <p><strong>2. Peak multiplier.</strong> Traffic is never flat. Lunch rush, prime-time, Black Friday. A 3× peak-to-average multiplier is the safe default. Messaging and streaming apps can hit 5×–10×; batch-y enterprise apps hit 2×.</p>
+
+    <p><strong>3. Storage.</strong> Always multiply by years of retention and by replication factor. A 1 TB/year dataset with 3× replication and 5-year retention is 15 TB raw, not 1 TB. Don't forget indexes (usually 20–50% on top).</p>
+
+    <p><strong>4. Bandwidth.</strong> QPS times payload. 10K QPS × 10 KB payload = 100 MB/sec = 800 Mbps. That saturates a 1 Gbps NIC. Bandwidth runs out before CPU more often than juniors expect.</p>
+
+    <p><strong>5. Server count.</strong> Peak QPS divided by per-server capacity. Then multiply by ~2 so you can lose half your fleet and still serve traffic. "N+1 redundancy" is the minimum; "2N" is what SRE teams actually run.</p>
+
+    <p><strong>6. Cache size.</strong> 80/20: 20% of keys serve 80% of traffic. Size your cache for the 20%. For a 1 TB hot table, a 200 GB cache catches most reads. Bigger caches give diminishing returns.</p>
+
+    <h2>9. Worked Example — Twitter</h2>
+
+    <p>The canonical capacity exercise. Assume 500M DAU. Work through every formula.</p>
+
+    <h3>Assumptions</h3>
+    <ul>
+      <li>DAU: 500M = 5 × 10⁸</li>
+      <li>Each user <strong>reads</strong> timeline ~50 times/day, <strong>posts</strong> ~0.2 tweets/day</li>
+      <li>Tweet size: ~300 B text + 200 B metadata = 500 B; assume ~1 KB with indexes</li>
+      <li>Media: 10% of tweets have an image (~500 KB), 1% have video (~5 MB)</li>
+      <li>Retention: 5 years</li>
+      <li>Replication: 3×</li>
+    </ul>
+
+    <h3>Write QPS</h3>
+    <pre><code>writes/day   = 5×10⁸ × 0.2         = 10⁸ tweets/day
+avg QPS      = 10⁸ / 86,400        ≈ 1,150 writes/sec
+peak QPS     = 1,150 × 3           ≈ 3,500 writes/sec</code></pre>
+
+    <h3>Read QPS</h3>
+    <pre><code>reads/day    = 5×10⁸ × 50          = 2.5×10¹⁰ timeline reads/day
+avg QPS      = 2.5×10¹⁰ / 86,400   ≈ 290,000 reads/sec
+peak QPS     = 290,000 × 3         ≈ 870,000 reads/sec</code></pre>
+
+    <p>Read:write ratio is about <strong>250:1</strong>. This is a <em>deeply</em> read-heavy system. The architecture will be dominated by fan-out, feed caching, and read replicas, not by write throughput.</p>
+
+    <h3>Storage (5 years)</h3>
+    <pre><code>tweets/year  = 10⁸ × 365           = 3.65×10¹⁰ tweets/year
+5 years      = 1.8×10¹¹ tweets
+text storage = 1.8×10¹¹ × 1 KB     = 180 TB
+with 3× rep  = 540 TB
+
+media text% = 10% images × 500 KB  = 50 KB avg per tweet in images
+media/year  = 10⁸/day × 365 × 50 KB = 1.8 PB/year
+5 years     = 9 PB
+with 3× rep = 27 PB (object store, likely S3/blob)</code></pre>
+
+    <p>Note how media dwarfs text by 50× — the DB holds metadata (TB), the object store holds the bytes (PB).</p>
+
+    <h3>Bandwidth</h3>
+    <pre><code>read egress  = 870K QPS × 1 KB (tweet text) = 870 MB/s = ~7 Gbps
+media egress: most users load images from CDN, so origin bandwidth
+is dominated by cache misses; plan ~100 Gbps at edge, ~10 Gbps at origin.</code></pre>
+
+    <h3>Servers / Shards</h3>
+    <pre><code>Write path (tweet ingest):
+   3,500 peak writes/sec ÷ 5,000 writes/sec/node = ~1 node
+   × 2 HA = 2 write-handling app nodes; but cache the firehose and fan out,
+   so realistically 20–50 ingest nodes to handle fan-out compute.
+
+Read path (timeline service):
+   870K peak reads/sec ÷ 10K QPS per app node = ~90 nodes
+   × 2 HA = ~200 timeline app nodes.
+
+Timeline cache (Redis):
+   500M users × ~800 cached tweet IDs × 8 B = 3.2 TB hot data
+   ÷ 100 GB per Redis node = ~30 Redis nodes (replicated → 60+).
+
+Tweet DB shards:
+   Writes are fine on 10 shards; reads are served from cache.
+   Shard by user_id; 20 shards with 2× replication = 40 DB nodes.</code></pre>
+
+    <div class="callout">
+      <strong>What this tells you.</strong> Twitter-at-scale is not a database problem. The database handles a modest 3,500 writes/sec easily. The hard problems are (a) feed fan-out (a celebrity with 100M followers writes one tweet; you potentially update 100M timeline caches), and (b) the read-path cache. The architecture follows from the arithmetic.
+    </div>
+
+    <h2>10. Worked Example — Instagram</h2>
+
+    <p>Same DAU, but media-heavy and different read/write mix. Where the numbers end up tells you what matters.</p>
+
+    <h3>Assumptions</h3>
+    <ul>
+      <li>DAU: 500M</li>
+      <li>Each user posts ~0.1 photos/day (one post every ~10 days), watches ~20 feed items/day</li>
+      <li>Photo: 2 MB average after compression; video reel: 20 MB average</li>
+      <li>30% of posts are reels</li>
+      <li>Retention: forever (assume 5 years of active hot storage, rest in cold)</li>
+      <li>Replication: 3× in object store</li>
+    </ul>
+
+    <h3>Write QPS</h3>
+    <pre><code>posts/day  = 5×10⁸ × 0.1 = 5×10⁷
+avg QPS    = 5×10⁷ / 86,400 ≈ 580 posts/sec
+peak QPS   = 580 × 3 ≈ 1,750 posts/sec</code></pre>
+
+    <h3>Read QPS</h3>
+    <pre><code>feed views/day = 5×10⁸ × 20 = 10¹⁰
+avg QPS        = 10¹⁰ / 86,400 ≈ 115,000 reads/sec
+peak QPS       = ~350,000 reads/sec</code></pre>
+
+    <h3>Storage</h3>
+    <pre><code>Daily upload volume:
+   photos: 5×10⁷ × 70% × 2 MB  = 70 TB/day
+   reels:  5×10⁷ × 30% × 20 MB = 300 TB/day
+   total:                        ~370 TB/day
+
+Annual:  370 TB/day × 365 = ~135 PB/year
+5-year:  ~675 PB
+With 3× replication: ~2 EB (2,000 PB).
+
+Metadata DB (post rows, likes, comments):
+   5×10⁷ posts/day × 365 × 5 = 9×10¹⁰ posts
+   × 2 KB/row (with indexes) = 180 TB metadata
+   × 3× rep = 540 TB</code></pre>
+
+    <h3>Bandwidth</h3>
+    <pre><code>read egress = 350K peak QPS × 2 MB avg payload = 700 GB/s ≈ 5.6 Tbps.
+This is why Instagram cannot live without a CDN. Origin would need
+thousands of 10 Gbps NICs. With 95% CDN hit rate, origin bandwidth
+drops to ~280 Gbps — still huge, but feasible.</code></pre>
+
+    <h3>Servers / Shards</h3>
+    <pre><code>Upload pipeline:
+   1,750 peak uploads/sec × 5 MB avg = 8.8 GB/s of ingest.
+   Need ~50 upload-edge nodes at 1 Gbps each, plus parallel
+   worker fleet for transcoding (separate from QPS budget).
+
+Feed service:
+   350K peak QPS ÷ 5K QPS per node = 70 nodes, ×2 HA = 140.
+
+Object store:
+   2 EB, handled by S3/GCS (managed, don't size yourself).
+   Cost is the real constraint, not capacity.
+
+CDN:
+   Primary cost/latency mechanism. Edge-cache every post for 30 days;
+   origin sees only cache misses (~5% of traffic).</code></pre>
+
+    <div class="callout">
+      <strong>What this tells you.</strong> Instagram-at-scale is a <em>media pipeline</em> problem. The numbers scream "CDN, object store, and transcoding workers." The metadata database is modest (580 writes/sec). The social graph, feed ranking, and media delivery are the hard parts — and all of them are shaped by the bandwidth calculation above.
+    </div>
+
+    <h2>11. CAP Theorem</h2>
+
+    <p>CAP is a theorem about what happens during a network partition. It says: when the network splits, a distributed data system must choose between continuing to serve (A) and staying consistent (C). P is not optional — partitions will happen, so the real choice is <strong>CP or AP</strong>.</p>
+
+    <table>
+      <thead><tr><th>Letter</th><th>Means</th><th>Violated when</th></tr></thead>
+      <tbody>
+        <tr><td>C — Consistency</td><td>Every read sees the latest successful write (linearizable)</td><td>You return stale data to avoid blocking</td></tr>
+        <tr><td>A — Availability</td><td>Every request gets a (non-error) response</td><td>You reject or time out to preserve correctness</td></tr>
+        <tr><td>P — Partition tolerance</td><td>System keeps operating when messages are dropped between nodes</td><td>You freeze entirely when the network breaks</td></tr>
+      </tbody>
+    </table>
+
+    <h3>CP systems — give up availability under partition</h3>
+    <ul>
+      <li><strong>ZooKeeper, etcd, Consul</strong> — leader-based, refuse writes without quorum.</li>
+      <li><strong>HBase</strong> — single RegionServer owns a region; if that server is partitioned away, its region is offline.</li>
+      <li><strong>MongoDB</strong> (with majority writes) — primary only; during partition minority side is read-only or unavailable.</li>
+      <li><strong>Traditional RDBMS with sync replication.</strong></li>
+    </ul>
+
+    <h3>AP systems — give up consistency under partition</h3>
+    <ul>
+      <li><strong>Cassandra, DynamoDB, Riak</strong> — leaderless, accept writes on any reachable replica, reconcile later.</li>
+      <li><strong>CouchDB</strong> — multi-master, eventual consistency.</li>
+      <li><strong>DNS</strong> itself — the canonical AP system; different resolvers can see different answers for minutes.</li>
+    </ul>
+
+    <h3>Which to pick — by product</h3>
+    <table>
+      <thead><tr><th>Product</th><th>Pick</th><th>Why</th></tr></thead>
+      <tbody>
+        <tr><td>Banking / ledger</td><td>CP</td><td>Double-spend and phantom balances are unacceptable. Refuse to serve is safer than wrong answer.</td></tr>
+        <tr><td>Social feed / timeline</td><td>AP</td><td>A stale feed is fine; "service unavailable" is not. Users churn on errors, not on mild staleness.</td></tr>
+        <tr><td>Shopping cart</td><td>AP with conflict resolution</td><td>Always let the user add to cart (Amazon's original Dynamo paper). Resolve conflicts at checkout with "union of carts."</td></tr>
+        <tr><td>Inventory / seat booking</td><td>CP</td><td>Overselling is a direct cost. Prefer "try again" over "sorry, we sold your seat twice."</td></tr>
+        <tr><td>Chat message history</td><td>AP</td><td>Users expect to send during flaky networks; order is recoverable.</td></tr>
+        <tr><td>Feature flags / config</td><td>CP at write, AP at read</td><td>Writes are rare and must be correct; reads can tolerate seconds of staleness.</td></tr>
+      </tbody>
+    </table>
+
+    <div class="callout warn">
+      <strong>The common mistake.</strong> CAP is about behavior <em>during a partition</em>, not all the time. A "CP" system is not slow or unavailable normally — it's only unavailable during a partition. A "AP" system isn't always inconsistent — it's only inconsistent during a partition and during the reconciliation window after. Don't use CAP to argue about normal-operation latency.
+    </div>
+
+    <h2>12. PACELC</h2>
+
+    <p>CAP is silent on the common case: no partition. PACELC fills the gap: during a Partition, choose A or C; Else, during normal operation, choose L (latency) or C (consistency). Every real system is labeled by both halves.</p>
+
+    <table>
+      <thead><tr><th>System</th><th>PACELC classification</th><th>Reading</th></tr></thead>
+      <tbody>
+        <tr><td>Dynamo / Cassandra</td><td>PA / EL</td><td>Availability during partition; latency over consistency normally</td></tr>
+        <tr><td>MongoDB (default)</td><td>PA / EC</td><td>Available during partition; strong consistency normally</td></tr>
+        <tr><td>BigTable / HBase</td><td>PC / EC</td><td>Consistent always</td></tr>
+        <tr><td>PNUTS (Yahoo)</td><td>PC / EL</td><td>Consistent during partition; latency normally (timeline consistency)</td></tr>
+        <tr><td>Spanner</td><td>PC / EC</td><td>Strongly consistent always, at the cost of TrueTime waits</td></tr>
+      </tbody>
+    </table>
+
+    <p>Why it matters: the biggest cost of "strong consistency" is not partitions (which are rare) but everyday <em>latency</em>. Synchronous cross-AZ writes add milliseconds on every write. Cross-region sync writes add tens of ms. When someone says "we need strong consistency," ask: "globally, or within a region?" — those two have very different prices.</p>
+
+    <h2>13. The 5-Question Funnel for Any HLD Interview</h2>
+
+    <p>Before you draw a single box, answer five questions. Each answer constrains the next, and together they dictate the architecture.</p>
+
+    <ol>
+      <li><strong>Scale?</strong> DAU, QPS, dataset size. Small (&lt; 1K QPS) = one box. Medium (1K–100K) = sharded with replicas. Large (&gt; 100K) = multi-region.</li>
+      <li><strong>Read : Write ratio?</strong> Read-heavy (&gt; 10:1) → replicate + cache. Write-heavy (&lt; 3:1) → shard. Balanced → both.</li>
+      <li><strong>Consistency?</strong> Strong (bank), read-your-writes (user profile), eventual (feeds). Dictates sync vs async replication, leader vs leaderless, and whether you can cache.</li>
+      <li><strong>Latency target?</strong> p50 vs p99. &lt;50 ms p99 → in-region, cache hot paths, avoid long chains. &lt;300 ms → one cross-region hop OK. Human-perceivable &gt; 1 s → you can use queues liberally.</li>
+      <li><strong>Availability target?</strong> 99% (3.6 days/yr down) — single region, basic HA. 99.9% (8.8 hr) — multi-AZ, automatic failover. 99.99% (52 min) — multi-region, tested failover. 99.999% (5 min) — active-active across regions with no single control plane.</li>
+    </ol>
+
+    <div class="callout success">
+      <strong>Interview move.</strong> Start every HLD answer by asking these five. "Before I design, let me check: scale is ~100K QPS peak, read-heavy at 100:1, eventual consistency is fine for feeds but strong for posts, p99 under 200ms, 99.9% SLA. Is that right?" You just shown you think like a senior engineer.
+    </div>
+
+    <h2>14. Read : Write Patterns</h2>
+
+    <p>The read:write ratio is the single most architecture-shaping number after scale. It tells you which lever to pull first.</p>
+
+    <table>
+      <thead><tr><th>Ratio</th><th>Example</th><th>Architecture implication</th></tr></thead>
+      <tbody>
+        <tr><td>1000:1</td><td>News article, product page</td><td>CDN + cache; origin barely touched</td></tr>
+        <tr><td>100:1</td><td>Social feed, Twitter timeline</td><td>Pre-computed feeds in cache; many read replicas</td></tr>
+        <tr><td>10:1</td><td>E-commerce browse + buy</td><td>Cache hot products; primary DB handles writes</td></tr>
+        <tr><td>1:1</td><td>Chat, real-time collaboration</td><td>Partitioning matters more than caching</td></tr>
+        <tr><td>1:10</td><td>IoT telemetry, logs, metrics</td><td>Write-optimized store: LSM-tree (Cassandra, InfluxDB); no caching</td></tr>
+      </tbody>
+    </table>
+
+    <p><strong>Read-heavy → replicate.</strong> Add read replicas. Cache aggressively. Use CDN for anything public. Denormalize: store data in the shape you read.</p>
+
+    <p><strong>Write-heavy → shard.</strong> One box can't take a million writes/sec. Partition by a key that spreads load evenly. Use LSM-tree stores that turn random writes into sequential ones. Batch where possible.</p>
+
+    <p><strong>Balanced → both.</strong> You need sharding <em>and</em> replication. This is where Cassandra/DynamoDB shine: each shard has replicas, giving you both dimensions.</p>
+
+    <h2>15. Consistency Models</h2>
+
+    <p>"Strong consistency" is not one thing. There is a ladder, and each rung trades latency or availability for stronger guarantees. Know the four rungs.</p>
+
+    <table>
+      <thead><tr><th>Model</th><th>Guarantee</th><th>Use when</th></tr></thead>
+      <tbody>
+        <tr><td><strong>Strong / Linearizable</strong></td><td>Every read sees the most recent write, globally ordered</td><td>Account balances, inventory, leader election</td></tr>
+        <tr><td><strong>Read-your-writes</strong></td><td>A user always sees their own writes; others may lag</td><td>User profile edits, settings, "my posts"</td></tr>
+        <tr><td><strong>Monotonic reads</strong></td><td>A user never sees time go backwards on subsequent reads</td><td>Feed pagination, timeline scrolling</td></tr>
+        <tr><td><strong>Eventual</strong></td><td>If writes stop, all replicas eventually converge</td><td>Like counts, view counts, DNS, analytics</td></tr>
+      </tbody>
+    </table>
+
+    <p><strong>Strong.</strong> Every read goes to the leader (or through consensus). Latency: 1 RTT within region, 100+ ms across regions. Availability: drops during leader outage. Use when wrong answers are expensive in dollars.</p>
+
+    <p><strong>Read-your-writes.</strong> Route a user's reads to the leader for a short window after their write, or stash the write in a session cookie and short-circuit. Cheap and covers 80% of "it feels broken when my edit doesn't show up" cases.</p>
+
+    <p><strong>Monotonic reads.</strong> Pin a user to a replica (sticky session) so they don't jump between replicas that are at different points in the replication stream. Otherwise a user refreshing their feed can see newer items vanish.</p>
+
+    <p><strong>Eventual.</strong> The fastest and cheapest. Every replica takes writes locally, they gossip, and convergence happens in seconds. Fine for counters, fine for analytics, fine for anything where "approximately right" is right.</p>
+
+    <div class="callout">
+      <strong>A useful heuristic.</strong> Pick the weakest consistency you can get away with. Strong consistency is 10× more expensive in latency and 10× more fragile under partition. You rarely need it. When you <em>do</em> need it — money, inventory, identity — spend the cost gladly and confine it to those specific operations.
+    </div>
+
+    <h2>Chapter Summary</h2>
+    <ul>
+      <li>Distributed systems exist because one machine has five limits: CPU, RAM, disk, network, failure.</li>
+      <li>Every design is some combination of five levers: partition, replicate, cache, asynchronize, localize.</li>
+      <li>Memorize the latency table and the data-size table. They make every back-of-envelope trivial.</li>
+      <li>Six formulas cover 95% of capacity questions: QPS, peak, storage, bandwidth, servers, cache.</li>
+      <li>CAP is about partitions; PACELC adds the everyday latency-vs-consistency trade.</li>
+      <li>Start every design by answering five questions: scale, R:W, consistency, latency, availability.</li>
+      <li>Pick the weakest consistency you can get away with. Spend strong consistency only where wrong answers cost money.</li>
+    </ul>
+
+    <div class="chapter-nav">
+      <a href="index.html"><div class="label">← Previous</div><div class="title">HLD Index</div></a>
+      <a class="next" href="02-building-blocks.html"><div class="label">Next →</div><div class="title">Building Blocks</div></a>
+    </div>
+  </main>
+</div>
+<script src="../assets/js/nav.js"></script>
+</body>
+</html>

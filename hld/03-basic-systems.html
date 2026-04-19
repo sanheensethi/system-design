@@ -1,0 +1,752 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Basic Systems Progressive — Book II · HLD</title>
+<link rel="stylesheet" href="../assets/css/style.css">
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">System Design Books</div>
+    <div class="brand-sub">by Sanheen · Progressive Learning</div>
+    <div class="nav-section">
+      <h3>Home</h3>
+      <a href="../index.html">Overview</a>
+    </div>
+    <div class="nav-section">
+      <h3>Book I — Low Level Design</h3>
+      <a href="../lld/index.html">LLD Index</a>
+    </div>
+    <div class="nav-section">
+      <h3>Book II — High Level Design</h3>
+      <a href="index.html">HLD Index</a>
+      <a href="01-foundations.html">1. Foundations &amp; Capacity</a>
+      <a href="02-building-blocks.html">2. Building Blocks</a>
+      <a href="03-basic-systems.html">3. Basic Systems</a>
+      <a href="04-intermediate.html">4. Intermediate Systems</a>
+      <a href="05-advanced.html">5. Advanced Systems</a>
+      <a href="06-very-high-scale.html">6. Very High Scale</a>
+      <a href="07-war-room.html">7. War Room Scenarios</a>
+      <a href="08-real-architectures.html">8. Real Architectures</a>
+    </div>
+  </aside>
+  <main class="main">
+    <div class="breadcrumb"><a href="../index.html">Home</a> / <a href="index.html">Book II · HLD</a> / Chapter 3</div>
+    <h1>Chapter 3: Basic Systems Progressive</h1>
+
+    <p class="lede">Theory only sticks when you build something. In this chapter we design four classic warm-up systems the way a real architect does: start with a napkin sketch that runs on one laptop, break it intentionally, fix what breaks, break it again. By v6 you have production-grade. Every version is a lesson in <em>what actually matters at this scale</em>.</p>
+
+    <div class="callout">
+      <strong>How to read this chapter.</strong> Don't skip versions. The value is not the v6 diagram — the value is the <em>sequence of decisions</em> that gets you there. When you are in a real interview and the scale jumps from 1M to 100M, you want muscle memory for which component breaks first.
+    </div>
+
+    <h2>System 1 — URL Shortener (bit.ly-class)</h2>
+
+    <h3>1.1 Functional Requirements</h3>
+    <p>Before touching architecture, drill the requirements. An interviewer who asks "design bit.ly" is really asking "which variant of bit.ly?" Pin it down:</p>
+    <ul>
+      <li><strong>Shorten</strong> a long URL to a short alias (e.g. <code>https://bit.ly/3xYz9a</code>).</li>
+      <li><strong>Redirect</strong> the short alias to the original URL with low latency (HTTP 301 or 302).</li>
+      <li><strong>Custom aliases</strong> supported (paid tier) — user picks <code>bit.ly/sanheen</code>.</li>
+      <li><strong>Expiration</strong> — optional TTL (default: never expire; enterprise tier: configurable).</li>
+      <li><strong>Analytics</strong> — click counts, geo, referrer (eventual, not real-time).</li>
+      <li>Out of scope for v1: edit URL, authentication flow details, fraud/abuse scanning.</li>
+    </ul>
+
+    <h3>1.2 Non-Functional Requirements</h3>
+    <table>
+      <thead><tr><th>Dimension</th><th>Target</th><th>Why</th></tr></thead>
+      <tbody>
+        <tr><td>Scale</td><td>100M new URLs/month</td><td>Stated in the problem.</td></tr>
+        <tr><td>Read:Write ratio</td><td>100:1 (redirects dominate)</td><td>Each short URL is shared and clicked many times.</td></tr>
+        <tr><td>Redirect latency</td><td>p99 &lt; 50 ms server-side</td><td>Browser is blocked on this hop before the real page loads.</td></tr>
+        <tr><td>Availability</td><td>99.99% for redirects</td><td>A broken redirect breaks every email, tweet, and QR code in the wild.</td></tr>
+        <tr><td>Durability</td><td>No URL ever lost</td><td>Physical artifacts (business cards, signs) outlive your database.</td></tr>
+        <tr><td>Consistency</td><td>Read-your-writes on create; eventual for analytics</td><td>User must be able to copy-paste the new short URL immediately.</td></tr>
+      </tbody>
+    </table>
+
+    <h3>1.3 Capacity Estimation</h3>
+    <p>Do the math live. The interviewer is checking whether you know the arithmetic, not just the pattern.</p>
+    <pre><code>Writes:  100M / month = 100,000,000 / (30 * 86,400) ≈ 40 writes/sec avg
+         Peak burst (3x avg) ≈ 120 writes/sec
+Reads:   40 * 100 = 4,000 reads/sec avg
+         Peak (3x) ≈ 12,000 reads/sec
+
+Storage per URL row:
+  short_code (7 chars)        =   7 B
+  long_url (avg 100 B)        = 100 B
+  user_id (UUID)              =  16 B
+  created_at (int64)          =   8 B
+  expires_at (int64, null ok) =   8 B
+  custom flags / counters     =  ~10 B
+  row overhead (index ptrs)   =  ~50 B
+  ─────────────────────────────
+  total                       ≈ 200 B / row
+
+Yearly storage:  100M/month * 12 * 200 B ≈ 240 GB/year (raw)
+5-year horizon:  ~1.2 TB raw, ~2-3 TB with indexes + replicas
+
+Cache working set (hot URLs, 80/20 rule):
+  20% of 100M monthly new URLs are "hot" ≈ 20M URLs
+  20M * 200 B ≈ 4 GB — fits on a single Redis node easily</code></pre>
+
+    <div class="callout success"><strong>Takeaway.</strong> This system is <em>not</em> storage-bound or write-heavy. It is a <em>read-amplification cache problem</em>. 99% of architecture effort should target redirect latency, not write throughput.</div>
+
+    <h3>1.4 API Design</h3>
+    <pre><code>POST /api/v1/shorten
+  body: { "long_url": "...", "custom_alias": "...?", "ttl_days": 365 }
+  -&gt; 201 { "short_url": "https://bit.ly/3xYz9a", "code": "3xYz9a" }
+
+GET /{code}
+  -&gt; 301 Location: &lt;long_url&gt;        (permanent, cache-friendly)
+     or
+  -&gt; 302 Location: &lt;long_url&gt;        (temporary, forces re-resolve; better for analytics)
+
+GET /api/v1/urls/{code}/stats
+  -&gt; 200 { "clicks": 12345, "geo": {...}, "referrers": {...} }
+
+DELETE /api/v1/urls/{code}      (auth required)</code></pre>
+    <p>The 301 vs 302 choice is a real tradeoff. 301 lets browsers and CDNs cache the mapping, which kills your analytics because the second click never reaches your server. 302 forces every click through you — more load, accurate analytics. Most URL shorteners use 302 for this reason.</p>
+
+    <h3>1.5 Data Model</h3>
+    <pre><code>Table: urls
+  code          VARCHAR(10)  PRIMARY KEY
+  long_url      TEXT         NOT NULL
+  user_id       UUID         NULL
+  created_at    TIMESTAMPTZ  NOT NULL
+  expires_at    TIMESTAMPTZ  NULL
+  click_count   BIGINT       DEFAULT 0    -- hot column; move out later
+  INDEX (user_id, created_at)</code></pre>
+
+    <h3>1.6 The Short-Code Problem</h3>
+    <p>How do you generate <code>3xYz9a</code>? This is the central design question. Three candidate approaches:</p>
+    <table>
+      <thead><tr><th>Strategy</th><th>How</th><th>Pro</th><th>Con</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>Hash (MD5 / SHA-1 truncated)</td>
+          <td><code>base62(hash(long_url))[0:7]</code></td>
+          <td>Deterministic; same URL → same code (free dedup).</td>
+          <td>Collisions. Two different URLs can map to the same 7-char prefix. Need collision-retry.</td>
+        </tr>
+        <tr>
+          <td>Random code + uniqueness check</td>
+          <td>Generate random base62 string; INSERT; retry on conflict.</td>
+          <td>Simple; unpredictable codes (security).</td>
+          <td>At high fill rate, retry storm. Wasted writes.</td>
+        </tr>
+        <tr>
+          <td>Counter + base62 encode</td>
+          <td>Atomic increment of a global counter; encode to base62.</td>
+          <td>No collisions ever. Fast.</td>
+          <td>Counter is a single hot row — bottleneck at scale. Codes are sequential / guessable.</td>
+        </tr>
+        <tr>
+          <td>Key Generation Service (KGS)</td>
+          <td>Offline job pre-generates millions of unique codes into a "available" pool. Writers grab one.</td>
+          <td>Scales linearly; no collisions; codes look random if you shuffle the pool.</td>
+          <td>Needs the pool service; two failure modes (pool exhausted, double-issue).</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <p>With base62 (26 + 26 + 10 = 62 chars), a 7-char code gives 62<sup>7</sup> ≈ 3.5 trillion combinations — plenty for 100M/month for decades. A 6-char code gives 56 billion, also enough but collisions start earlier.</p>
+
+    <h3>1.7 v1: Single Machine</h3>
+    <div class="diagram"><pre>
+         ┌────────────────────┐
+ client  │   Flask / Express  │   ┌──────────────┐
+  ─────► │   app (1 process)  │──►│  Postgres    │
+         │   port 8080        │   │  (same box)  │
+         └────────────────────┘   └──────────────┘
+                    │
+                    └── short-code = base62(counter++)
+    </pre></div>
+    <p>One VM. Postgres and the app on the same box. Counter is a <code>SERIAL</code> column.</p>
+    <p><strong>What breaks.</strong> Everything. The single VM is a single point of failure. CPU maxes out at maybe 1,000 requests/sec. A reboot kills every user. No caching → every redirect is a DB query.</p>
+
+    <h3>1.8 v2: Load Balancer + Replicated App Servers</h3>
+    <div class="diagram"><pre>
+                    ┌───► app-1 ──┐
+ client  ─► ALB ────┼───► app-2 ──┼──► Postgres (primary)
+                    └───► app-3 ──┘           │
+                                              ▼
+                                       Postgres (replica, read)
+    </pre></div>
+    <p>Three stateless app servers behind an ALB. Postgres primary for writes, one read replica for redirects.</p>
+    <p><strong>What breaks now.</strong></p>
+    <ul>
+      <li>Every redirect is still a DB round-trip. At 12k req/s peak, the replica is choking.</li>
+      <li>The counter is a hot row — all 3 app servers contend on <code>SELECT nextval</code>.</li>
+      <li>Replica lag means a freshly-shortened URL might 404 for the first 200ms of its life. Users notice.</li>
+    </ul>
+
+    <h3>1.9 v3: Add Cache (Redis)</h3>
+    <div class="diagram"><pre>
+                    ┌───► app-1 ──┐
+ client  ─► ALB ────┼───► app-2 ──┼──► Redis (hot codes)
+                    └───► app-3 ──┘       │   miss
+                                          ▼
+                                   Postgres primary/replica
+    </pre></div>
+    <p>Redis sits in front of the DB. On <code>GET /{code}</code>, check Redis; on miss, query DB, populate Redis, return. LRU eviction, TTL = 24h.</p>
+    <p>With 4 GB of working set and 80/20, cache hit rate will stabilize at 90%+. Redis handles 100k ops/sec trivially, so the DB load drops from 12k to ~1.2k req/s — manageable on one replica.</p>
+    <p><strong>What breaks now.</strong></p>
+    <ul>
+      <li>Cold start / cache flush = thundering herd. 12k simultaneous misses slam Postgres.</li>
+      <li>Counter contention on writes gets worse as writes grow.</li>
+      <li>All data in a single Postgres — 3 TB in 5 years, backups take hours, a schema migration locks the table.</li>
+      <li>One Redis node is still a single point of failure for reads.</li>
+    </ul>
+
+    <h3>1.10 v4: Shard the DB + Key Generation Service</h3>
+    <div class="diagram"><pre>
+            ┌──► app ──► Redis ──┬──► Postgres shard 0   (codes starting a-h)
+ client ──► ALB               │  ├──► Postgres shard 1   (codes starting i-p)
+            │                 │  └──► Postgres shard 2   (codes starting q-z,0-9)
+            │                 │
+            │                 └── miss triggers shard lookup by code prefix
+            │
+            └── POST ──► KGS cluster ──► pre-allocated code pool
+                        (6 nodes, each owns a code range)
+    </pre></div>
+    <p>Two big changes:</p>
+    <ol>
+      <li><strong>Sharding by hash(code).</strong> Consistent hashing across 3 (later N) Postgres shards. Each shard has its own primary + 2 replicas. Router computes <code>shard_id = hash(code) % N</code>.</li>
+      <li><strong>Key Generation Service.</strong> Separate service generates codes in batches, persists "unused" and "used" pools. Each app instance leases a batch of 1000 codes at a time — no counter contention.</li>
+    </ol>
+    <p><strong>What breaks now.</strong></p>
+    <ul>
+      <li>Analytics writes (click logging) happen on every redirect = 12k writes/sec to the DB. That was supposed to be eventual.</li>
+      <li>Cross-region latency — a user in Tokyo hitting a US-hosted shortener adds 150ms RTT before the first byte.</li>
+      <li>Expiration cleanup is an expensive scan across all shards.</li>
+    </ul>
+
+    <h3>1.11 v5: CDN Edge + Async Analytics + Multi-Region</h3>
+    <div class="diagram"><pre>
+   Tokyo user ─► CDN edge (Tokyo) ──┬── cache hit: 301/302 in &lt;10ms
+                                     │
+                                     └── cache miss
+                                         │
+                                         ▼
+ ┌──────────── Region: us-east-1 ──────────────┐    ┌─── Region: ap-northeast-1 ───┐
+ │  ALB → app → Redis → Postgres shards         │◄──►│  (active-active, async repl) │
+ │                │                              │    │                              │
+ │                └── fire-and-forget click ─────┼───►│  Kafka → analytics pipeline  │
+ └──────────────────────────────────────────────┘    └──────────────────────────────┘
+    </pre></div>
+    <ul>
+      <li><strong>CDN at the edge</strong> caches the 301 response with a short TTL (60s). Redirects resolve in &lt;10 ms for most users.</li>
+      <li><strong>Analytics goes async.</strong> App writes click events to Kafka (fire-and-forget). A consumer aggregates into a separate analytics DB. The hot path never touches the analytics store.</li>
+      <li><strong>Multi-region write.</strong> KGS assigns non-overlapping code ranges per region to avoid collisions without cross-region coordination.</li>
+      <li><strong>Expiration via TTL partitions</strong> — Postgres tables partitioned by <code>expires_at</code> week. Dropping a partition is O(1).</li>
+    </ul>
+
+    <h3>1.12 v6: Production-Grade</h3>
+    <div class="diagram"><pre>
+         ┌─ Anycast DNS (Route 53) ──┐
+         │                           │
+    ┌────▼─────┐   ┌─────▼────┐  ┌───▼─────┐
+    │ CDN (CF) │   │ CDN (CF) │  │ CDN(CF) │   3 pops shown; 200+ in reality
+    └────┬─────┘   └────┬─────┘  └────┬────┘
+         │              │             │
+    ┌────▼──────────────▼─────────────▼────┐
+    │         Regional API Gateways         │
+    │    (rate limit, auth, WAF, SSL term)  │
+    └────┬────────────┬─────────────────┬───┘
+         │            │                 │
+    ┌────▼────┐  ┌────▼────┐       ┌────▼────┐
+    │app pool │  │app pool │  ...  │app pool │   auto-scaled ECS/K8s
+    └──┬───┬──┘  └──┬───┬──┘       └──┬───┬──┘
+       │   │        │   │              │   │
+       ▼   ▼        ▼   ▼              ▼   ▼
+    Redis  Kafka  Redis  Kafka       Redis  Kafka
+    Cluster Topic Cluster Topic      Cluster Topic
+       │            │                    │
+       ▼            ▼                    ▼
+    ┌── Postgres sharded cluster (Vitess / Citus) ──┐
+    │   64 shards, 3 replicas each, multi-AZ         │
+    └────────────────────────────────────────────────┘
+                      │
+                      ▼
+              KGS cluster (Zookeeper-coordinated
+              code-range leases, hot standby)
+
+              ▼ async ▼
+     Kafka ─► Flink ─► ClickHouse (analytics)
+    </pre></div>
+
+    <p><strong>Operational details that matter.</strong></p>
+    <ul>
+      <li>Redirects target p99 &lt; 20 ms. CDN hit rate &gt; 95%.</li>
+      <li>KGS leases 100k codes to each app node; node restart loses at most 100k unused codes (fine — 62<sup>7</sup> is cheap).</li>
+      <li>Postgres shards use bloom filters for fast "does this code exist" checks before full lookup.</li>
+      <li>Blue-green deploys; canary 1% traffic for new app versions.</li>
+      <li>Runbook: if Redis cluster fails, app falls through to DB with rate limit on the fallthrough to prevent cascading failure (see Chapter 7, Thundering Herd).</li>
+    </ul>
+
+    <div class="callout warn"><strong>Interview red flag.</strong> Candidates often over-engineer v1. Do not draw 64 shards when the interviewer asks about 10k URLs/day. Match the architecture to the stated scale, then extend.</div>
+
+    <h2>System 2 — Pastebin</h2>
+
+    <h3>2.1 Functional Requirements</h3>
+    <ul>
+      <li>User pastes text (up to 1 MB). Service returns a short URL.</li>
+      <li>Anyone with the URL can read the paste.</li>
+      <li>Pastes expire (default 7 days; user can pick 10 min, 1 hour, 1 day, 1 week, 1 month, never).</li>
+      <li>Privacy: public, unlisted (URL-only), private (auth required).</li>
+      <li>Syntax highlighting (client-side render; server stores raw text).</li>
+    </ul>
+
+    <h3>2.2 Non-Functional Requirements</h3>
+    <table>
+      <thead><tr><th>Dimension</th><th>Target</th></tr></thead>
+      <tbody>
+        <tr><td>New pastes / day</td><td>1,000,000</td></tr>
+        <tr><td>Read:Write ratio</td><td>5:1 (pastes are read fewer times than URL shortener links)</td></tr>
+        <tr><td>Avg paste size</td><td>10 KB (code snippet); p99 1 MB</td></tr>
+        <tr><td>Retention horizon</td><td>5 years; most pastes expire in days</td></tr>
+        <tr><td>Read latency</td><td>p99 &lt; 300 ms (paste is a full page, not a redirect)</td></tr>
+      </tbody>
+    </table>
+
+    <h3>2.3 Capacity Estimation</h3>
+    <pre><code>Writes:  1M / 86,400 ≈ 12 writes/sec avg; 35 peak
+Reads:   5M / 86,400 ≈ 58 reads/sec avg; 175 peak
+
+Daily data volume:
+  1M pastes * 10 KB avg = 10 GB / day = 3.6 TB / year
+  With 5-year horizon and not all expire: ~10-15 TB of paste bodies
+
+Metadata (much smaller):
+  1M * 500 B row ≈ 500 MB / day = 180 GB / year
+  Fits comfortably in a single Postgres.
+
+Observation: we have a SIZE problem, not a QPS problem.
+10 KB paste * 58 reads/sec ≈ 580 KB/sec ≈ 5 Mbps. Trivial bandwidth.
+
+BUT: a single Postgres row of 1 MB is pathological.
+Big TEXT columns force TOAST, kill cache locality, make backups slow.</code></pre>
+
+    <div class="callout"><strong>Key insight.</strong> Pastebin is a URL shortener where the "long value" is no longer a URL — it's a blob. Store blobs in blob storage, not in your OLTP database. The architecture divergence starts right here.</div>
+
+    <h3>2.4 API Design</h3>
+    <pre><code>POST /api/v1/paste
+  body: { "content": "...", "ttl": "1w", "privacy": "unlisted", "lang": "python" }
+  -&gt; 201 { "url": "https://paste.io/3xYz9a", "code": "3xYz9a", "expires_at": "..." }
+
+GET /{code}          (HTML render)
+GET /raw/{code}      (plain text, Content-Type: text/plain)
+GET /api/v1/paste/{code}   (JSON: content + metadata)
+DELETE /api/v1/paste/{code}   (auth required)</code></pre>
+
+    <h3>2.5 Data Model</h3>
+    <pre><code>Table: pastes          (metadata only, in Postgres)
+  code         VARCHAR(10)  PRIMARY KEY
+  s3_key       VARCHAR(200) NOT NULL    -- "pastes/2025/11/19/3xYz9a"
+  size_bytes   INTEGER
+  lang         VARCHAR(20)
+  privacy      ENUM('public','unlisted','private')
+  user_id      UUID NULL
+  created_at   TIMESTAMPTZ
+  expires_at   TIMESTAMPTZ                 -- indexed for cleanup
+  INDEX (expires_at) WHERE expires_at IS NOT NULL
+
+Blob:  S3/GCS, key = s3_key above, content = paste body (gzip compressed)</code></pre>
+
+    <h3>2.6 v1: Single Box, Everything Local</h3>
+    <div class="diagram"><pre>
+ client ─► app (flask) ─► Postgres (content in TEXT column)
+    </pre></div>
+    <p><strong>What breaks.</strong> Storing 1MB blobs in Postgres TEXT. Database bloats fast. Backups become painful. A single paste request with 1MB body takes a server thread hostage while writing to the DB.</p>
+
+    <h3>2.7 v2: App Replicas + DB + Object Storage</h3>
+    <div class="diagram"><pre>
+                    ┌─► app-1 ─┐                ┌────────────┐
+ client ─► ALB  ────┼─► app-2 ─┼── metadata ──►│ Postgres   │
+                    └─► app-3 ─┘               └────────────┘
+                         │
+                         └── body ──────────────►┌────────────┐
+                                                 │  S3 bucket │
+                                                 └────────────┘
+    </pre></div>
+    <p>Separate the blob from the metadata. App uploads content to S3, stores only the S3 key in Postgres. This is <em>the</em> defining move for any content-hosting system.</p>
+    <p><strong>What breaks.</strong></p>
+    <ul>
+      <li>Every read does metadata lookup + S3 fetch = two network hops. Slow.</li>
+      <li>No caching — same hot paste hit 1000 times means 1000 S3 reads.</li>
+      <li>Expired pastes pile up in S3; cost grows forever without cleanup.</li>
+    </ul>
+
+    <h3>2.8 v3: Add Cache</h3>
+    <div class="diagram"><pre>
+    client ─► ALB ─► app ─┬─ Redis (paste body, TTL 1h) ── hit
+                          │
+                          └── miss: Postgres (metadata) + S3 (body) → populate Redis
+    </pre></div>
+    <p>Cache the <em>body</em> in Redis with a short TTL. For pastes &gt; 200 KB, skip the cache (don't blow memory on cold pastes).</p>
+    <p><strong>What breaks.</strong></p>
+    <ul>
+      <li>Expiration handling. The background sweeper that deletes expired pastes is a nightly cron — but at 1M pastes/day, scanning the whole table is slow.</li>
+      <li>S3 read latency to users in other continents.</li>
+    </ul>
+
+    <h3>2.9 v4: Shard + Partition by Expiration</h3>
+    <p>Rather than sharding by code, we partition the <code>pastes</code> table by <code>DATE_TRUNC('day', expires_at)</code>. To clean up, simply <code>DROP PARTITION</code> — O(1) reclaim. S3 objects use the same date-prefixed key, so an S3 lifecycle rule can expire them independently.</p>
+    <pre><code>S3 key format:  pastes/YYYY/MM/DD/{code}
+S3 lifecycle:   delete objects older than &lt;max_retention&gt; days
+Postgres:       range partition on expires_at (1 partition per week)</code></pre>
+
+    <h3>2.10 v5: CDN for Raw, Async Cleanup, Multi-Region</h3>
+    <div class="diagram"><pre>
+                 ┌─ CDN pops (cache /raw/{code} for 10 min) ─┐
+ client (global) ┤                                            ├─► regional ALBs
+                 └───────────────────────────────────────────┘
+                                                      │
+                                   ┌──── region A ────┤──── region B ────┐
+                                   │                  │                  │
+                                  app              app              app
+                                   │                  │                  │
+                                 Redis            Redis            Redis
+                                   │                  │                  │
+                                 PG shards        PG shards        PG shards
+                                 S3 bucket (cross-region replication for enterprise tier)
+
+ async:  Kafka topic "paste_expired" ─► worker deletes S3 objects + metadata row
+    </pre></div>
+    <ul>
+      <li>Raw paste URLs are cacheable by CDN (paste body is immutable).</li>
+      <li>Async expiration worker reads the nearest-expiring partition and enqueues delete events.</li>
+      <li>Enterprise tier users get cross-region replication on S3 (extra cost).</li>
+    </ul>
+
+    <h3>2.11 v6: Production-Grade</h3>
+    <div class="diagram"><pre>
+   ┌── CloudFront / Fastly (CDN) ──┐
+   │  /raw/{code} cached 10 min    │
+   └────────────┬──────────────────┘
+                │
+        ┌───────▼────────┐
+        │  API Gateway   │  (rate limit, abuse detection, spam filter)
+        └───────┬────────┘
+                │
+      ┌─────────┼─────────┐
+      ▼         ▼         ▼
+   app pool  app pool  app pool
+      │         │         │
+      └────┬────┴────┬────┘
+           ▼         ▼
+        Redis    S3 (blob, versioned, lifecycle rules)
+           │
+        Postgres (Citus / Vitess)
+        partitioned by week of expires_at
+           │
+        ┌──┴──┐
+        ▼     ▼
+   primary  replicas
+           │
+        Kafka ─► Expiration Worker ─► deletes S3 + row
+                 Abuse Scanner      ─► quarantines matched content
+                 Analytics pipeline ─► reads/day, top langs, etc.
+    </pre></div>
+
+    <p><strong>Extras worth mentioning in interview:</strong> abuse/malware scanning (fire off hash to VirusTotal on upload), syntax auto-detection (cheap server-side heuristic, full highlight client-side), Tor/abuse rate limits, optional end-to-end encryption where the key lives in the URL fragment (<code>#key</code>) and never hits the server.</p>
+
+    <h2>System 3 — Distributed Rate Limiter</h2>
+
+    <h3>3.1 Functional Requirements</h3>
+    <ul>
+      <li>Reject requests above a per-user threshold (e.g. 100 req/min for free tier, 1000 req/min for paid).</li>
+      <li>Work across many app servers (a user's requests can land on any of N hosts).</li>
+      <li>Support multiple dimensions: per-user, per-IP, per-endpoint, global.</li>
+      <li>Return HTTP 429 with <code>Retry-After</code> and <code>X-RateLimit-Remaining</code> headers.</li>
+      <li>Fail-open: if the rate limiter itself is down, do not brick the API.</li>
+    </ul>
+
+    <h3>3.2 Non-Functional Requirements</h3>
+    <table>
+      <thead><tr><th>Dimension</th><th>Target</th></tr></thead>
+      <tbody>
+        <tr><td>Throughput</td><td>1M req/sec across the fleet</td></tr>
+        <tr><td>Added latency</td><td>p99 &lt; 2 ms (it's on every request)</td></tr>
+        <tr><td>Accuracy</td><td>±5% over the window is acceptable</td></tr>
+        <tr><td>Availability</td><td>Better than the API it protects. Fail-open on outage.</td></tr>
+      </tbody>
+    </table>
+
+    <h3>3.3 Algorithm Choice</h3>
+    <table>
+      <thead><tr><th>Algorithm</th><th>How</th><th>Pro</th><th>Con</th></tr></thead>
+      <tbody>
+        <tr><td>Fixed window</td><td>Count requests in current minute; reset at minute boundary.</td><td>Trivial to implement.</td><td>Bursty at boundaries: user can send 2x limit in the 2 seconds straddling a minute.</td></tr>
+        <tr><td>Sliding window log</td><td>Store every request timestamp; count within window.</td><td>Exact.</td><td>Memory grows with request rate. Expensive.</td></tr>
+        <tr><td>Sliding window counter</td><td>Weighted blend of current and previous window counts.</td><td>O(1) memory; smooths boundary effect.</td><td>Approximate (good enough in practice).</td></tr>
+        <tr><td>Token bucket</td><td>Bucket holds N tokens; refills at rate R/sec; request costs 1 token.</td><td>Natural burst allowance (up to bucket size); O(1) state.</td><td>Must store token count + last refill timestamp per key.</td></tr>
+        <tr><td>Leaky bucket</td><td>Requests queue in bucket; drain at fixed rate; overflow is dropped.</td><td>Smooth output rate.</td><td>Requires actual queue; unusual for HTTP APIs.</td></tr>
+      </tbody>
+    </table>
+    <p>Token bucket is the industry default for HTTP rate limiting. It allows bursts (which real traffic has) while enforcing a long-run average.</p>
+
+    <h3>3.4 v1: In-Memory Per-Process</h3>
+    <p>Each app server has a hashmap: <code>user_id -&gt; (tokens, last_refill_ts)</code>. Check and decrement locally.</p>
+    <p><strong>What breaks.</strong> The user's request can hit app-1 and then app-2; each sees only its local slice. Effective limit becomes <code>configured_limit * N_servers</code>. Wrong.</p>
+
+    <h3>3.5 v2: Central Redis with INCR</h3>
+    <pre><code>on request from user U:
+   key = "rl:{U}:{minute_bucket}"
+   count = INCR key
+   if count == 1: EXPIRE key 60
+   if count &gt; limit: return 429</code></pre>
+    <p>This is a <strong>fixed-window counter</strong>, cheapest possible correct rate limiter.</p>
+    <p><strong>What breaks.</strong> Boundary bursting. User can send 100 at 12:00:59 and 100 at 12:01:00 — 200 requests in 2 seconds, all allowed. Also, INCR + EXPIRE is two round-trips (use Lua or pipeline).</p>
+
+    <h3>3.6 v3: Token Bucket with Lua Script</h3>
+    <p>Atomicity across read-modify-write is non-negotiable. Redis Lua scripts are executed atomically.</p>
+    <pre><code>-- rate_limit.lua: returns 1 if allowed, 0 if rate-limited
+local key        = KEYS[1]
+local rate       = tonumber(ARGV[1])   -- tokens per second
+local capacity   = tonumber(ARGV[2])   -- bucket size
+local now        = tonumber(ARGV[3])   -- ms since epoch
+local cost       = tonumber(ARGV[4])   -- tokens for this request (usually 1)
+
+local bucket = redis.call("HMGET", key, "tokens", "ts")
+local tokens = tonumber(bucket[1]) or capacity
+local ts     = tonumber(bucket[2]) or now
+
+local delta  = math.max(0, now - ts) / 1000.0
+tokens = math.min(capacity, tokens + delta * rate)
+
+local allowed = 0
+if tokens &gt;= cost then
+  tokens = tokens - cost
+  allowed = 1
+end
+
+redis.call("HMSET", key, "tokens", tokens, "ts", now)
+redis.call("EXPIRE", key, 3600)
+return { allowed, tokens }</code></pre>
+
+    <p>Call from the app:</p>
+    <pre><code>local result = redis.evalsha(sha, keys=["rl:user:42"],
+                             args=[rate, capacity, now_ms, 1])
+if result[0] == 0: return 429</code></pre>
+
+    <h3>3.7 v4: Tier-Aware, Multi-Dimension</h3>
+    <p>Real systems have multiple simultaneous limits. Example for a paid user:</p>
+    <ul>
+      <li>100 req/sec global (burst up to 200)</li>
+      <li>10 req/sec to <code>/search</code></li>
+      <li>1000 req/min to <code>/write</code></li>
+      <li>50 req/sec per IP (anti-abuse, even for paid)</li>
+    </ul>
+    <p>Each dimension gets its own bucket. Request is allowed only if <em>every</em> applicable bucket has tokens. Decrement all on allow; decrement none on deny.</p>
+    <pre><code>Config pattern (declarative):
+  limits:
+    - key: "global:{user_id}"       rate: 100/s    burst: 200
+    - key: "route:search:{user_id}" rate: 10/s     burst: 20
+    - key: "route:write:{user_id}"  rate: 1000/m   burst: 1000
+    - key: "ip:{ip}"                rate: 50/s     burst: 100</code></pre>
+
+    <h3>3.8 v5: Redis Cluster + Local Cache + Fail-Open</h3>
+    <div class="diagram"><pre>
+ request
+   │
+   ▼
+  app  ── check local token cache (lease of 10 tokens)
+   │
+   │    every N ms, reconcile with ─►  Redis cluster (sharded by key)
+   │                                    │
+   │                                    └── replica for HA
+   │
+   └── on Redis timeout (50ms) → fail-open + log
+    </pre></div>
+    <ul>
+      <li><strong>Redis Cluster</strong> so no single Redis is the bottleneck. Shard by rate-limit key hash.</li>
+      <li><strong>Local lease cache.</strong> Each app leases a small batch of tokens (say 10) from Redis and decrements locally until depleted, then re-leases. Cuts Redis traffic by 10x at the cost of slight over-allowance.</li>
+      <li><strong>Fail-open.</strong> If Redis is unreachable within 50 ms, allow the request and emit a metric. Rate limiter downtime must not cause API downtime.</li>
+    </ul>
+
+    <h3>3.9 v6: Production-Grade (what real companies run)</h3>
+    <ul>
+      <li><strong>Two-tier architecture.</strong> Edge (CDN / L7 proxy) does cheap IP-based rate limiting and bot filtering. Core app does user-aware, tier-aware token bucket.</li>
+      <li><strong>Dynamic configuration.</strong> Limits pushed from a control plane (Consul / etcd) without app restart.</li>
+      <li><strong>Quota observability.</strong> Every response carries <code>X-RateLimit-Limit</code>, <code>X-RateLimit-Remaining</code>, <code>X-RateLimit-Reset</code>. Users who know they're near the limit back off gracefully.</li>
+      <li><strong>Audit log.</strong> Every 429 is logged (aggregated) so abuse patterns surface before they become incidents.</li>
+      <li><strong>Adaptive rate limiting.</strong> During DB stress, automatically tighten limits (see Chapter 7 on overload).</li>
+    </ul>
+
+    <div class="callout danger"><strong>Pitfall.</strong> Do not put your rate limiter behind itself. Health checks, internal service-to-service calls, and the rate limiter's own control plane must bypass the limit, or you get self-inflicted outages the moment traffic spikes.</div>
+
+    <h2>System 4 — Dynamo-Style Key-Value Store</h2>
+
+    <p>This is the big one in this chapter. The Dynamo paper (2007) defined the blueprint for every modern NoSQL store: Cassandra, Riak, Voldemort, ScyllaDB, and of course DynamoDB itself. If you understand the six tricks inside this system, you understand half of distributed databases.</p>
+
+    <h3>4.1 Functional Requirements</h3>
+    <ul>
+      <li><code>put(key, value)</code> — store a blob (up to ~1 MB).</li>
+      <li><code>get(key)</code> — return the current (or most recent) value.</li>
+      <li><code>delete(key)</code> — tombstone the key.</li>
+      <li>Tunable consistency per operation.</li>
+      <li>No secondary indexes, no range scans (v1). Just key lookup.</li>
+    </ul>
+
+    <h3>4.2 Non-Functional Requirements</h3>
+    <table>
+      <thead><tr><th>Dimension</th><th>Target</th></tr></thead>
+      <tbody>
+        <tr><td>Availability</td><td>99.999% — always writeable, even during partitions</td></tr>
+        <tr><td>Latency</td><td>p99 &lt; 10 ms for get/put in one region</td></tr>
+        <tr><td>Scale</td><td>Petabytes total; millions of ops/sec</td></tr>
+        <tr><td>Consistency</td><td>Eventual by default, tunable (R/W/N quorum)</td></tr>
+        <tr><td>Partition tolerance</td><td>Required. We choose AP in CAP terms.</td></tr>
+      </tbody>
+    </table>
+
+    <h3>4.3 v1: Single Node</h3>
+    <p>A single Go process with a <code>map[string][]byte</code> backed by RocksDB for persistence. Works. Fails the first time the box reboots.</p>
+
+    <h3>4.4 v2: Two Nodes, Primary-Replica</h3>
+    <p>Active-passive replication. Reads go anywhere, writes to primary only. Primary failure = manual failover. Still one point of write. Not Dynamo.</p>
+
+    <h3>4.5 v3: Consistent Hashing Ring</h3>
+    <p>The first real Dynamo idea. Every node is placed on a 2<sup>128</sup> ring at positions determined by hash of node ID. Every key is placed on the ring at <code>hash(key)</code>. The key's owner is the first node clockwise from its position.</p>
+
+    <div class="diagram"><pre>
+        Node-A (hash 0x10)
+          /               \
+      key1 (0x15)        Node-D (0xF0)
+        │                   │
+      Node-B (0x50)        key3 (0xEE)
+        │                   │
+      key2 (0x7A)         Node-C (0xA0)
+           \             /
+             ───────────
+ Going clockwise from hash(key):
+   key1 (0x15) → owner Node-B
+   key2 (0x7A) → owner Node-C
+   key3 (0xEE) → owner Node-D
+    </pre></div>
+
+    <p>Add a node: only the keys between the new node and its predecessor on the ring get reshuffled. Remove a node: its range passes to the next node clockwise. No global reshuffle.</p>
+
+    <p><strong>Virtual nodes (vnodes).</strong> Naive consistent hashing has uneven load. Fix: each physical node owns hundreds of tokens (vnodes) spread across the ring. Smooths distribution and lets node capacity be proportional to how many vnodes it holds.</p>
+
+    <h3>4.6 v4: Replication — N Copies</h3>
+    <p>Each key is stored on <code>N</code> consecutive nodes clockwise on the ring (the preference list). Typical N = 3. One is the coordinator; the other two are replicas.</p>
+    <pre><code>Write path (put):
+  1. Coordinator (first node in preference list) receives put.
+  2. Writes locally.
+  3. Forwards to N-1 other nodes in preference list in parallel.
+  4. Waits for W acks (including its own) before replying OK.
+
+Read path (get):
+  1. Coordinator queries N replicas in parallel.
+  2. Waits for R responses.
+  3. Returns the latest (by vector clock). Kicks off read-repair for stale replicas.</code></pre>
+
+    <h3>4.7 Quorum: the R + W &gt; N Rule</h3>
+    <p>Let N be the number of replicas, W the write quorum, R the read quorum. If R + W &gt; N, every read and every write overlap in at least one node, so reads see the most recent write — <em>strong consistency</em>. If R + W ≤ N, no overlap guarantee — <em>eventual consistency</em>, but lower latency and higher availability.</p>
+    <table>
+      <thead><tr><th>(N, W, R)</th><th>Property</th><th>Use case</th></tr></thead>
+      <tbody>
+        <tr><td>(3, 3, 1)</td><td>Fast reads, slow writes, strong read consistency</td><td>Config / metadata stores read 100x more than written</td></tr>
+        <tr><td>(3, 1, 3)</td><td>Fast writes, slow reads, strong</td><td>Write-heavy logs with occasional strong reads</td></tr>
+        <tr><td>(3, 2, 2)</td><td>Balanced. Both R + W &gt; N.</td><td>Default. DynamoDB, Cassandra <code>QUORUM</code>.</td></tr>
+        <tr><td>(3, 1, 1)</td><td>R + W = 2 ≤ 3. Eventual.</td><td>High availability session stores.</td></tr>
+      </tbody>
+    </table>
+
+    <h3>4.8 Vector Clocks (concurrent writes)</h3>
+    <p>Because writes can arrive at different replicas from different clients, two concurrent <code>put</code>s may produce conflicting versions. A vector clock is a map <code>{node_id -&gt; counter}</code> attached to every value. On write at node X, increment <code>X</code>'s counter in the clock.</p>
+    <pre><code>Client A:  put("cart", {items:[X]})  → coord node-1 → clock {1:1}
+Client B:  put("cart", {items:[Y]})  → coord node-2 → clock {2:1}
+         (network partition; both succeed locally)
+
+When client reads after partition heals:
+  sees two versions with clocks {1:1} and {2:1}
+  neither descends from the other → conflict
+  client (or app) must reconcile. Dynamo's shopping cart merges set-union.</code></pre>
+    <p>Vector clock comparison: clock A dominates B iff every counter in A ≥ the same counter in B, and at least one is strictly greater. If neither dominates, the versions are <em>concurrent</em> (a conflict).</p>
+
+    <h3>4.9 Gossip for Membership</h3>
+    <p>Nodes do not rely on a central registry. Every second, each node picks a random peer and exchanges its view of the ring (which nodes are up, their vnodes). After O(log N) rounds, the whole cluster converges. Cheap, robust, survives arbitrary node churn.</p>
+
+    <h3>4.10 Hinted Handoff (handling transient failures)</h3>
+    <p>A write quorum can't complete if a replica is temporarily down. Rather than failing, the coordinator writes to the next healthy node on the ring with a <em>hint</em> saying "this really belongs to node-X; hand it off when X comes back". Preserves W acks during brief outages.</p>
+    <pre><code>Preference list for key K: [A, B, C]
+  B is down at write time.
+  Coordinator A writes to A (self), then to C (self-replica), then to D (B's stand-in) with hint "for B".
+  When B rejoins, D pushes the hinted data to B and discards its hint.</code></pre>
+
+    <h3>4.11 Merkle Trees (anti-entropy)</h3>
+    <p>Hints are lost if the stand-in dies. To catch up replicas that drifted, replicas periodically exchange Merkle trees of their data ranges. Only subtrees with mismatched hashes are compared deeper, ultimately transferring only the rows that differ. O(diff) network rather than O(N).</p>
+
+    <h3>4.12 v5: Multi-Region Replication</h3>
+    <div class="diagram"><pre>
+   Region us-east-1 ring         Region eu-west-1 ring
+   ┌──────────────────────┐      ┌──────────────────────┐
+   │  12 nodes, N=3, vnodes│◄────►│  12 nodes, N=3, vnodes│
+   │  local quorum writes │      │                      │
+   └──────┬───────────────┘      └────┬─────────────────┘
+          │  async cross-region replication (LWW or CRDT)
+          │
+          └── per-region reads are always local and fast
+    </pre></div>
+    <p>Cross-region writes are async. Local quorum wins. Conflict resolution happens with vector clocks + application-level merge. For true global strong consistency you'd move to Spanner-style (Chapter 5).</p>
+
+    <h3>4.13 v6: Production Architecture</h3>
+    <div class="diagram"><pre>
+                 client SDK (smart — knows ring, picks coordinator)
+                        │
+                        ▼
+      ┌─────────────── ring (100+ nodes, 256 vnodes each) ─────────────────┐
+      │                                                                    │
+      │   node = coordinator for keys in its range                         │
+      │   every put → W acks → success                                     │
+      │   every get → R responses → merge by vector clock → read-repair    │
+      │                                                                    │
+      │   gossip every 1 s for membership                                   │
+      │   anti-entropy via Merkle trees every hour                          │
+      │   hinted handoff for transient failures                             │
+      │                                                                    │
+      └────────────────────────────────────────────────────────────────────┘
+                        │
+                        ├──► per-node storage:  memtable (in-mem) +
+                        │                        commit log (WAL) +
+                        │                        SSTables (RocksDB / LevelDB)
+                        │                        Bloom filters on SSTables
+                        │                        compaction in background
+                        │
+                        └──► metrics / control plane (quorum changes, rebalancing)
+    </pre></div>
+
+    <h3>4.14 Storage Engine (why LSM beats B-Tree here)</h3>
+    <p>Writes go to WAL + in-memory memtable. When memtable hits a size threshold, flushed to disk as an immutable SSTable. Reads check memtable, then SSTables newest-first (bloom filters skip the ones that can't contain the key). Background compaction merges SSTables. Result: write-optimized, sequential I/O, predictable tail latency. Almost every Dynamo-class store uses LSM.</p>
+
+    <h3>4.15 Tradeoffs Summary</h3>
+    <table>
+      <thead><tr><th>Choice</th><th>Gives up</th><th>Buys</th></tr></thead>
+      <tbody>
+        <tr><td>Consistent hashing</td><td>Rebalance complexity on add/remove</td><td>Linear scale, no reshuffle storms</td></tr>
+        <tr><td>Quorum R+W&gt;N</td><td>Latency</td><td>Strong consistency without a leader</td></tr>
+        <tr><td>Vector clocks</td><td>Conflict push to client</td><td>Always-writeable during partitions</td></tr>
+        <tr><td>Gossip</td><td>Slow convergence in huge clusters</td><td>No central coordinator to lose</td></tr>
+        <tr><td>Hinted handoff</td><td>Temporarily over-allocates disk</td><td>Maintains quorum during transient blips</td></tr>
+        <tr><td>LSM storage</td><td>Slower reads without cache</td><td>Massive write throughput, SSD-friendly</td></tr>
+      </tbody>
+    </table>
+
+    <div class="callout success"><strong>End of chapter.</strong> These four systems are deceptively simple, but they contain every primitive you need for the heavier systems in the next chapter: sharding, caching, quorum, async pipelines, and CDN offload. If you can draw all four v6 diagrams from memory, you are ready for Chapter 4.</div>
+
+    <div class="chapter-nav">
+      <a href="02-building-blocks.html"><div class="label">← Previous</div><div class="title">2. Building Blocks</div></a>
+      <a class="next" href="04-intermediate.html"><div class="label">Next →</div><div class="title">4. Intermediate Systems</div></a>
+    </div>
+  </main>
+</div>
+<script src="../assets/js/nav.js"></script>
+</body>
+</html>

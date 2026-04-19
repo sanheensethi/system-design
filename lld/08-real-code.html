@@ -1,0 +1,568 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Real Company Code — Book I · LLD</title>
+<link rel="stylesheet" href="../assets/css/style.css">
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">System Design Books</div>
+    <div class="brand-sub">by Sanheen · Progressive Learning</div>
+    <div class="nav-section">
+      <h3>Home</h3>
+      <a href="../index.html">Overview</a>
+    </div>
+    <div class="nav-section">
+      <h3>Book I — Low Level Design</h3>
+      <a href="index.html">LLD Index</a>
+      <a href="01-foundations.html">1. Foundations (OOP, SOLID)</a>
+      <a href="02-patterns.html">2. Design Patterns Primer</a>
+      <a href="03-basic-problems.html">3. Basic Problems</a>
+      <a href="04-intermediate.html">4. Intermediate Problems</a>
+      <a href="05-advanced.html">5. Advanced Problems</a>
+      <a href="06-concurrency.html">6. Concurrency in LLD</a>
+      <a href="07-war-room.html">7. War Room Scenarios</a>
+      <a href="08-real-code.html">8. Real Company Code</a>
+    </div>
+    <div class="nav-section">
+      <h3>Book II — High Level Design</h3>
+      <a href="../hld/index.html">HLD Index</a>
+    </div>
+  </aside>
+  <main class="main">
+    <div class="breadcrumb"><a href="../index.html">Home</a> / <a href="index.html">Book I · LLD</a> / Chapter 8</div>
+    <h1>Chapter 8: Real Company Code</h1>
+
+    <p class="lede">Patterns are not museum pieces — they power the libraries on your <code>requirements.txt</code> and <code>pom.xml</code>. This closing chapter of Book I walks through ten battle-tested libraries from Netflix, Google, Spring, Stripe, and friends, and shows the LLD pattern each one uses at its core. We strip away the production details and reproduce the design in ~80 lines of Python per library, so you can see the pattern naked.</p>
+
+    <hr>
+
+    <h2>1. Netflix Hystrix — Circuit Breaker</h2>
+
+    <p><strong>Problem:</strong> a downstream service goes slow. Your threads all block on it, cascade-failing the whole system. Hystrix wraps each remote call and "opens the circuit" when failures cross a threshold, failing fast instead of piling up.</p>
+
+    <p><strong>Patterns:</strong> State (CLOSED, OPEN, HALF_OPEN), Command (wraps each call), Decorator (transparent wrapping at call site).</p>
+
+    <pre><code>import time
+from enum import Enum
+
+class State(Enum):
+    CLOSED = "CLOSED"       # traffic flows normally
+    OPEN = "OPEN"           # short-circuit: fail fast
+    HALF_OPEN = "HALF_OPEN" # test one request to see if service recovered
+
+class CircuitBreaker:
+    def __init__(self, fail_threshold=5, reset_after=30):
+        self.state = State.CLOSED
+        self.failures = 0
+        self.opened_at = 0.0
+        self.fail_threshold = fail_threshold
+        self.reset_after = reset_after
+
+    def call(self, command, fallback):
+        if self.state is State.OPEN:
+            if time.monotonic() - self.opened_at &gt; self.reset_after:
+                self.state = State.HALF_OPEN    # try one probe
+            else:
+                return fallback()               # fail fast
+
+        try:
+            result = command()
+        except Exception:
+            self._on_failure()
+            return fallback()
+        else:
+            self._on_success()
+            return result
+
+    def _on_success(self):
+        self.failures = 0
+        self.state = State.CLOSED
+
+    def _on_failure(self):
+        self.failures += 1
+        if self.failures &gt;= self.fail_threshold or self.state is State.HALF_OPEN:
+            self.state = State.OPEN
+            self.opened_at = time.monotonic()
+
+# Usage as a decorator — Command pattern under the hood.
+breaker = CircuitBreaker()
+def with_breaker(fallback):
+    def deco(fn):
+        def wrapped(*a, **kw):
+            return breaker.call(lambda: fn(*a, **kw), fallback)
+        return wrapped
+    return deco</code></pre>
+
+    <hr>
+
+    <h2>2. Guava Cache — Builder + Strategy + Observer</h2>
+
+    <p><strong>Problem:</strong> you want a cache with a mix of policies (size cap, TTL, weak references, removal notifications) without a telescoping constructor with 12 parameters.</p>
+
+    <p><strong>Patterns:</strong> Builder (fluent <code>CacheBuilder</code>), Strategy (pluggable eviction), Observer (removal listener).</p>
+
+    <pre><code>from collections import OrderedDict
+import time
+
+class CacheBuilder:
+    def __init__(self):
+        self._max_size = None
+        self._ttl = None
+        self._listener = None
+
+    def maximum_size(self, n):      self._max_size = n;   return self
+    def expire_after(self, secs):   self._ttl = secs;     return self
+    def removal_listener(self, fn): self._listener = fn;  return self
+
+    def build(self, loader):
+        return _Cache(self._max_size, self._ttl, self._listener, loader)
+
+class _Cache:
+    def __init__(self, max_size, ttl, listener, loader):
+        self.store = OrderedDict()
+        self.max_size = max_size
+        self.ttl = ttl
+        self.listener = listener or (lambda k, v, cause: None)
+        self.loader = loader
+
+    def get(self, key):
+        now = time.monotonic()
+        hit = self.store.get(key)
+        if hit and (self.ttl is None or now - hit[1] &lt; self.ttl):
+            self.store.move_to_end(key)
+            return hit[0]
+        if hit:
+            self.listener(key, hit[0], "EXPIRED")
+            del self.store[key]
+        value = self.loader(key)
+        self.store[key] = (value, now)
+        if self.max_size and len(self.store) &gt; self.max_size:
+            k, (v, _) = self.store.popitem(last=False)
+            self.listener(k, v, "SIZE")
+        return value
+
+# Fluent construction — exactly like Guava's CacheBuilder.newBuilder()...
+cache = (CacheBuilder()
+         .maximum_size(1000)
+         .expire_after(300)
+         .removal_listener(lambda k, v, cause: print("evicted", k, cause))
+         .build(loader=lambda k: load_from_db(k)))</code></pre>
+
+    <hr>
+
+    <h2>3. Spring Framework — Dependency Injection Container</h2>
+
+    <p><strong>Problem:</strong> classes shouldn't construct their own collaborators; wiring should live in one place so tests can swap implementations.</p>
+
+    <p><strong>Pattern:</strong> Dependency Injection via an IoC container that scans registrations and resolves a dependency graph.</p>
+
+    <pre><code>import inspect
+
+class ApplicationContext:
+    def __init__(self):
+        self._registry = {}     # type -&gt; factory
+        self._singletons = {}   # type -&gt; instance
+
+    def register(self, cls, factory=None, singleton=True):
+        self._registry[cls] = (factory or cls, singleton)
+        return self
+
+    def get(self, cls):
+        if cls in self._singletons:
+            return self._singletons[cls]
+
+        factory, is_singleton = self._registry[cls]
+        sig = inspect.signature(factory)
+        kwargs = {
+            name: self.get(param.annotation)
+            for name, param in sig.parameters.items()
+            if param.annotation is not inspect._empty
+        }
+        instance = factory(**kwargs)
+        if is_singleton:
+            self._singletons[cls] = instance
+        return instance
+
+# Usage
+class Db: ...
+class UserRepo:
+    def __init__(self, db: Db): self.db = db
+class UserService:
+    def __init__(self, repo: UserRepo): self.repo = repo
+
+ctx = ApplicationContext().register(Db).register(UserRepo).register(UserService)
+svc = ctx.get(UserService)   # Db and UserRepo auto-wired.</code></pre>
+
+    <hr>
+
+    <h2>4. java.util.concurrent — Executor + Future + BlockingQueue</h2>
+
+    <p><strong>Problem:</strong> decouple "what work to do" from "how and where to run it". Swap a thread pool for a fork-join pool without changing business code.</p>
+
+    <p><strong>Patterns:</strong> Strategy (Executor implementations), Promise/Future (async result handle), Producer-Consumer (BlockingQueue).</p>
+
+    <pre><code>import threading, queue
+
+class Future:
+    def __init__(self):
+        self._done = threading.Event()
+        self._value = None
+        self._error = None
+    def _set_result(self, v): self._value = v; self._done.set()
+    def _set_error(self, e):  self._error = e; self._done.set()
+    def get(self, timeout=None):
+        if not self._done.wait(timeout): raise TimeoutError()
+        if self._error: raise self._error
+        return self._value
+
+class ThreadPoolExecutor:
+    def __init__(self, n_workers):
+        self.q: queue.Queue = queue.Queue()     # BlockingQueue
+        self.workers = [threading.Thread(target=self._run, daemon=True)
+                        for _ in range(n_workers)]
+        for w in self.workers: w.start()
+
+    def submit(self, fn, *a, **kw) -&gt; Future:
+        fut = Future()
+        self.q.put((fn, a, kw, fut))
+        return fut
+
+    def _run(self):
+        while True:
+            fn, a, kw, fut = self.q.get()
+            try: fut._set_result(fn(*a, **kw))
+            except Exception as e: fut._set_error(e)
+
+pool = ThreadPoolExecutor(4)
+f = pool.submit(slow_work, 42)
+print(f.get())</code></pre>
+
+    <hr>
+
+    <h2>5. Kafka Producer — Builder + Strategy + Batching</h2>
+
+    <p><strong>Problem:</strong> send millions of records per second to a partitioned log, with configurable retries, compression, and partition routing.</p>
+
+    <p><strong>Patterns:</strong> Builder (producer config), Strategy (Partitioner), async Command queue with batching.</p>
+
+    <pre><code>import threading, time
+from collections import defaultdict
+
+class RoundRobinPartitioner:
+    def __init__(self): self._i = 0
+    def partition(self, key, num_partitions):
+        self._i = (self._i + 1) % num_partitions
+        return self._i
+
+class HashPartitioner:
+    def partition(self, key, num_partitions):
+        return hash(key) % num_partitions
+
+class ProducerBuilder:
+    def __init__(self):
+        self._partitioner = RoundRobinPartitioner()
+        self._batch_size = 100
+        self._linger_ms = 10
+    def partitioner(self, p):  self._partitioner = p;  return self
+    def batch_size(self, n):   self._batch_size = n;   return self
+    def linger_ms(self, ms):   self._linger_ms = ms;   return self
+    def build(self, cluster):
+        return KafkaProducer(cluster, self._partitioner,
+                             self._batch_size, self._linger_ms)
+
+class KafkaProducer:
+    def __init__(self, cluster, partitioner, batch_size, linger_ms):
+        self.cluster = cluster
+        self.partitioner = partitioner
+        self.batch_size = batch_size
+        self.linger = linger_ms / 1000
+        self.batches = defaultdict(list)
+        self.lock = threading.Lock()
+        threading.Thread(target=self._flush_loop, daemon=True).start()
+
+    def send(self, topic, key, value):
+        n = self.cluster.num_partitions(topic)
+        p = self.partitioner.partition(key, n)
+        with self.lock:
+            batch = self.batches[(topic, p)]
+            batch.append((key, value))
+            if len(batch) &gt;= self.batch_size:
+                self._send_batch(topic, p, batch)
+                self.batches[(topic, p)] = []
+
+    def _flush_loop(self):
+        while True:
+            time.sleep(self.linger)
+            with self.lock:
+                for (topic, p), batch in list(self.batches.items()):
+                    if batch:
+                        self._send_batch(topic, p, batch)
+                        self.batches[(topic, p)] = []
+
+    def _send_batch(self, topic, p, batch):
+        self.cluster.append(topic, p, batch)</code></pre>
+
+    <hr>
+
+    <h2>6. RxJava / ReactiveX — Observable</h2>
+
+    <p><strong>Problem:</strong> compose async streams declaratively: "take these clicks, debounce, map to requests, filter out errors, subscribe".</p>
+
+    <p><strong>Pattern:</strong> Observer taken to its extreme, with operators returning new Observables (chain of responsibility).</p>
+
+    <pre><code>class Observable:
+    def __init__(self, subscribe_fn):
+        self._subscribe = subscribe_fn
+
+    def subscribe(self, on_next, on_error=lambda e: None, on_done=lambda: None):
+        self._subscribe(on_next, on_error, on_done)
+
+    def map(self, fn):
+        def sub(on_next, on_error, on_done):
+            self.subscribe(
+                lambda x: on_next(fn(x)),
+                on_error, on_done,
+            )
+        return Observable(sub)
+
+    def filter(self, pred):
+        def sub(on_next, on_error, on_done):
+            def forward(x):
+                if pred(x): on_next(x)
+            self.subscribe(forward, on_error, on_done)
+        return Observable(sub)
+
+    @staticmethod
+    def from_iter(iterable):
+        def sub(on_next, on_error, on_done):
+            try:
+                for x in iterable: on_next(x)
+                on_done()
+            except Exception as e:
+                on_error(e)
+        return Observable(sub)
+
+(Observable.from_iter(range(10))
+    .filter(lambda x: x % 2 == 0)
+    .map(lambda x: x * x)
+    .subscribe(print))    # 0 4 16 36 64</code></pre>
+
+    <hr>
+
+    <h2>7. Python asyncio — Event Loop (Reactor)</h2>
+
+    <p><strong>Problem:</strong> run thousands of concurrent I/O-bound tasks on one thread by cooperatively yielding on blocking calls.</p>
+
+    <p><strong>Pattern:</strong> Reactor — a single dispatcher loop that watches for I/O readiness and runs the corresponding callback/coroutine.</p>
+
+    <pre><code>import heapq, time
+from collections import deque
+
+class MiniLoop:
+    def __init__(self):
+        self.ready = deque()            # coroutines ready to step
+        self.timers: list = []          # heap of (deadline, coro)
+
+    def call_soon(self, coro):
+        self.ready.append(coro)
+
+    def call_later(self, delay, coro):
+        heapq.heappush(self.timers, (time.monotonic() + delay, coro))
+
+    def run(self):
+        while self.ready or self.timers:
+            # Move due timers into ready queue.
+            now = time.monotonic()
+            while self.timers and self.timers[0][0] &lt;= now:
+                _, coro = heapq.heappop(self.timers)
+                self.ready.append(coro)
+
+            if not self.ready:
+                time.sleep(max(0, self.timers[0][0] - now))
+                continue
+
+            coro = self.ready.popleft()
+            try:
+                action = coro.send(None)        # step the coroutine
+            except StopIteration:
+                continue                        # coroutine done
+
+            if isinstance(action, _Sleep):
+                self.call_later(action.secs, coro)
+            else:
+                self.ready.append(coro)         # yield to others
+
+class _Sleep:
+    def __init__(self, secs): self.secs = secs
+
+def sleep(secs):
+    return (yield _Sleep(secs))
+
+def greet(name):
+    print("hello", name)
+    yield from sleep(0.5)
+    print("bye", name)
+
+loop = MiniLoop()
+loop.call_soon(greet("A"))
+loop.call_soon(greet("B"))
+loop.run()</code></pre>
+
+    <hr>
+
+    <h2>8. Gson / Jackson — Visitor + Factory</h2>
+
+    <p><strong>Problem:</strong> serialize any object graph to JSON and deserialize back, supporting arbitrary types without if/elif chains.</p>
+
+    <p><strong>Patterns:</strong> Visitor (walk the object), Factory (pick a TypeAdapter per class).</p>
+
+    <pre><code>class TypeAdapter:
+    def write(self, value): raise NotImplementedError
+    def read(self, raw):    raise NotImplementedError
+
+class IntAdapter(TypeAdapter):
+    def write(self, v): return str(int(v))
+    def read(self, r):  return int(r)
+
+class StrAdapter(TypeAdapter):
+    def write(self, v): return f'"{v}"'
+    def read(self, r):  return r.strip('"')
+
+class ListAdapter(TypeAdapter):
+    def __init__(self, item): self.item = item
+    def write(self, v): return "[" + ",".join(self.item.write(x) for x in v) + "]"
+
+class AdapterFactory:
+    def __init__(self):
+        self._adapters = {int: IntAdapter(), str: StrAdapter()}
+
+    def get(self, type_):
+        if isinstance(type_, type):
+            return self._adapters[type_]
+        origin, arg = type_   # e.g. ("list", int)
+        if origin == "list":
+            return ListAdapter(self.get(arg))
+        raise TypeError(type_)
+
+factory = AdapterFactory()
+print(factory.get(int).write(42))               # "42"
+print(factory.get(("list", int)).write([1, 2])) # "[1,2]"</code></pre>
+
+    <hr>
+
+    <h2>9. Stripe Idempotency Keys</h2>
+
+    <p><strong>Problem:</strong> network retries must not double-charge. Client sends a unique <code>Idempotency-Key</code> header; the server stores the response the first time and <em>replays</em> it on every retry with the same key.</p>
+
+    <p><strong>Pattern:</strong> Memoization across requests, backed by durable storage. Relies on atomic "set-if-absent".</p>
+
+    <pre><code>class IdempotentCharger:
+    def __init__(self, gateway, store):
+        self.gateway = gateway
+        self.store = store   # durable KV: idempotency_key -&gt; stored response
+
+    def charge(self, key: str, amount: int, card: str) -&gt; dict:
+        # 1. If we've seen this key before, replay the stored response.
+        cached = self.store.get(key)
+        if cached is not None:
+            if cached["status"] == "in_flight":
+                raise ConflictError("request already in progress")
+            return cached["response"]
+
+        # 2. Atomically claim the key so concurrent retries don't race.
+        if not self.store.set_if_absent(key, {"status": "in_flight"}):
+            return self.store.get(key)["response"]
+
+        # 3. Perform the actual side-effect exactly once.
+        try:
+            response = self.gateway.charge(amount, card)
+            self.store.set(key, {"status": "done", "response": response})
+            return response
+        except Exception:
+            # On failure, clear the claim so the client can retry cleanly.
+            self.store.delete(key)
+            raise</code></pre>
+
+    <hr>
+
+    <h2>10. Redis Commands — Command Pattern + RESP Protocol</h2>
+
+    <p><strong>Problem:</strong> a client wants to send <code>SET foo bar</code>, <code>GET foo</code>, <code>INCR counter</code> over a socket, and have the server dispatch each to the right handler.</p>
+
+    <p><strong>Patterns:</strong> Command (each operation is an object with an <code>execute</code> method), Registry/Factory (map command name to handler), custom serialization (RESP).</p>
+
+    <pre><code># --- RESP-ish encoder/decoder (simplified) ---
+def encode(*args):
+    out = f"*{len(args)}\r\n"
+    for a in args:
+        s = str(a)
+        out += f"${len(s)}\r\n{s}\r\n"
+    return out
+
+def decode(raw):
+    lines = raw.split("\r\n")
+    assert lines[0].startswith("*")
+    n = int(lines[0][1:])
+    parts = []
+    i = 1
+    for _ in range(n):
+        assert lines[i].startswith("$")
+        parts.append(lines[i + 1])
+        i += 2
+    return parts
+
+# --- Command pattern ---
+class Command:
+    def execute(self, store, args): raise NotImplementedError
+
+class SetCmd(Command):
+    def execute(self, store, args): store[args[0]] = args[1]; return "OK"
+class GetCmd(Command):
+    def execute(self, store, args): return store.get(args[0], "(nil)")
+class IncrCmd(Command):
+    def execute(self, store, args):
+        store[args[0]] = int(store.get(args[0], 0)) + 1
+        return store[args[0]]
+
+# --- Dispatcher / registry ---
+class RedisServer:
+    def __init__(self):
+        self.store = {}
+        self.commands = {"SET": SetCmd(), "GET": GetCmd(), "INCR": IncrCmd()}
+
+    def handle(self, raw):
+        name, *args = decode(raw)
+        cmd = self.commands[name.upper()]
+        result = cmd.execute(self.store, args)
+        return encode(result)
+
+srv = RedisServer()
+print(srv.handle(encode("SET", "foo", "bar")))   # OK
+print(srv.handle(encode("GET", "foo")))          # bar
+print(srv.handle(encode("INCR", "counter")))     # 1</code></pre>
+
+    <hr>
+
+    <h2>Closing Book I</h2>
+
+    <p>Eight chapters, one progression. You started with OOP and SOLID, learned the classic patterns, applied them to basic, intermediate, and advanced problems, walked through concurrency, saw what production bugs look like when the design is wrong, and finally saw those same patterns quietly running in the libraries you import every day.</p>
+
+    <p>That is the full loop of Low Level Design: you can now <em>recognize</em> a Builder or a State Machine in a stranger's code, <em>write</em> one when the situation calls for it, and <em>defend</em> it against the concurrency and evolution pressures that break naive implementations.</p>
+
+    <p>Book II zooms out. Instead of classes and objects, it starts talking about services, replicas, queues, caches, and the trade-offs that appear when a system has to serve millions of users across the planet. The discipline is the same — clean abstractions, explicit trade-offs, patterns that survive contact with reality — but the scale is different.</p>
+
+    <p>Welcome to High Level Design.</p>
+
+    <div class="chapter-nav">
+      <a href="07-war-room.html"><div class="label">← Previous</div><div class="title">7. War Room Scenarios</div></a>
+      <a class="next" href="../hld/index.html"><div class="label">Next →</div><div class="title">Book II · HLD Index</div></a>
+    </div>
+  </main>
+</div>
+<script src="../assets/js/nav.js"></script>
+</body>
+</html>

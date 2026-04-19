@@ -1,0 +1,588 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Building Blocks — Book II · HLD</title>
+<link rel="stylesheet" href="../assets/css/style.css">
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">System Design Books</div>
+    <div class="brand-sub">by Sanheen · Progressive Learning</div>
+    <div class="nav-section">
+      <h3>Home</h3>
+      <a href="../index.html">Overview</a>
+    </div>
+    <div class="nav-section">
+      <h3>Book I — Low Level Design</h3>
+      <a href="../lld/index.html">LLD Index</a>
+    </div>
+    <div class="nav-section">
+      <h3>Book II — High Level Design</h3>
+      <a href="index.html">HLD Index</a>
+      <a href="01-foundations.html">1. Foundations & Capacity</a>
+      <a href="02-building-blocks.html">2. Building Blocks</a>
+      <a href="03-basic-systems.html">3. Basic Systems</a>
+      <a href="04-intermediate.html">4. Intermediate Systems</a>
+      <a href="05-advanced.html">5. Advanced Systems</a>
+      <a href="06-very-high-scale.html">6. Very High Scale</a>
+      <a href="07-war-room.html">7. War Room Scenarios</a>
+      <a href="08-real-architectures.html">8. Real Architectures</a>
+    </div>
+  </aside>
+  <main class="main">
+    <div class="breadcrumb"><a href="../index.html">Home</a> / <a href="index.html">Book II · HLD</a> / Chapter 2</div>
+    <h1>Chapter 2: Building Blocks</h1>
+
+    <p class="lead">Every large system is assembled from the same 20 components. Load balancer, API gateway, SQL, NoSQL, cache, CDN, queue, stream, blob store, search, time-series, warehouse, stream processor, service mesh, consensus, lock, rate limiter, circuit breaker, config. In this chapter we take each one and answer the same five questions: <em>what does it do, when do you need it, what problem does it solve, what breaks without it, what is the trade-off</em>. Learn this chapter and you can read any architecture diagram ever drawn.</p>
+
+    <h2>1. Load Balancer (L4 vs L7)</h2>
+
+    <p><strong>What it does.</strong> Spreads incoming requests across a pool of servers so no single server is overwhelmed and so failed servers can be taken out of rotation.</p>
+
+    <p><strong>When to use.</strong> The moment you have more than one backend instance. Even in a tiny system, an LB gives you rolling deploys and health checks.</p>
+
+    <p><strong>Problem it solves.</strong> Single points of failure, hot-spotting, zero-downtime deploys, SSL termination, path-based routing.</p>
+
+    <p><strong>Without it.</strong> Clients hit one server by IP or by DNS round-robin — no health awareness, no session stickiness, no graceful drain. One node dies and a slice of users get errors for a DNS TTL.</p>
+
+    <h3>L4 vs L7</h3>
+    <table>
+      <thead><tr><th></th><th>L4 (transport)</th><th>L7 (application)</th></tr></thead>
+      <tbody>
+        <tr><td>Operates on</td><td>TCP/UDP packets</td><td>HTTP requests, gRPC calls</td></tr>
+        <tr><td>Sees</td><td>IP + port only</td><td>Headers, cookies, path, method</td></tr>
+        <tr><td>Speed</td><td>Very fast (kernel-level possible)</td><td>Slower (parses HTTP)</td></tr>
+        <tr><td>Can do</td><td>Connection balancing, TCP health checks</td><td>Route by URL, rewrite headers, A/B, sticky sessions by cookie</td></tr>
+        <tr><td>Examples</td><td>AWS NLB, HAProxy (mode tcp), LVS</td><td>Nginx, HAProxy (mode http), Envoy, AWS ALB, Traefik</td></tr>
+      </tbody>
+    </table>
+
+    <h3>Algorithms</h3>
+    <ul>
+      <li><strong>Round robin</strong> — simplest; assumes uniform work per request. Fails for long-running requests.</li>
+      <li><strong>Least connections</strong> — picks the backend with fewest open connections. Good default for mixed workloads.</li>
+      <li><strong>Weighted</strong> — give larger boxes more weight. Useful during migrations or heterogeneous fleets.</li>
+      <li><strong>Consistent hashing</strong> — same client/key always hits the same backend. Essential for cache affinity; see Chapter 3 for details.</li>
+      <li><strong>Random (Power of Two Choices)</strong> — pick two random backends, send to the less loaded. Provably near-optimal, cheap.</li>
+    </ul>
+
+    <div class="callout">
+      <strong>Trade-off.</strong> L4 is faster but blind — it cannot route by URL. L7 is smarter but costlier and a bigger attack surface. In practice, almost everyone runs L7 at the edge (for HTTPS, routing, auth) and L4 is reserved for databases, gRPC internal planes, or raw-TCP protocols.
+    </div>
+
+    <h2>2. Reverse Proxy</h2>
+
+    <p><strong>What it does.</strong> Sits in front of servers and terminates inbound connections on their behalf. A load balancer <em>is</em> a reverse proxy that also fans out; most L7 LBs are reverse proxies.</p>
+
+    <p><strong>When to use.</strong> Any HTTP-serving system: you want TLS termination, request logging, gzip/brotli compression, static-file caching, connection pooling, and a stable edge surface that can hide a changing backend.</p>
+
+    <p><strong>Problem it solves.</strong> Backends should not handle TLS, IP-allowlisting, or compression themselves. Centralize it. It also hides your internal network topology.</p>
+
+    <p><strong>Without it.</strong> Every backend implements TLS, reads certs, gzip-compresses responses, and rotates keys. Operations becomes a mess.</p>
+
+    <p><strong>Trade-off.</strong> An extra hop (50–500 µs in-DC). You gain offload, hide internal topology, and get a single place to change behavior.</p>
+
+    <p><strong>Examples.</strong> Nginx, Apache httpd, Envoy, Caddy, HAProxy.</p>
+
+    <h2>3. API Gateway</h2>
+
+    <p><strong>What it does.</strong> A reverse proxy that also handles <em>cross-cutting concerns</em> across many microservices: authentication, authorization, rate limiting, quotas, request/response transformation, schema validation, aggregation, caching, analytics.</p>
+
+    <p><strong>When to use.</strong> As soon as you have more than a handful of services and one client (mobile app, SPA) talks to many of them.</p>
+
+    <p><strong>Problem it solves.</strong> Without a gateway, every service re-implements JWT validation, rate limiting, and logging. You get drift, security bugs, and pointless wheel-reinvention.</p>
+
+    <p><strong>Without it.</strong> The browser talks to 30 services directly; CORS nightmares, per-service auth, no central observability.</p>
+
+    <h3>BFF (Backend for Frontend)</h3>
+    <p>A specialized gateway per client type: one for mobile, one for web, one for smart-TV. Each BFF aggregates downstream calls into a single response tailored to that client's payload shape. Especially powerful with GraphQL.</p>
+
+    <div class="callout warn">
+      <strong>Trap.</strong> An API gateway can become a "god box" that owns business logic, schemas, and routing for the whole company. When that happens, a gateway deploy becomes scarier than a database migration. Keep the gateway thin: auth, rate limit, route, observe. Nothing else.
+    </div>
+
+    <p><strong>Examples.</strong> Kong, AWS API Gateway, Azure API Management, Apigee, Tyk, Envoy (as gateway), Emissary.</p>
+
+    <h2>4. Relational Database (SQL)</h2>
+
+    <p><strong>What it does.</strong> Stores structured data with enforced schema, strong transactions (ACID), joins, and rich querying via SQL.</p>
+
+    <p><strong>When to use.</strong> Anything with relationships, transactions, or strong consistency needs: orders, accounts, users, inventory, bookings. Default to SQL until a specific bottleneck forces you off it.</p>
+
+    <p><strong>Problem it solves.</strong> Correctness. Transactions mean "all or nothing." Foreign keys mean "this invoice points to a real customer." Indexes mean "find-by-email is fast."</p>
+
+    <p><strong>Without it.</strong> You re-implement transactions in application code, get double-charged users, and spend nights reconciling.</p>
+
+    <h3>ACID</h3>
+    <ul>
+      <li><strong>Atomicity</strong> — the transaction is all-or-nothing.</li>
+      <li><strong>Consistency</strong> — it moves the DB from one valid state to another (constraints enforced).</li>
+      <li><strong>Isolation</strong> — concurrent transactions don't see each other's half-done work (serializable, repeatable read, read committed).</li>
+      <li><strong>Durability</strong> — once committed, it survives a crash (WAL fsync).</li>
+    </ul>
+
+    <h3>Replication</h3>
+    <p>Primary-replica: one writer, N read replicas. Replicas lag by milliseconds. Read replicas scale read capacity linearly. Writes still bottleneck on the primary.</p>
+
+    <pre><code>   [writes] ---> [Primary] ---async WAL---> [Replica 1]
+                        |----async WAL---> [Replica 2]
+                        |----async WAL---> [Replica 3]
+   [reads] --------->  [LB] --> [Primary or any Replica]</code></pre>
+
+    <p><strong>Synchronous replication</strong> = wait for ≥1 replica to ack before commit. Guarantees zero data loss, costs latency. <strong>Asynchronous</strong> = fire-and-forget. Fast, but you can lose the last few ms of writes if the primary dies.</p>
+
+    <h3>Scaling limits</h3>
+    <ul>
+      <li>Reads: scale with replicas, ~linear.</li>
+      <li>Writes: one primary. Maybe 5K–20K sustained writes/sec.</li>
+      <li>Dataset: 2–10 TB per node before operational pain (backups, vacuum, schema changes).</li>
+      <li>Past that: sharding (manual or via Vitess/Citus), or move to NoSQL.</li>
+    </ul>
+
+    <p><strong>Examples.</strong> PostgreSQL, MySQL, MariaDB, AWS Aurora, Google Cloud SQL, SQL Server, Oracle.</p>
+
+    <h2>5. NoSQL — Five Families</h2>
+
+    <p>"NoSQL" is a catch-all. There are really five families, each solving a different problem.</p>
+
+    <h3>5.1 Key-Value</h3>
+    <p><strong>What it does.</strong> Dictionary-style store: set(key, value), get(key). No querying other than by key.</p>
+    <p><strong>When to use.</strong> Sessions, feature flags, rate-limit counters, caches, simple lookups with known access pattern.</p>
+    <p><strong>Examples.</strong> Redis, Memcached, DynamoDB (primary-key mode), Riak, etcd.</p>
+    <p><strong>Trade-off.</strong> Lightning fast. Dumb — no queries, no analytics, no range scans (except Redis sorted sets/Dynamo sort keys).</p>
+
+    <h3>5.2 Document</h3>
+    <p><strong>What it does.</strong> Stores JSON-like documents; queries can index into fields; flexible schema.</p>
+    <p><strong>When to use.</strong> Content with variable shape: product catalogs, user profiles with extensible attributes, CMS, mobile app sync (Firestore/Couchbase).</p>
+    <p><strong>Examples.</strong> MongoDB, CouchDB, Couchbase, Firestore, DocumentDB.</p>
+    <p><strong>Trade-off.</strong> Flexible schema = no schema. You will eventually have 12 versions of a user document. Joins are manual.</p>
+
+    <h3>5.3 Column-Family (Wide Column)</h3>
+    <p><strong>What it does.</strong> Row-key + sparse columns, stored column-wise; massively horizontally scalable; optimized for writes via LSM-trees.</p>
+    <p><strong>When to use.</strong> Massive write throughput, time-series-ish data, huge datasets: IoT, logs, audit trails, feeds at Twitter/Discord scale.</p>
+    <p><strong>Examples.</strong> Cassandra, ScyllaDB (drop-in C* rewrite in C++), HBase, Bigtable.</p>
+    <p><strong>Trade-off.</strong> Hard to query outside your partition key. Tombstones and compaction are operational concerns. Worth it above ~50K writes/sec.</p>
+
+    <h3>5.4 Graph</h3>
+    <p><strong>What it does.</strong> Stores nodes and edges; optimized for traversals ("friends of friends of friends").</p>
+    <p><strong>When to use.</strong> Social graphs, recommendation engines, fraud rings, knowledge graphs, supply-chain maps.</p>
+    <p><strong>Examples.</strong> Neo4j, Amazon Neptune, ArangoDB, DGraph, JanusGraph.</p>
+    <p><strong>Trade-off.</strong> Niche. Most "graph" problems are fine in SQL until traversals exceed 3 hops on billions of edges.</p>
+
+    <h3>5.5 Search</h3>
+    <p><strong>What it does.</strong> Inverted indexes for full-text search, relevance ranking, faceted search, filtering.</p>
+    <p><strong>When to use.</strong> Site search, product search, log search, any "match this text" or "filter by 10 facets" feature.</p>
+    <p><strong>Examples.</strong> Elasticsearch, OpenSearch, Solr, Algolia, Meilisearch, Typesense.</p>
+    <p><strong>Trade-off.</strong> Not the source of truth. Indexed data is a projection of your DB. Stale by seconds; reindex when schemas change.</p>
+
+    <h3>Which NoSQL family?</h3>
+    <table>
+      <thead><tr><th>Need</th><th>Pick</th></tr></thead>
+      <tbody>
+        <tr><td>Simple lookup by known key, low latency</td><td>Key-value</td></tr>
+        <tr><td>Flexible schema, nested JSON, one-document queries</td><td>Document</td></tr>
+        <tr><td>Massive writes, huge dataset, time-series-ish</td><td>Column-family</td></tr>
+        <tr><td>Many-hop traversals on a highly connected dataset</td><td>Graph</td></tr>
+        <tr><td>Full-text, relevance, faceting</td><td>Search</td></tr>
+      </tbody>
+    </table>
+
+    <h2>6. Cache</h2>
+
+    <p><strong>What it does.</strong> A small, fast store that keeps hot data in RAM so most reads skip the slow origin.</p>
+
+    <p><strong>When to use.</strong> Any read-heavy workload with skewed access. 80/20 access = huge cache win. Uniform access over a huge dataset = cache won't help.</p>
+
+    <p><strong>Problem it solves.</strong> Origin overload, read latency, cost.</p>
+
+    <p><strong>Without it.</strong> Every read goes to the DB. Your DB buckles at 10K QPS and you scream for more replicas. Cache is almost always cheaper.</p>
+
+    <h3>Patterns</h3>
+    <table>
+      <thead><tr><th>Pattern</th><th>How it works</th><th>When</th></tr></thead>
+      <tbody>
+        <tr><td>Cache-aside (lazy)</td><td>App checks cache; on miss, reads DB and populates cache</td><td>Default; simple and safe</td></tr>
+        <tr><td>Read-through</td><td>Cache itself fetches from DB on miss (cache library wraps DB)</td><td>When you want app code to be ignorant of the cache</td></tr>
+        <tr><td>Write-through</td><td>Write goes to cache and DB synchronously</td><td>Keep cache fresh for just-written data; slower writes</td></tr>
+        <tr><td>Write-behind (write-back)</td><td>Write goes to cache, DB updated asynchronously</td><td>Fast writes; risk of data loss if cache crashes before flush</td></tr>
+        <tr><td>Refresh-ahead</td><td>Proactively refresh entries before they expire</td><td>Predictable hot keys; hides origin latency</td></tr>
+      </tbody>
+    </table>
+
+    <h3>Eviction</h3>
+    <ul>
+      <li><strong>TTL</strong> — time to live. Simplest. Always set one; otherwise your cache is a memory leak.</li>
+      <li><strong>LRU</strong> — least recently used. Default for most caches.</li>
+      <li><strong>LFU</strong> — least frequently used. Better when access patterns are stable and long-lived.</li>
+      <li><strong>TinyLFU / W-TinyLFU</strong> — modern hybrid; Caffeine uses it.</li>
+    </ul>
+
+    <h3>Failure modes</h3>
+    <div class="callout danger">
+      <strong>Cache stampede / thundering herd.</strong> A hot key expires. 10,000 concurrent requests miss at once and all slam the DB. Fixes:
+      <ul>
+        <li><strong>Single-flight</strong>: only one request fetches; others wait on the result.</li>
+        <li><strong>Staggered TTLs / jitter</strong>: don't expire everything at once.</li>
+        <li><strong>Stale-while-revalidate</strong>: serve stale; refresh in the background.</li>
+        <li><strong>Probabilistic early expiration</strong>: refresh near expiry with increasing probability.</li>
+      </ul>
+    </div>
+
+    <div class="callout danger">
+      <strong>Cache penetration.</strong> Attackers (or a bug) query keys that don't exist. Every request misses cache and hits DB. Fix: cache the "not found" too (short TTL), and/or use a <strong>Bloom filter</strong> to cheaply reject queries for keys that definitely don't exist.
+    </div>
+
+    <div class="callout danger">
+      <strong>Cache avalanche.</strong> Cache dies entirely. All traffic hits DB. Fixes: replication/HA, warming the standby, tier your cache (L1 in-process + L2 distributed), and have a circuit-breaker that sheds load when origin is near capacity.
+    </div>
+
+    <p><strong>Examples.</strong> Redis, Memcached, Hazelcast, Caffeine (JVM local), Varnish (HTTP).</p>
+
+    <h2>7. CDN (Content Delivery Network)</h2>
+
+    <p><strong>What it does.</strong> A globally distributed cache for HTTP responses (and increasingly, compute). Serves static and semi-static content from the edge closest to each user.</p>
+
+    <p><strong>When to use.</strong> Anything public over HTTP: images, videos, JS bundles, CSS, HTML, API responses that can tolerate edge caching.</p>
+
+    <p><strong>Problem it solves.</strong> Latency (speed of light), origin bandwidth (99% offload), and availability (cache can serve even if origin is down).</p>
+
+    <p><strong>Without it.</strong> Global users pay 150–300 ms round-trip to your single origin, and your origin NIC melts.</p>
+
+    <h3>Concepts</h3>
+    <ul>
+      <li><strong>Edge POP (point of presence)</strong> — hundreds of them; caches live here.</li>
+      <li><strong>Origin shield</strong> — a mid-tier cache between edge and origin; reduces origin load further.</li>
+      <li><strong>Cache-Control / Surrogate-Control</strong> — headers that dictate TTL and cacheability.</li>
+      <li><strong>Invalidation</strong> — push-purge by URL or by tag; invalidation takes seconds to propagate. Plan for it.</li>
+      <li><strong>Signed URLs</strong> — time-limited, user-specific CDN links for private content.</li>
+    </ul>
+
+    <p><strong>Trade-off.</strong> Edge caching is eventually consistent by definition. You must version your URLs (cache-busting hashes) and invalidate carefully.</p>
+
+    <p><strong>Examples.</strong> Cloudflare, Akamai, AWS CloudFront, Fastly, Google Cloud CDN, Azure Front Door, BunnyCDN.</p>
+
+    <h2>8. Message Queue (Work Queue)</h2>
+
+    <p><strong>What it does.</strong> A broker that accepts messages from producers and delivers them to consumers. Each message is typically processed once by one consumer.</p>
+
+    <p><strong>When to use.</strong> Decoupling producer from consumer, smoothing traffic spikes, background jobs (email, image processing, webhooks), retries and DLQs.</p>
+
+    <p><strong>Problem it solves.</strong> Synchronous coupling. If email sending is in the request path, a slow SMTP makes your app slow. Move it behind a queue and the app returns in milliseconds regardless.</p>
+
+    <p><strong>Without it.</strong> Everything is synchronous. Spikes break you. Retries are ad-hoc. Failed jobs are lost.</p>
+
+    <h3>Concepts</h3>
+    <ul>
+      <li><strong>ACK / NACK</strong> — consumer confirms processing, or rejects; the broker redelivers NACK'd messages.</li>
+      <li><strong>Visibility timeout</strong> — while a consumer is working, the message is hidden from others; if not ACK'd in time, it reappears.</li>
+      <li><strong>DLQ (dead letter queue)</strong> — after N failed retries, the message moves to a DLQ for human inspection.</li>
+      <li><strong>At-most-once / at-least-once / exactly-once</strong> — delivery semantics. Exactly-once is almost always a lie at the transport layer; you achieve it with idempotency in your consumer.</li>
+      <li><strong>Idempotency</strong> — processing the same message twice has the same effect as once. Essential.</li>
+    </ul>
+
+    <p><strong>Examples.</strong> RabbitMQ, AWS SQS, ActiveMQ, Google Pub/Sub (dual-mode), BullMQ (on Redis), Sidekiq (on Redis).</p>
+
+    <h2>9. Streaming (Event Log)</h2>
+
+    <p><strong>What it does.</strong> A durable, ordered, replayable log of events. Multiple independent consumer groups can read the same log, each at its own offset, for days or weeks.</p>
+
+    <p><strong>When to use.</strong> Event-driven architectures, CDC (change data capture), analytics pipelines, multi-consumer fan-out, audit logs, building materialized views.</p>
+
+    <p><strong>Problem it solves.</strong> A queue delivers a message once; a log lets many systems read the same event history. It turns your database's changes into a first-class integration surface.</p>
+
+    <p><strong>Without it.</strong> Every downstream consumer polls your DB (load!) or you wire N bespoke integrations (chaos).</p>
+
+    <h3>Concepts</h3>
+    <ul>
+      <li><strong>Topic</strong> — a named log.</li>
+      <li><strong>Partition</strong> — the unit of parallelism and ordering. Ordering is guaranteed <em>within</em> a partition, not across. Partition key chooses which partition a message lands on.</li>
+      <li><strong>Consumer group</strong> — a set of consumers that collectively read all partitions of a topic, each partition assigned to exactly one consumer in the group.</li>
+      <li><strong>Offset</strong> — the consumer's position in each partition. Committed to the broker (or external store) for restart.</li>
+      <li><strong>Retention</strong> — time or size based; keep days or forever (compacted topics).</li>
+      <li><strong>Compacted topics</strong> — broker keeps only the latest value per key; acts like a changelog for a materialized view.</li>
+    </ul>
+
+    <div class="callout">
+      <strong>Queue vs Stream — the clearest mental model.</strong>
+      <ul>
+        <li>Queue: "do this job once; once done, forget it."</li>
+        <li>Stream: "here is an event; anyone who cares can read it, now or next week, as many times as they want."</li>
+      </ul>
+    </div>
+
+    <p><strong>Examples.</strong> Apache Kafka, Amazon Kinesis, Google Pub/Sub, Apache Pulsar, Redpanda (Kafka-compatible), NATS JetStream.</p>
+
+    <h2>10. Object Storage (Blob)</h2>
+
+    <p><strong>What it does.</strong> Cheap, durable, nearly infinite storage for files. Key → bytes, with metadata. Flat namespace, HTTP API.</p>
+
+    <p><strong>When to use.</strong> Images, videos, user uploads, backups, data-lake files, build artifacts, logs. Anything large and not row-like.</p>
+
+    <p><strong>Problem it solves.</strong> Databases are bad at big files. 1-MB rows kill a SQL database's buffer pool, crash replication, and waste money. Object stores are designed for bytes.</p>
+
+    <p><strong>Without it.</strong> People store images in Postgres as BYTEA. The DB grows 100×, backups take forever, and cost explodes.</p>
+
+    <h3>Concepts</h3>
+    <ul>
+      <li><strong>Bucket</strong> — top-level container (globally unique in AWS S3).</li>
+      <li><strong>Key</strong> — the "path" in the flat namespace. Use hashed prefixes to avoid hot partitions.</li>
+      <li><strong>Storage classes</strong> — hot (standard), warm (Infrequent Access), cold (Glacier). Lifecycle rules move data between tiers.</li>
+      <li><strong>Pre-signed URLs</strong> — let clients upload/download directly to the bucket without proxying through your app.</li>
+      <li><strong>Consistency</strong> — modern S3 is strongly consistent per object; listings are eventual.</li>
+    </ul>
+
+    <p><strong>Examples.</strong> AWS S3, Google Cloud Storage, Azure Blob Storage, Backblaze B2, MinIO (self-hosted, S3-compatible), Cloudflare R2.</p>
+
+    <h2>11. Search Index</h2>
+
+    <p><strong>What it does.</strong> Builds an <em>inverted index</em> (term → document list) so full-text queries return results in milliseconds.</p>
+
+    <p><strong>When to use.</strong> Any "search this text" or "filter by 10 facets" feature; log search; catalog filters.</p>
+
+    <p><strong>Problem it solves.</strong> SQL <code>LIKE '%foo%'</code> doesn't scale. A search engine scales to TB and still returns in &lt; 100 ms.</p>
+
+    <p><strong>Without it.</strong> You add more DB indexes, still slow, and users churn on bad search.</p>
+
+    <h3>Elasticsearch internals (abbreviated)</h3>
+    <pre><code>Document ---> Analyzer (tokenize, lowercase, stem) ---> Terms ---> Inverted Index
+                                                                       |
+                                                                       v
+                                                         Shard 0  Shard 1  Shard 2
+                                                            |        |        |
+                                                         Replicas (1+ per shard)</code></pre>
+
+    <ul>
+      <li><strong>Inverted index</strong> — for each term, a postings list of document IDs. Lookups are O(1) in the term dictionary, then scan the postings list.</li>
+      <li><strong>Shards</strong> — the index is split; queries are scattered to all shards and results gathered (scatter-gather).</li>
+      <li><strong>Replicas</strong> — each shard has copies for read throughput and HA.</li>
+      <li><strong>Scoring</strong> — TF-IDF / BM25 for relevance.</li>
+    </ul>
+
+    <p><strong>Trade-off.</strong> Not your source of truth. Reindex on schema change. Near-real-time (1 sec refresh interval by default). Expensive on memory and CPU.</p>
+
+    <p><strong>Examples.</strong> Elasticsearch, OpenSearch, Apache Solr, Typesense, Meilisearch, Algolia (hosted).</p>
+
+    <h2>12. Time-Series DB</h2>
+
+    <p><strong>What it does.</strong> Stores and queries timestamped metrics efficiently: append-only writes, time-range reads, aggregations (rollups, downsampling, rate, percentile).</p>
+
+    <p><strong>When to use.</strong> Monitoring/metrics (CPU, latency), IoT telemetry, financial ticks, any "values indexed by time + tags."</p>
+
+    <p><strong>Problem it solves.</strong> SQL can do this, but a TSDB compresses time-series 10–100×, answers range queries in ms, and supports downsampling natively.</p>
+
+    <p><strong>Without it.</strong> You store metrics in Postgres. The table hits a billion rows, queries time out, and you start dropping old data.</p>
+
+    <p><strong>Examples.</strong> InfluxDB, TimescaleDB (Postgres extension), Prometheus (in-memory + TSDB for monitoring), VictoriaMetrics, Amazon Timestream, QuestDB.</p>
+
+    <h2>13. Data Warehouse (OLAP)</h2>
+
+    <p><strong>What it does.</strong> Columnar, massively parallel store optimized for big analytical queries: aggregations over billions of rows, joins across large fact/dimension tables.</p>
+
+    <p><strong>When to use.</strong> Business intelligence, dashboards, ad-hoc analytics, ML feature engineering over historical data.</p>
+
+    <p><strong>Problem it solves.</strong> OLTP databases (Postgres, MySQL) choke on "sum revenue by country by month over 2 years." A warehouse returns in seconds.</p>
+
+    <p><strong>Without it.</strong> Analysts clone the OLTP DB and bring it down with their queries. Or worse, they export CSVs and pivot in Excel.</p>
+
+    <h3>OLTP vs OLAP</h3>
+    <table>
+      <thead><tr><th></th><th>OLTP</th><th>OLAP</th></tr></thead>
+      <tbody>
+        <tr><td>Workload</td><td>Many small row reads/writes</td><td>Few huge scans and aggregations</td></tr>
+        <tr><td>Storage</td><td>Row-oriented</td><td>Column-oriented</td></tr>
+        <tr><td>Latency</td><td>Milliseconds</td><td>Seconds to minutes</td></tr>
+        <tr><td>Schema</td><td>Normalized</td><td>Denormalized star/snowflake</td></tr>
+        <tr><td>Indexing</td><td>B-tree on keys</td><td>Min/max, zone maps, bloom filters per block</td></tr>
+        <tr><td>Examples</td><td>Postgres, MySQL, Aurora</td><td>Snowflake, BigQuery, Redshift, ClickHouse, Druid</td></tr>
+      </tbody>
+    </table>
+
+    <p>Data moves from OLTP → warehouse via ETL/ELT (Fivetran, Airbyte, custom) or CDC (Debezium → Kafka → warehouse). Keep them separate.</p>
+
+    <h2>14. Stream Processing</h2>
+
+    <p><strong>What it does.</strong> Consumes event streams, runs computations (filters, aggregations, joins, windowed analytics), and emits results either to downstream sinks or back to topics.</p>
+
+    <p><strong>When to use.</strong> Real-time dashboards, fraud detection, anomaly detection, materialized views, CDC-driven caches, event sourcing projections.</p>
+
+    <p><strong>Problem it solves.</strong> Batch jobs that run every hour are too slow. Stream processing gives you results within seconds of the event.</p>
+
+    <p><strong>Without it.</strong> You query the warehouse every minute and discover frauds hours later.</p>
+
+    <h3>Concepts</h3>
+    <ul>
+      <li><strong>Windows</strong> — tumbling, sliding, session. "Sum by user over 5-minute windows."</li>
+      <li><strong>Watermarks</strong> — "how late can events arrive and still be counted?" Trade latency vs. completeness.</li>
+      <li><strong>State backends</strong> — RocksDB, checkpointed; stream processors hold state (counters, joins) for you.</li>
+      <li><strong>Exactly-once processing</strong> — achieved via idempotent sinks + transactional commits in modern engines.</li>
+    </ul>
+
+    <p><strong>Examples.</strong> Apache Flink, Kafka Streams, Apache Spark Structured Streaming, Materialize, ksqlDB, Apache Beam (abstraction).</p>
+
+    <h2>15. Service Mesh</h2>
+
+    <p><strong>What it does.</strong> A sidecar proxy (Envoy, usually) deployed next to every service, handling service-to-service traffic: mTLS, retries, timeouts, circuit breaking, traffic splitting, observability.</p>
+
+    <p><strong>When to use.</strong> Kubernetes with many services, especially when you want zero-trust networking, canary deploys, or consistent observability.</p>
+
+    <p><strong>Problem it solves.</strong> Don't make every language/framework implement mTLS, retries, and tracing. Move it to the platform.</p>
+
+    <p><strong>Without it.</strong> Each service library implements its own retry/timeout/mTLS logic. Languages drift. Upgrades are painful.</p>
+
+    <p><strong>Trade-off.</strong> A proxy on the hot path (~1 ms overhead), more moving parts, and the mesh control plane is a whole new operational surface.</p>
+
+    <p><strong>Examples.</strong> Istio, Linkerd, Consul Connect, AWS App Mesh, Cilium Service Mesh (eBPF-based).</p>
+
+    <h2>16. Consensus (Raft, Paxos, ZAB)</h2>
+
+    <p><strong>What it does.</strong> A protocol letting a cluster of nodes agree on a single value (or log entry) even in the presence of failures, as long as a majority (quorum) remains.</p>
+
+    <p><strong>When to use.</strong> Anywhere you need one-and-only-one truth across nodes: leader election, cluster membership, distributed configuration, distributed locks, metadata for sharded systems.</p>
+
+    <p><strong>Problem it solves.</strong> In a distributed system, "who is the leader?" or "what is the current config?" is not obvious. Consensus gives you a crash-consistent log of decisions.</p>
+
+    <p><strong>Without it.</strong> Split brain. Two nodes think they're the leader; they both accept writes; you have divergent state. Data loss and manual reconciliation.</p>
+
+    <h3>Raft in one paragraph</h3>
+    <p>All nodes start as followers. If they don't hear from a leader within a randomized election timeout, they become candidates, request votes, and the one that gets a majority becomes leader. The leader accepts writes, replicates them to followers, and only commits once a majority has stored the entry. On leader crash, a new election happens within ~150–300 ms. Quorum = ⌊N/2⌋+1. 3 nodes tolerate 1 failure; 5 tolerate 2.</p>
+
+    <p><strong>Examples.</strong> etcd (Raft), Consul (Raft), ZooKeeper (ZAB, Paxos-ish), CockroachDB, TiKV (Raft), MongoDB (Raft since 3.2).</p>
+
+    <h2>17. Distributed Lock</h2>
+
+    <p><strong>What it does.</strong> Mutual exclusion across processes/machines: "only one worker should rebuild the daily report."</p>
+
+    <p><strong>When to use.</strong> Singleton jobs, leader-election-lite, guarding a shared external resource (an API rate limit, a file).</p>
+
+    <p><strong>Problem it solves.</strong> Race conditions between workers.</p>
+
+    <p><strong>Without it.</strong> Two workers both send the daily newsletter. Twice.</p>
+
+    <h3>Options</h3>
+    <table>
+      <thead><tr><th>Mechanism</th><th>Safety</th><th>When OK</th></tr></thead>
+      <tbody>
+        <tr><td>Redis single-node (SET NX EX)</td><td>Unsafe under failover; lease can expire while you still hold it</td><td>"Best-effort" locks with idempotent operations</td></tr>
+        <tr><td>Redis RedLock (multi-node)</td><td>Controversial; Martin Kleppmann's critique; adequate with fencing tokens</td><td>Same as above; don't rely on for correctness-critical exclusive access</td></tr>
+        <tr><td>ZooKeeper / etcd (Raft)</td><td>Safe; fencing tokens available</td><td>Anything correctness-critical</td></tr>
+        <tr><td>Database row lock (<code>SELECT FOR UPDATE</code>)</td><td>Safe within the DB's transactional scope</td><td>When the guarded resource is a DB row anyway</td></tr>
+      </tbody>
+    </table>
+
+    <div class="callout warn">
+      <strong>Fencing tokens.</strong> Even with a consensus-backed lock, an old lock-holder paused on GC for 30s can "wake up" after the lease expired and think it still holds the lock. The fix: the lock gives you an incrementing token; downstream resources reject requests with a stale token. Always use fencing when correctness matters.
+    </div>
+
+    <h2>18. Rate Limiter</h2>
+
+    <p><strong>What it does.</strong> Caps how many requests a client (user, IP, API key) can make per unit time.</p>
+
+    <p><strong>When to use.</strong> Any public API, any login/signup endpoint, any resource expensive to produce.</p>
+
+    <p><strong>Problem it solves.</strong> Abuse, scraping, runaway clients, accidental self-DDoS from a buggy mobile app.</p>
+
+    <p><strong>Without it.</strong> One bad client can take down your service. One brute-forcer can crack passwords.</p>
+
+    <h3>Algorithms</h3>
+    <ul>
+      <li><strong>Fixed window counter</strong> — N requests per minute; counter resets at minute boundary. Simple, but allows 2N burst at boundaries.</li>
+      <li><strong>Sliding window log</strong> — store timestamps of every request; count those within the last minute. Accurate; memory O(N).</li>
+      <li><strong>Sliding window counter</strong> — weighted blend of current and previous window. Good accuracy, O(1) memory. A common default.</li>
+      <li><strong>Token bucket</strong> — refill rate R, bucket capacity B. Each request takes 1 token; allows bursts up to B, sustained rate R. Most popular for APIs.</li>
+      <li><strong>Leaky bucket</strong> — requests enter a queue draining at fixed rate. Smooths bursts; harder to reason about when full.</li>
+    </ul>
+
+    <p><strong>Implementation.</strong> Redis with INCR + EXPIRE, or Redis with a Lua script for atomic sliding window. At very high QPS, local per-node limits with occasional sync.</p>
+
+    <h2>19. Circuit Breaker</h2>
+
+    <p><strong>What it does.</strong> Stops calling a failing downstream dependency for a cooldown period, returning a fast failure (or a fallback) instead of piling up on a dying service.</p>
+
+    <p><strong>When to use.</strong> Any RPC/HTTP call to a remote dependency, especially when retries could make the problem worse.</p>
+
+    <p><strong>Problem it solves.</strong> Cascading failure. Service B is slow. Service A retries. Thread pool fills. Service A falls over. Now the whole app is down.</p>
+
+    <p><strong>Without it.</strong> One slow dependency ripples upward and takes down every service that depends on it, and every service that depends on <em>those</em>.</p>
+
+    <h3>States</h3>
+    <table>
+      <thead><tr><th>State</th><th>Behavior</th><th>Transition</th></tr></thead>
+      <tbody>
+        <tr><td>CLOSED</td><td>Normal operation; requests pass through; errors counted</td><td>Trips OPEN when error rate exceeds threshold</td></tr>
+        <tr><td>OPEN</td><td>All requests fail fast (or fall back); no calls to downstream</td><td>After cooldown (e.g., 30 s), transitions to HALF_OPEN</td></tr>
+        <tr><td>HALF_OPEN</td><td>A few probe requests allowed</td><td>Success → CLOSED. Failure → OPEN (with longer cooldown)</td></tr>
+      </tbody>
+    </table>
+
+    <p><strong>Examples.</strong> Netflix Hystrix (archived), Resilience4j, Polly (.NET), Envoy/Istio outlier detection (at the mesh level), AWS AppMesh.</p>
+
+    <h2>20. Config Service / Feature Flags</h2>
+
+    <p><strong>What it does.</strong> Centralized dynamic configuration and feature toggles — change behavior at runtime without redeploying.</p>
+
+    <p><strong>When to use.</strong> A/B tests, gradual rollouts, kill switches, per-customer overrides, operational toggles.</p>
+
+    <p><strong>Problem it solves.</strong> Deploy-to-toggle is too slow; you need to flip a flag at 2 AM during an incident without a build.</p>
+
+    <p><strong>Without it.</strong> Every change is a deploy. Rollouts are all-or-nothing. On-call on-fire.</p>
+
+    <h3>Core primitives</h3>
+    <ul>
+      <li><strong>Boolean flags</strong> — on/off per environment.</li>
+      <li><strong>Targeting rules</strong> — enabled for users matching filters (plan = pro, region = EU, userId % 100 &lt; 5).</li>
+      <li><strong>Percentage rollout</strong> — enabled for 5% of users, then 20%, then 100%.</li>
+      <li><strong>Kill switch</strong> — a flag that disables a feature instantly during an incident.</li>
+    </ul>
+
+    <p><strong>Examples.</strong> LaunchDarkly, Split.io, Unleash (open source), AWS AppConfig, Flagsmith, ConfigCat. For plain config: etcd, Consul, ZooKeeper, Spring Cloud Config.</p>
+
+    <h2>Symptom → Component Cheat Sheet</h2>
+
+    <table>
+      <thead><tr><th>Symptom</th><th>Primary fix</th><th>Secondary</th></tr></thead>
+      <tbody>
+        <tr><td>"Database CPU is at 100% on reads"</td><td>Cache (Redis/Memcached)</td><td>Read replicas</td></tr>
+        <tr><td>"Database write latency is growing"</td><td>Shard; or move hot writes to LSM (Cassandra/Dynamo)</td><td>Write-behind cache; async via queue</td></tr>
+        <tr><td>"One server is overloaded, others idle"</td><td>Load balancer + health checks</td><td>Better hash key / consistent hashing</td></tr>
+        <tr><td>"Global users complain of slow page loads"</td><td>CDN</td><td>Multi-region deployment; edge compute</td></tr>
+        <tr><td>"Email/SMS in request path makes checkout slow"</td><td>Message queue (SQS/RabbitMQ)</td><td>Worker fleet behind queue</td></tr>
+        <tr><td>"Need to broadcast every DB change to many consumers"</td><td>Streaming log (Kafka/Kinesis)</td><td>CDC tool (Debezium)</td></tr>
+        <tr><td>"Users upload big files, DB is choking"</td><td>Object store (S3/GCS)</td><td>Signed URLs for direct upload</td></tr>
+        <tr><td>"Search on our catalog is slow and bad"</td><td>Search index (Elasticsearch)</td><td>Faceted filters; autocomplete</td></tr>
+        <tr><td>"Metrics table has a billion rows"</td><td>Time-series DB</td><td>Downsampling / rollups</td></tr>
+        <tr><td>"Analysts' queries are killing the OLTP DB"</td><td>Data warehouse (Snowflake/BigQuery)</td><td>ETL / CDC pipeline</td></tr>
+        <tr><td>"Fraud detection needs real-time"</td><td>Stream processor (Flink/Kafka Streams)</td><td>Feature store</td></tr>
+        <tr><td>"Services re-implement auth/retry/logging"</td><td>API gateway (north-south) + service mesh (east-west)</td><td>Shared client library</td></tr>
+        <tr><td>"Need to elect a leader / store cluster config"</td><td>Consensus system (etcd/ZooKeeper)</td><td>DB row lock (for small cases)</td></tr>
+        <tr><td>"Two workers run the same job"</td><td>Distributed lock with fencing token</td><td>Leader election</td></tr>
+        <tr><td>"A single buggy client DDoSes us"</td><td>Rate limiter (token bucket)</td><td>API key quotas</td></tr>
+        <tr><td>"One slow service takes down everything"</td><td>Circuit breaker + timeouts</td><td>Bulkheads, retries with jitter</td></tr>
+        <tr><td>"Rolling out a risky feature"</td><td>Feature flag + percentage rollout</td><td>Kill switch</td></tr>
+        <tr><td>"Recommend friends of friends"</td><td>Graph DB</td><td>Materialized adjacency in Redis</td></tr>
+        <tr><td>"Schema is changing constantly"</td><td>Document DB (MongoDB)</td><td>JSONB column in Postgres</td></tr>
+      </tbody>
+    </table>
+
+    <h2>Chapter Summary</h2>
+    <ul>
+      <li>Every architecture is a composition of ~20 components. Know what each one does, when it applies, and what breaks without it.</li>
+      <li>L7 load balancer + API gateway at the edge; service mesh for east-west traffic; this is the modern default.</li>
+      <li>SQL until you can't; then pick the NoSQL family that matches the access pattern.</li>
+      <li>Cache aggressively, but plan for stampede, penetration, and avalanche.</li>
+      <li>Queues decouple; streams fan out; object store holds the bytes; warehouse answers the analyst.</li>
+      <li>Consensus and distributed locks are last resorts — use them only when correctness demands it, and always with fencing.</li>
+      <li>Rate limiters, circuit breakers, and feature flags are cheap to add and save you during the 2 AM incident.</li>
+    </ul>
+
+    <div class="chapter-nav">
+      <a href="01-foundations.html"><div class="label">← Previous</div><div class="title">Foundations & Capacity</div></a>
+      <a class="next" href="03-basic-systems.html"><div class="label">Next →</div><div class="title">Basic Systems</div></a>
+    </div>
+  </main>
+</div>
+<script src="../assets/js/nav.js"></script>
+</body>
+</html>

@@ -1,0 +1,697 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>War Room Scenarios — Book II · HLD</title>
+<link rel="stylesheet" href="../assets/css/style.css">
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">System Design Books</div>
+    <div class="brand-sub">by Sanheen · Progressive Learning</div>
+    <div class="nav-section">
+      <h3>Home</h3>
+      <a href="../index.html">Overview</a>
+    </div>
+    <div class="nav-section">
+      <h3>Book I — Low Level Design</h3>
+      <a href="../lld/index.html">LLD Index</a>
+    </div>
+    <div class="nav-section">
+      <h3>Book II — High Level Design</h3>
+      <a href="index.html">HLD Index</a>
+      <a href="01-foundations.html">1. Foundations &amp; Capacity</a>
+      <a href="02-building-blocks.html">2. Building Blocks</a>
+      <a href="03-basic-systems.html">3. Basic Systems</a>
+      <a href="04-intermediate.html">4. Intermediate Systems</a>
+      <a href="05-advanced.html">5. Advanced Systems</a>
+      <a href="06-very-high-scale.html">6. Very High Scale</a>
+      <a href="07-war-room.html">7. War Room Scenarios</a>
+      <a href="08-real-architectures.html">8. Real Architectures</a>
+    </div>
+  </aside>
+  <main class="main">
+    <div class="breadcrumb"><a href="../index.html">Home</a> / <a href="index.html">Book II · HLD</a> / Chapter 7</div>
+    <h1>Chapter 7: War Room — Production Incidents</h1>
+
+    <p class="lede">Every system fails. The real test of a staff engineer is not whether they can draw a clean architecture on a whiteboard — it is whether they can keep their head when production is on fire, when the CEO is pinging on Slack, and when the metric graphs look like an EKG of a dying patient. This chapter walks through eight incidents. Read them slowly. Every scenario is composite — built from things that actually happened at real companies, rearranged so that nobody gets sued.</p>
+
+    <p>For each scenario, ask yourself: <em>what would I have checked first? What would I have missed?</em> The postmortem lessons at the end of each one are worth more than the architecture diagrams in the previous chapters.</p>
+
+    <h2>Scenario 1 — Black Friday Checkout Meltdown</h2>
+
+    <div class="callout danger">
+      <strong>PagerDuty, 11:47 AM PT, Black Friday.</strong><br>
+      <code>checkout-success-rate</code> dropped from 98.4% to 31.2% in 90 seconds. <code>db-primary</code> CPU at 99%. <code>checkout-api</code> p99 latency 14s (SLO: 400ms). Twelve simultaneous pages. Revenue dashboard shows $3.2M/hour instead of $11M/hour.
+    </div>
+
+    <h3>The Characters</h3>
+    <ul>
+      <li><strong>Priya</strong> — senior on-call engineer, fourth Black Friday, drinking coffee at home when the pager fires.</li>
+      <li><strong>Dev</strong> — junior on-call, three months in, sweating.</li>
+      <li><strong>Marcus</strong> — VP of Engineering, joining the bridge to "just observe" (nobody believes him).</li>
+      <li><strong>Legal-Alex</strong> — lawyer who pushed a last-minute GDPR consent banner feature that had to ship this morning for EU compliance.</li>
+    </ul>
+
+    <h3>Timeline</h3>
+    <pre><code>11:47  Pages fire. Priya joins bridge, pulls up Grafana.
+11:48  DB CPU pinned. Connection pool exhausted on checkout-api.
+11:49  Dev: "Is it traffic? Are we getting DDoS'd?"
+11:50  Priya checks CDN: traffic is high but within Black Friday forecast.
+11:51  Priya checks APM: every single checkout request is hitting the DB.
+       Cache hit rate: 4%. Normal: 92%.
+11:53  Dev: "Redis is down?" Priya: "Redis is fine. Look — 200k ops/sec,
+       healthy. It's the HIT rate that's zero."
+11:55  They look at cache key samples. New keys look like
+       checkout:v2:cart:u/881234:eu. Old keys were checkout:cart:881234.
+11:57  Priya: "Who changed the cache key format?"
+11:58  Git blame on config repo: 09:30 this morning, Legal-Alex's
+       GDPR banner PR added a region prefix to cache keys for EU data
+       residency. Old cache entries (all of them) are now unreachable.
+       TTLs are 6 hours. Stampede is mostly-cold-cache hitting DB.
+</code></pre>
+
+    <h3>The Wrong Path</h3>
+
+    <div class="callout warn">
+      <strong>Misleading hypothesis (11:49–11:54):</strong> "This must be a traffic spike." Dev wanted to scale out the checkout service. Priya let him start typing the command, then stopped him. "More checkout pods means more connections to the already-dying DB. Stop."
+    </div>
+
+    <p>Adding capacity to a stateless tier that is bottlenecked on a stateful tier is a classic junior mistake. It makes the incident worse by multiplying the pressure on the thing that is already broken.</p>
+
+    <h3>Root Cause</h3>
+
+    <p>The GDPR compliance PR changed the cache key schema from <code>checkout:cart:{user_id}</code> to <code>checkout:v2:cart:u/{user_id}:{region}</code>. This was correct for compliance. But the PR was merged and deployed at 09:30 on Black Friday, and it silently invalidated every cache entry in the system. Normal traffic days, the DB would have absorbed the cold-cache storm. On Black Friday with 8× normal traffic, it did not.</p>
+
+    <h3>The Fix</h3>
+
+    <p><strong>Bleeding stop (12:03):</strong></p>
+    <pre><code># Priya deploys feature flag flip
+LAUNCH_DARKLY toggle:  gdpr_region_prefix = false
+# This reverts cache keys to old format.
+# Pre-warmed cache entries from before 09:30 are still valid.
+# Hit rate recovers to 78% within 3 minutes.
+# DB CPU drops to 54%. Checkout success climbs to 94%.</code></pre>
+
+    <div class="callout success">
+      <strong>12:11 PM — GREEN.</strong> Checkout success 97.8%. Marcus leaves the bridge. Legal-Alex is still on it, panicking about the compliance deadline.
+    </div>
+
+    <p><strong>Long-term fix (that week):</strong></p>
+    <ul>
+      <li>Cache key schema migrations go through a dedicated <em>dual-read</em> pattern: read new key, fall back to old key, write both for N days, then switch.</li>
+      <li>Added a <code>cache_hit_rate</code> pre-deploy canary check: if a deploy drops hit rate more than 5%, auto-rollback.</li>
+      <li>Instituted a "no schema-shaped changes to hot paths during Black Friday freeze" policy, with legal carve-outs scheduled 30+ days in advance.</li>
+      <li>Legal's GDPR prefix shipped the following week via the dual-read pattern. Zero incidents.</li>
+    </ul>
+
+    <h3>Lessons Learned</h3>
+    <ul>
+      <li><strong>Cache key changes are schema migrations.</strong> Treat them with the same rigor as DB migrations.</li>
+      <li><strong>Pre-deploy canary on cache hit rate.</strong> Hit rate is a leading indicator; it moves before errors do.</li>
+      <li><strong>Freeze windows have exceptions; exceptions need review.</strong> Legal compliance is real, but a dual-read rollout would have shipped the feature safely.</li>
+      <li><strong>Do not add capacity to a stateless tier when the stateful tier is dying.</strong> First principle: find the bottleneck, then add capacity to <em>that</em>.</li>
+    </ul>
+
+    <div class="callout success">
+      <strong>Staff Engineer Takeaway.</strong> When a deploy correlates with an incident, your first question is always: <em>what was in that deploy that touched state?</em> Config changes, cache keys, feature flags, and schema migrations are where the dragons live. Code logic changes rarely cause these kinds of cliff-edge failures.
+    </div>
+
+    <h2>Scenario 2 — Silent Data Corruption on Replicas</h2>
+
+    <div class="callout danger">
+      <strong>Ticket #44921, Tuesday 10:14 AM.</strong><br>
+      Customer support escalation: "User reports balance shows $1,240 on their phone but $1,390 when they log in from desktop." Ten similar tickets in the last 48 hours. No alerts fired. All dashboards green.
+    </div>
+
+    <h3>The Characters</h3>
+    <ul>
+      <li><strong>Hana</strong> — database SRE, pulled off another project to investigate.</li>
+      <li><strong>Ravi</strong> — senior backend engineer who owns the <code>accounts</code> service.</li>
+      <li><strong>Compliance officer</strong> — joins the call when he hears the word "balance."</li>
+    </ul>
+
+    <h3>Timeline</h3>
+    <pre><code>10:14  Support escalates the tenth ticket.
+10:30  Hana pulls balances for user 881234:
+       primary:  $1390.00
+       replica1: $1240.00   ← DIVERGED
+       replica2: $1390.00
+       replica3: $1240.00
+10:42  Sample 10,000 users. 2.3% have divergent balances between primary
+       and at least one replica.
+11:05  Hana: "How long has this been happening?"
+       Ravi: "I... I don't know. We only check primary for balances
+       in dashboards."
+11:20  They look at the replication config. Replication mode:
+       STATEMENT-BASED (the MySQL default on this legacy cluster).
+11:25  Hana scans recent migrations for non-deterministic SQL.
+       Finds the culprit:
+
+       UPDATE accounts
+       SET balance = balance + (
+         SELECT amount FROM pending_credits
+         WHERE user_id = accounts.user_id
+         ORDER BY created_at DESC
+         LIMIT 1
+       )
+       WHERE ...;
+
+       No tiebreaker. When two pending_credits rows have identical
+       created_at timestamps, each replica picks a different one.</code></pre>
+
+    <h3>The Wrong Path</h3>
+
+    <div class="callout warn">
+      <strong>Misleading hypothesis (10:14–10:42):</strong> "Users are reporting stale data. It's a caching bug." The team spent 30 minutes hunting through the read cache layer. But the issue was not staleness — it was <em>permanent divergence</em>. A cache bug would have resolved itself on TTL expiry. This did not.
+    </div>
+
+    <h3>Root Cause</h3>
+
+    <p>Statement-based replication replays the SQL statement on each replica independently. If the statement's result depends on row order and the order is not fully specified, each replica can produce a different result. The <code>ORDER BY created_at DESC LIMIT 1</code> looked deterministic but wasn't, because <code>created_at</code> had second-level precision and collisions existed.</p>
+
+    <p>The divergence had been accumulating for 23 days. Compliance officer's face goes ashen.</p>
+
+    <h3>The Fix</h3>
+
+    <p><strong>Bleeding stop (11:45):</strong></p>
+    <pre><code># 1. Route all balance reads to primary immediately.
+#    Yes, it costs latency and QPS on primary. That's fine.
+UPDATE service_config SET balance_read_target = 'primary';
+
+# 2. Switch replication from STATEMENT to ROW-based.
+SET GLOBAL binlog_format = 'ROW';
+# All future writes now replicate as row images, not statements.
+# Row-based replication is deterministic by construction.</code></pre>
+
+    <p><strong>Reconciliation (that week):</strong></p>
+    <ul>
+      <li>Rebuilt every replica from a fresh snapshot of primary.</li>
+      <li>Wrote a checksum job that runs <code>pt-table-checksum</code> hourly and alerts on any divergence greater than zero rows.</li>
+      <li>Wrote a one-off reconciliation script to recompute every affected user's balance from the ledger of events (accounts were append-only event-sourced; the current balance was a materialized view, which saved them).</li>
+      <li>Notified 23,000 affected users. Sent corrected statements. Ate ~$180K in refunded over-credits. Under-credited users got make-whole payments.</li>
+    </ul>
+
+    <div class="callout success">
+      <strong>Resolved with compliance sign-off, 9 days later.</strong> The event-sourced ledger saved the company from a much worse regulatory outcome.
+    </div>
+
+    <h3>Lessons Learned</h3>
+    <ul>
+      <li><strong>Statement-based replication is a footgun.</strong> Use row-based unless you have a specific reason not to.</li>
+      <li><strong>Non-deterministic SQL is a silent killer.</strong> Any query whose result depends on row order must have a <em>total</em> ordering — add a tiebreaker like a primary key.</li>
+      <li><strong>Continuously verify replica consistency.</strong> You cannot trust replicas to drift silently; you must run checksum jobs.</li>
+      <li><strong>Event-sourced ledgers are a safety net.</strong> If you can recompute current state from an append-only log, corruption is recoverable. If you overwrite state in place, it is not.</li>
+    </ul>
+
+    <div class="callout success">
+      <strong>Staff Engineer Takeaway.</strong> Silent failures are more dangerous than loud failures. A system that pages you is a system that can be fixed. A system that quietly gives wrong answers for 23 days can end the company. Invest in continuous integrity checking for every piece of state that affects money, identity, or safety.
+    </div>
+
+    <h2>Scenario 3 — Cascading Microservice Failure</h2>
+
+    <div class="callout danger">
+      <strong>Friday 6:17 PM, ride-hailing app.</strong><br>
+      Every single ride request returning 503. Driver app cannot update location. Customer app cannot book. Support phones ringing off the hook. No deploys in the last 48 hours.
+    </div>
+
+    <h3>The Characters</h3>
+    <ul>
+      <li><strong>Zane</strong> — SRE on-call.</li>
+      <li><strong>Tanvi</strong> — staff engineer, owns the matching service.</li>
+      <li><strong>The CEO</strong> — in the bridge within 8 minutes.</li>
+    </ul>
+
+    <h3>Timeline</h3>
+    <pre><code>6:17  All services red. Zane opens the service dependency graph.
+6:19  Tanvi joins. "What's upstream of everything?"
+6:20  The graph: customer-app → booking → pricing → matching → driver-location.
+      driver-location p99: 45 seconds. Normal: 80ms.
+6:22  driver-location pod metrics: CPU 100%, GC pauses constant,
+      thread pool saturated, queue depth 50,000.
+6:23  Zane: "Let's scale it out." Kubernetes scales from 40 to 120 pods.
+6:25  New pods start, immediately spike to 100% CPU, get rolled out.
+      Pod crash loop.
+6:27  Tanvi: "Stop scaling. We're making it worse."
+6:28  Tanvi pulls traffic origin breakdown on driver-location.
+      60% of traffic is coming from the matching service — but matching
+      is ALSO timing out. How?
+6:30  Retries. Matching retries driver-location up to 5 times with no
+      jitter. Each user ride request fans out to ~5× the normal RPS
+      on driver-location. Driver-location falls further behind.
+      Matching retries more. Driver-location dies harder.
+      This is a thundering herd via retry amplification.
+6:35  Tanvi: "Kill retries on matching. Right now."</code></pre>
+
+    <h3>The Wrong Path</h3>
+
+    <div class="callout warn">
+      <strong>Misleading hypothesis (6:17–6:26):</strong> "It's a capacity problem, scale it out." Horizontal scaling during a thundering herd does not work because the new capacity is immediately consumed by the retry storm. The system never catches up.
+    </div>
+
+    <h3>Root Cause</h3>
+
+    <p>Three failures compounded:</p>
+    <ol>
+      <li>A single driver-location pod got into a slow-GC state (turned out to be a memory leak from a recent library upgrade).</li>
+      <li>The matching service retried failed calls 5× with no jitter and no circuit breaker, amplifying the original load 5×.</li>
+      <li>All upstream services shared a global retry policy, so once matching started timing out, booking and pricing also started retrying, fanning out further.</li>
+    </ol>
+
+    <p>The initial spark was tiny. The system turned it into a total outage.</p>
+
+    <h3>The Fix</h3>
+
+    <p><strong>Bleeding stop (6:38):</strong></p>
+    <pre><code># 1. Flip a feature flag to disable retries globally on driver-location.
+FEATURE_FLAG matching_retry_enabled = false
+
+# 2. Drain the queue. Driver-location p99 drops from 45s to 600ms
+#    within 90 seconds as the retry storm subsides.
+
+# 3. Manually bounce the original leaky pods.
+
+# 4. Re-enable retries with jitter + max 2 attempts + circuit breaker.</code></pre>
+
+    <div class="callout success">
+      <strong>6:44 PM — GREEN.</strong> Full recovery. CEO leaves the bridge. Support queue drains over the next 20 minutes.
+    </div>
+
+    <p><strong>Long-term fix (6 weeks of work):</strong></p>
+    <ul>
+      <li><strong>Circuit breakers on every inter-service call.</strong> Hystrix-style: after N% failure rate, fail fast and shed load.</li>
+      <li><strong>Bulkheads.</strong> Separate thread pools per downstream so a slow dependency cannot consume the whole calling service.</li>
+      <li><strong>Retry budgets.</strong> Retries are capped at 10% of total request volume. Once the budget is exhausted, additional retries fail immediately.</li>
+      <li><strong>Load shedding.</strong> Each service publishes a pressure signal; upstream services drop lower-priority work (e.g. precomputed price previews) when pressure is high, preserving capacity for critical paths (active bookings).</li>
+      <li><strong>Chaos testing.</strong> Monthly game days where they intentionally slow a downstream and verify the fabric holds.</li>
+    </ul>
+
+    <h3>Lessons Learned</h3>
+    <ul>
+      <li><strong>Retries are load amplifiers.</strong> Without budgets, they turn a tiny blip into a total outage.</li>
+      <li><strong>Every RPC needs a circuit breaker.</strong> This is not optional at scale.</li>
+      <li><strong>Horizontal scaling does not fix a thundering herd.</strong> You must first break the feedback loop.</li>
+      <li><strong>Memory leaks in libraries are a thing.</strong> Pin versions, test upgrades.</li>
+    </ul>
+
+    <div class="callout success">
+      <strong>Staff Engineer Takeaway.</strong> In a microservice fabric, the failure mode that kills you is not a single service going down — it's the fabric's response to a single service going slow. Engineer for graceful degradation, not just high availability. A slow dependency is harder to handle than a dead one.
+    </div>
+
+    <h2>Scenario 4 — The Noisy Neighbor SaaS Customer</h2>
+
+    <div class="callout danger">
+      <strong>Wednesday 2:03 PM, B2B analytics SaaS.</strong><br>
+      Dashboard p95 latency for 11,000 customers jumps from 800ms to 38 seconds. Query engine cluster at 100% CPU. Support desk lit up.
+    </div>
+
+    <h3>The Characters</h3>
+    <ul>
+      <li><strong>Malia</strong> — platform engineer on-call.</li>
+      <li><strong>Omar</strong> — account manager for the customer causing the problem.</li>
+      <li><strong>CS team</strong> — fielding a flood of "why is the dashboard broken" tickets.</li>
+    </ul>
+
+    <h3>Timeline</h3>
+    <pre><code>2:03  Pages fire. Malia opens the query engine metrics.
+2:05  One tenant ID — a Fortune 500 customer, new this quarter — is
+      consuming 91% of CPU across the cluster.
+2:06  Their query: a 2.3 TB GROUP BY across four years of events,
+      joined against their 400M-row user table, no partition pruning,
+      no time filter. It's been running for 18 minutes.
+2:08  Malia: "Kill it?"
+      Omar (joining the bridge): "Wait — they're on a $2M annual
+      contract, their CIO is watching. Do not kill the query without
+      me talking to them."
+2:10  Malia kills it anyway, with CS-approved boilerplate going to
+      Omar for relay. The cluster recovers in 40 seconds.
+2:12  The customer retries the same query. The cluster dies again.</code></pre>
+
+    <h3>The Wrong Path</h3>
+
+    <div class="callout warn">
+      <strong>Misleading hypothesis (2:03–2:05):</strong> "The cluster is undersized, let's scale it." The cluster could have been 10× bigger and this query would still have consumed all of it. Multi-tenant systems fail from <em>isolation</em> problems, not capacity problems. Adding capacity to an unquarantined noisy neighbor just gives them more rope.
+    </div>
+
+    <h3>Root Cause</h3>
+
+    <p>No tenant isolation. The query engine was a single shared cluster with no per-tenant resource limits. Any customer could submit a query that consumed the entire cluster. It had never happened before because previous customers were self-limiting; this new Fortune 500 had an analyst who wrote an unbounded query and hit "run" three times.</p>
+
+    <h3>The Fix</h3>
+
+    <p><strong>Bleeding stop (2:15):</strong></p>
+    <pre><code># 1. Route the noisy tenant to a dedicated "quarantine" cluster
+#    provisioned from spare capacity. They get their own 32-node group.
+# 2. They can run whatever they want there; it cannot hurt anyone else.
+# 3. Omar calls the customer: "We've moved you to a dedicated tier
+#    for performance reasons." Customer is delighted.</code></pre>
+
+    <div class="callout success">
+      <strong>2:19 PM — GREEN.</strong> Main cluster recovers. Quarantine tenant is happy. Omar looks like a hero instead of an excuse-maker.
+    </div>
+
+    <p><strong>Long-term fix (quarter-long initiative):</strong></p>
+    <ul>
+      <li><strong>Per-tenant resource quotas.</strong> Each tenant gets a CPU-seconds-per-minute budget scaled with their contract size. Enforcement at the query admission layer.</li>
+      <li><strong>Per-tenant queue.</strong> Fair scheduling across tenants — a single tenant cannot starve others even if they submit 10,000 queries.</li>
+      <li><strong>Query cost estimator.</strong> Queries above a size threshold require explicit customer opt-in and are scheduled in a separate low-priority pool.</li>
+      <li><strong>Tiering.</strong> Introduced <em>Standard</em> (shared), <em>Dedicated</em> (isolated cluster), and <em>Enterprise Dedicated</em> (isolated + SLA) tiers. Pricing aligns with cost.</li>
+      <li><strong>Automatic noisy-neighbor detection.</strong> If a tenant exceeds 15% of shared cluster resources for 5 minutes, page a human and auto-quarantine.</li>
+    </ul>
+
+    <h3>Lessons Learned</h3>
+    <ul>
+      <li><strong>Multi-tenant systems must enforce isolation.</strong> "They haven't abused it yet" is not isolation; it is luck.</li>
+      <li><strong>Tiering aligns technical limits with commercial reality.</strong> Your biggest customers need dedicated resources. Charge for them.</li>
+      <li><strong>You will always kill the query.</strong> Build the comms around that assumption.</li>
+    </ul>
+
+    <div class="callout success">
+      <strong>Staff Engineer Takeaway.</strong> If your product is multi-tenant and you cannot answer "what happens if one tenant tries to use 100% of resources?" with a specific mechanism, you have a latent Sev-1 waiting for the wrong customer to show up. Tenant isolation is not a feature you ship later — it is a property of the architecture.
+    </div>
+
+    <h2>Scenario 5 — Zero-Downtime Migration Gone Wrong</h2>
+
+    <div class="callout danger">
+      <strong>Thursday 4:22 AM, shadow-mode migration pre-cutover check.</strong><br>
+      Checksum job on the dual-write migration finds 0.34% of rows diverged between old monolithic Postgres (40 TB) and new sharded cluster. Cutover was scheduled for Saturday 2 AM. Marketing campaign starts Monday.
+    </div>
+
+    <h3>The Characters</h3>
+    <ul>
+      <li><strong>Fenella</strong> — staff engineer leading the migration.</li>
+      <li><strong>Alex</strong> — data infra engineer, built the dual-write.</li>
+      <li><strong>CMO</strong> — $4M marketing spend committed for Monday.</li>
+    </ul>
+
+    <h3>Timeline</h3>
+    <pre><code>4:22   Checksum job alert: 0.34% divergence.
+4:35   Fenella pages Alex. They start sampling diverged rows.
+5:10   Pattern emerges: divergences all involve the "notifications_sent"
+       array column. Old store: array grows correctly. New store:
+       occasionally has missing elements.
+5:45   Alex finds the bug. The dual-write path does:
+
+         old_db.exec("UPDATE u SET notifications_sent = array_append(...)")
+         new_db.exec("UPDATE u SET notifications_sent = $1", full_array)
+
+       The second call uses a full array computed from a READ of the
+       OLD db done before the UPDATE. Under concurrent updates, two
+       writes can race — each reads the old array, each appends their
+       own element, each writes back a full array missing the other's.
+       Last writer wins.
+6:15   Fenella: "How long has this bug been in dual-write?"
+       Alex: "Six weeks."
+6:16   Fenella: "We are not cutting over Saturday."</code></pre>
+
+    <h3>The Wrong Path</h3>
+
+    <div class="callout warn">
+      <strong>Misleading hypothesis (considered but rejected):</strong> "Just cut over and reconcile afterwards." Tempting, because the campaign is Monday. Fenella refused. Reconciling notification history after cutover means users see duplicate notifications, missed notifications, and wrong badge counts — worse than a delayed cutover.
+    </div>
+
+    <h3>The Fix</h3>
+
+    <p><strong>Freeze the cutover, fix the bug, re-verify:</strong></p>
+    <ul>
+      <li>Alex rewrote the dual-write to use a <em>single</em> atomic operation that derives the new-store write from the old-store's committed result, not a pre-update read.</li>
+      <li>Re-ran the checksum job for 72 hours. Divergence rate dropped to zero.</li>
+      <li>Rescheduled cutover for the following Saturday, 2 weeks later.</li>
+      <li>Fenella met with CMO. Campaign was pushed 1 week. CMO was unhappy. CFO was unhappy. CEO backed Fenella.</li>
+    </ul>
+
+    <div class="callout success">
+      <strong>Cutover, two weeks later at 2:14 AM.</strong> Zero diverged rows. Zero user-visible impact. Campaign launched the following Monday on the new cluster.
+    </div>
+
+    <h3>Lessons Learned</h3>
+    <ul>
+      <li><strong>Dual-write is never as simple as it looks.</strong> Concurrency bugs in dual-write are the dominant failure mode of online migrations.</li>
+      <li><strong>Checksum jobs are the only thing that catches these bugs.</strong> Without them, you cut over and find out in production.</li>
+      <li><strong>Shadow reads are better than dual-writes where possible.</strong> Write to new, read-verify from new, fall back to old. Or: write only to new once you trust it.</li>
+      <li><strong>The business pressure to cut over on a date is a trap.</strong> A delayed migration costs money. A botched migration costs customers.</li>
+      <li><strong>Freeze deploys, not just data, during cutover weeks.</strong> Every PR to the affected code path needs migration-aware review.</li>
+    </ul>
+
+    <div class="callout success">
+      <strong>Staff Engineer Takeaway.</strong> The right question during a migration is not "can we cut over?" but "can we prove we can cut over?" Proof comes from a continuous checksum process running for long enough to observe the production distribution of writes. If the checksum job is ever non-zero, you do not cut over. Full stop. The business will forgive a delayed migration; it will not forgive silent data loss.
+    </div>
+
+    <h2>Scenario 6 — The Kafka Rebalance Storm</h2>
+
+    <div class="callout danger">
+      <strong>Monday 9:03 AM, event-processing pipeline.</strong><br>
+      Consumer lag on topic <code>orders.events</code> climbs from 2K messages to 14M messages in 10 minutes. Dashboards downstream of the pipeline are stale. Fraud detection is running 10 minutes behind real-time.
+    </div>
+
+    <h3>The Characters</h3>
+    <ul>
+      <li><strong>Kenji</strong> — data platform engineer on-call.</li>
+      <li><strong>Lira</strong> — fraud team engineer who just deployed a new consumer 15 minutes ago.</li>
+    </ul>
+
+    <h3>Timeline</h3>
+    <pre><code>9:03  Lag alert fires.
+9:05  Kenji checks consumer group status:
+        kafka-consumer-groups --describe --group fraud-v2
+      Status: "Rebalancing" — for 8 minutes and counting.
+9:07  During rebalance, the entire consumer group is PAUSED.
+      Zero messages being processed. Lag accumulates at full
+      production rate (~180K msg/sec).
+9:10  Rebalance finishes. Group starts consuming.
+9:10:22  Another consumer in the group exits (OOM from the backlog).
+9:10:23  Rebalance begins again. Group paused again.
+9:18  This cycle has happened 4 times. Each rebalance takes ~6-8
+      minutes. Every rebalance, another consumer dies from memory
+      pressure trying to catch up, triggering another rebalance.
+9:20  Kenji: "We're in a rebalance-storm death spiral."</code></pre>
+
+    <h3>The Wrong Path</h3>
+
+    <div class="callout warn">
+      <strong>Misleading hypothesis (9:03–9:10):</strong> "Consumers are just slow, let's add more consumers." Adding a consumer triggers a rebalance. A rebalance pauses all consumers. Paused consumers fall further behind. The "solution" is the cause.
+    </div>
+
+    <h3>Root Cause</h3>
+
+    <p>Two compounding issues:</p>
+    <ol>
+      <li>Lira added a new consumer instance to the fraud-v2 group 15 minutes before the alert. This triggered the first rebalance.</li>
+      <li>The group was using the default <em>eager</em> (stop-the-world) rebalance protocol. Every rebalance paused all N consumers for the duration of partition reassignment across 1,200 partitions.</li>
+      <li>Consumers were configured with a small fetch buffer. When they resumed after rebalance, they tried to catch up by fetching large batches — triggering OOMs on the smallest-memory nodes, which dropped out of the group, which triggered another rebalance.</li>
+    </ol>
+
+    <h3>The Fix</h3>
+
+    <p><strong>Bleeding stop (9:24):</strong></p>
+    <pre><code># 1. Pin the consumer group membership to a known-stable set.
+#    Scale DOWN to 12 consumers all on identical-sized nodes.
+# 2. Wait for one clean rebalance to complete.
+# 3. Drain the backlog with max.poll.records capped low to prevent OOM.</code></pre>
+
+    <p><strong>Recovery (9:24–11:02):</strong> Lag drained over 98 minutes. Fraud detection caught up to real-time. No false negatives because messages were delayed, not dropped.</p>
+
+    <div class="callout success">
+      <strong>11:02 AM — GREEN.</strong> Real-time again.
+    </div>
+
+    <p><strong>Long-term fix:</strong></p>
+    <ul>
+      <li><strong>Switched to the <code>CooperativeStickyAssignor</code>.</strong> Cooperative rebalance only reassigns the partitions that need to move, rather than revoking everything. Rebalance downtime drops from minutes to seconds.</li>
+      <li><strong>Broke the monolithic consumer group into 4 smaller groups</strong>, each owning 300 partitions. Smaller groups rebalance faster and contain blast radius.</li>
+      <li><strong>Added pre-rebalance headroom budgets</strong>: do not add or remove consumers if the group's current lag exceeds 10 minutes of production rate.</li>
+      <li><strong>Per-consumer memory limits</strong> via <code>max.partition.fetch.bytes</code> tuned for worst-case partitions.</li>
+      <li><strong>Runbook entry:</strong> never scale a consumer group during an incident. Always drain lag first.</li>
+    </ul>
+
+    <h3>Lessons Learned</h3>
+    <ul>
+      <li><strong>Eager rebalancing is a stop-the-world GC for your stream pipeline.</strong> Use cooperative rebalancing.</li>
+      <li><strong>Large consumer groups have large rebalance cost.</strong> Keep groups small; partition your pipeline by domain.</li>
+      <li><strong>Scaling during an incident can make it worse.</strong> Stability of membership beats capacity during a storm.</li>
+      <li><strong>Backlog recovery is its own hazard.</strong> A consumer catching up on hours of data can OOM or overwhelm downstream systems. Cap fetch sizes.</li>
+    </ul>
+
+    <div class="callout success">
+      <strong>Staff Engineer Takeaway.</strong> Kafka's defaults were designed for a world of stable, long-running consumers. In a Kubernetes world where pods come and go every few minutes, those defaults will eat you alive. Tune the rebalance behavior explicitly, and treat consumer group membership as a first-class operational concern with its own runbook, alerting, and change management.
+    </div>
+
+    <h2>Scenario 7 — The DNS TTL Outage</h2>
+
+    <div class="callout danger">
+      <strong>Sunday 11:08 PM, mid-migration weekend.</strong><br>
+      Traffic to the new DNS provider is only 23% of production. 77% of clients still hitting the old provider — which was supposed to be decommissioned at midnight. Ops is about to pull the plug.
+    </div>
+
+    <h3>The Characters</h3>
+    <ul>
+      <li><strong>Geoff</strong> — network engineer running the migration.</li>
+      <li><strong>Nita</strong> — SRE who noticed the low traffic numbers on the new provider.</li>
+      <li><strong>On-call ops</strong> — finger hovering over the shutdown switch for the old provider.</li>
+    </ul>
+
+    <h3>Timeline</h3>
+    <pre><code>11:08  Nita: "Geoff, only 23% of clients are on the new nameservers.
+       We can't cut the old ones at midnight or we take down
+       three-quarters of our users."
+11:10  Geoff checks the TTL on the nameserver (NS) records they
+       published. TTL: 172800 seconds = 48 HOURS.
+11:12  They had published the NS change 18 hours ago. At a 48-hour TTL,
+       clients' resolvers are caching the old nameservers. Even though
+       the new nameservers are authoritative, clients don't know yet —
+       and won't, for another 30 hours.
+11:15  Geoff: "We can't rush the TTL. The resolvers out in the wild
+       already cached the old value. Our only option is to keep the
+       old nameservers alive."</code></pre>
+
+    <h3>The Wrong Path</h3>
+
+    <div class="callout warn">
+      <strong>Misleading hypothesis:</strong> "Just push a shorter TTL now." This does nothing for clients whose resolvers already have the old long-TTL cached entry. You can lower the future TTL, but the past TTL is a contract you have already handed to the world.
+    </div>
+
+    <h3>Root Cause</h3>
+
+    <p>The migration runbook assumed clients would pick up the new nameservers quickly. It did not account for the NS record's TTL having been set to 48 hours at initial provisioning years earlier. Before migrating, the TTL should have been dropped to 300 seconds, given 48 hours to propagate, then the NS change pushed. This step was skipped.</p>
+
+    <h3>The Fix</h3>
+
+    <p><strong>Bleeding stop:</strong></p>
+    <ul>
+      <li>Kept old nameservers running with proxied forwarding to the new backend until the full 48-hour TTL window elapsed.</li>
+      <li>Paid an extra month's fee to the outgoing DNS provider to avoid the cliff.</li>
+      <li>Set the NS record TTL to 300 seconds immediately; in 48 hours, they could actually complete the cutover safely.</li>
+    </ul>
+
+    <div class="callout success">
+      <strong>Tuesday 11:30 PM.</strong> 98% of traffic on new provider. Old provider decommissioned. No user-visible impact.
+    </div>
+
+    <p><strong>Long-term fix:</strong></p>
+    <ul>
+      <li>Published a DNS runbook: <em>any</em> DNS migration requires a minimum 2× TTL period of preparation before the change, during which TTLs are dropped to 300 seconds.</li>
+      <li>Monitoring for authoritative-nameserver TTLs: alert if any critical record has a TTL greater than 1 hour.</li>
+      <li>Defaulted all new records to 300-second TTL in Terraform modules.</li>
+    </ul>
+
+    <h3>Lessons Learned</h3>
+    <ul>
+      <li><strong>DNS TTL is a commitment, not a suggestion.</strong> Once a resolver caches a record, you cannot force it to forget.</li>
+      <li><strong>Migrations need a TTL-lowering phase that is longer than the current TTL.</strong> Typically: drop TTL to 5 minutes, wait 2× the old TTL, then migrate.</li>
+      <li><strong>Never run a DNS migration with a long-TTL hanging over you.</strong> The runbook starts weeks in advance.</li>
+      <li><strong>Decommission windows are cheap to extend, expensive to compress.</strong> Plan to keep the old system alive longer than you think you need.</li>
+    </ul>
+
+    <div class="callout success">
+      <strong>Staff Engineer Takeaway.</strong> DNS is eventually consistent with a very long "eventually." Treat every TTL as a promise to the internet. If you have not planned your migrations around the TTL, you are not migrating — you are gambling. Always lower TTLs first, wait, migrate, then restore them.
+    </div>
+
+    <h2>Scenario 8 — The 4:00 AM Cert Expiry</h2>
+
+    <div class="callout danger">
+      <strong>Thursday 4:00:03 AM.</strong><br>
+      Every mobile client worldwide starts seeing TLS handshake failures. API error rate: 100%. Web traffic: fine. Internal services: fine. Nothing in the monitoring dashboards is red.
+    </div>
+
+    <h3>The Characters</h3>
+    <ul>
+      <li><strong>Sal</strong> — on-call SRE, awakened by customer-support-originated PagerDuty.</li>
+      <li><strong>Bea</strong> — security engineer, woken up shortly after.</li>
+    </ul>
+
+    <h3>Timeline</h3>
+    <pre><code>4:00:03  Mobile clients fail TLS handshake.
+4:07     First customer support tickets.
+4:14     Support escalates; PagerDuty fires for Sal.
+4:16     Sal logs in. Dashboards: green. Internal health checks: green.
+         curl https://api.ourcompany.com from his laptop: works.
+4:19     Sal from a phone on LTE, not corp VPN:
+           curl https://api.ourcompany.com
+           -&gt; SSL certificate problem: certificate has expired
+4:20     Sal: "What the hell, the cert health check is green."
+4:22     He opens the monitoring config. The cert check is hitting
+         api-internal.ourcompany.com — NOT the public
+         api.ourcompany.com. The internal domain uses a DIFFERENT
+         certificate.
+4:24     Sal runs: openssl s_client -connect api.ourcompany.com:443
+         notAfter: expired at 04:00:00 UTC today.
+4:26     Bea joins. They find the public API cert. Auto-renewal was
+         set up — but the auto-renewal script was on a retired
+         bastion host that was decommissioned six weeks ago.</code></pre>
+
+    <h3>The Wrong Path</h3>
+
+    <div class="callout warn">
+      <strong>Misleading hypothesis (4:16–4:20):</strong> "Monitoring is green, so it must be a client-side problem or a local ISP issue." Sal wasted four minutes because his laptop was inside the corporate network and hitting the API through an internal path that bypassed the expired public cert. Always test from where the users are.
+    </div>
+
+    <h3>Root Cause</h3>
+
+    <p>Layered failure:</p>
+    <ol>
+      <li>Public API TLS cert expired at midnight UTC (4:00 local).</li>
+      <li>Auto-renewal script was on a decommissioned bastion; it hadn't run in 6 weeks.</li>
+      <li>Monitoring checked an internal domain with a different cert, so it reported healthy.</li>
+      <li>No 30-day expiry warning alert existed because "auto-renewal handles it."</li>
+    </ol>
+
+    <h3>The Fix</h3>
+
+    <p><strong>Bleeding stop (4:38):</strong></p>
+    <pre><code># 1. Manually issue new cert via ACM / Let's Encrypt from Bea's laptop.
+# 2. Deploy to the public ALB.
+# 3. Validate from external LTE:
+#    openssl s_client -connect api.ourcompany.com:443 | grep notAfter
+# 4. Mobile clients recover within 5 minutes as TLS handshakes succeed.</code></pre>
+
+    <div class="callout success">
+      <strong>4:44 AM — GREEN.</strong> Mobile apps work again. Estimated 44 minutes of full mobile outage. Support tickets: 23,000.
+    </div>
+
+    <p><strong>Long-term fix:</strong></p>
+    <ul>
+      <li><strong>External black-box monitoring.</strong> Synthetic probes running from multiple geographic regions, outside the corporate network, hitting the actual public endpoints that users hit.</li>
+      <li><strong>Certificate inventory.</strong> A single source of truth listing every cert, issuer, expiry date, renewal mechanism, and owner. Reviewed quarterly.</li>
+      <li><strong>30-60-7-1 day expiry alerts.</strong> Four escalating alerts before a cert expires. The last one pages a human.</li>
+      <li><strong>Moved auto-renewal to cert-manager on Kubernetes</strong> — a managed platform service, not a script on a box.</li>
+      <li><strong>Cert rotation game day.</strong> Quarterly drill where the team simulates a cert failure and verifies alerts and runbooks.</li>
+    </ul>
+
+    <h3>Lessons Learned</h3>
+    <ul>
+      <li><strong>Monitor from where your users are, not from inside your network.</strong> Black-box synthetics are non-negotiable.</li>
+      <li><strong>Every cert needs an owner and a renewal mechanism that does not depend on a specific host staying alive.</strong></li>
+      <li><strong>"It's automated" is not a monitoring strategy.</strong> Automation breaks. Verify outcomes.</li>
+      <li><strong>Cert expiry is 100% predictable.</strong> An outage from cert expiry is an operational failure, not a technical one.</li>
+    </ul>
+
+    <div class="callout success">
+      <strong>Staff Engineer Takeaway.</strong> The mistakes that take you down at scale are rarely exotic. They are boring operational things — certs, DNS, disk space, cron jobs on retired machines. Build your monitoring to catch the boring things, because the boring things are what cause the Sev-1s. Every predictable event with a calendar date (cert expiry, domain renewal, software EOL) should have an alert and an owner six months before it matters.
+    </div>
+
+    <h2>Closing Reflections</h2>
+
+    <p>Eight scenarios, eight different shapes of failure. Patterns across all of them:</p>
+
+    <ul>
+      <li><strong>The initial hypothesis is usually wrong.</strong> Good incident responders slow down and verify before acting.</li>
+      <li><strong>Adding capacity rarely fixes the problem.</strong> Isolation, circuit-breaking, and load-shedding fix the problem.</li>
+      <li><strong>Monitoring that points at the wrong thing is worse than no monitoring</strong> — it gives you false confidence.</li>
+      <li><strong>The fix during the incident is not the same as the fix after the incident.</strong> During: stop the bleeding. After: change the system so this class of incident cannot happen again.</li>
+      <li><strong>Silent failures are worse than loud ones.</strong> Invest in continuous verification.</li>
+      <li><strong>Scale changes behavior.</strong> A retry loop that works fine at 100 QPS can destroy you at 100K QPS.</li>
+    </ul>
+
+    <p>The next chapter zooms out to look at how real companies have solved these problems at massive scale — the architectures behind Netflix, Uber, Meta, Stripe, and others. Every one of those companies has lived through scenarios like these. Their architectures are what they built <em>after</em>.</p>
+
+    <div class="chapter-nav">
+      <a href="06-very-high-scale.html"><div class="label">← Previous</div><div class="title">6. Very High Scale</div></a>
+      <a class="next" href="08-real-architectures.html"><div class="label">Next →</div><div class="title">8. Real Architectures</div></a>
+    </div>
+  </main>
+</div>
+<script src="../assets/js/nav.js"></script>
+</body>
+</html>

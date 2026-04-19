@@ -1,0 +1,614 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Design Patterns Primer — Book I · LLD</title>
+<link rel="stylesheet" href="../assets/css/style.css">
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">System Design Books</div>
+    <div class="brand-sub">by Sanheen · Progressive Learning</div>
+    <div class="nav-section">
+      <h3>Home</h3>
+      <a href="../index.html">Overview</a>
+    </div>
+    <div class="nav-section">
+      <h3>Book I — Low Level Design</h3>
+      <a href="index.html">LLD Index</a>
+      <a href="01-foundations.html">1. Foundations (OOP, SOLID)</a>
+      <a href="02-patterns.html">2. Design Patterns Primer</a>
+      <a href="03-basic-problems.html">3. Basic Problems</a>
+      <a href="04-intermediate.html">4. Intermediate Problems</a>
+      <a href="05-advanced.html">5. Advanced Problems</a>
+      <a href="06-concurrency.html">6. Concurrency in LLD</a>
+      <a href="07-war-room.html">7. War Room Scenarios</a>
+      <a href="08-real-code.html">8. Real Company Code</a>
+    </div>
+    <div class="nav-section">
+      <h3>Book II — High Level Design</h3>
+      <a href="../hld/index.html">HLD Index</a>
+    </div>
+  </aside>
+  <main class="main">
+    <div class="breadcrumb"><a href="../index.html">Home</a> / <a href="index.html">Book I · LLD</a> / Chapter 2</div>
+    <h1>Chapter 2: Design Patterns Primer</h1>
+
+    <div class="pills">
+      <span class="pill">Creational</span>
+      <span class="pill">Structural</span>
+      <span class="pill">Behavioral</span>
+      <span class="pill">12 patterns</span>
+    </div>
+
+    <p>Design patterns are not magic. They are named solutions to problems that developers kept re-discovering, independently, across decades and languages. Each pattern started life as a specific pain, and the "pattern" is just the shape of the most common cure.</p>
+
+    <p>This chapter is organised around pain, not taxonomy. For each pattern you'll see:</p>
+    <ol>
+      <li><strong>The pain</strong> — the concrete thing that hurts without this pattern.</li>
+      <li><strong>The fix</strong> — Python code showing the pattern.</li>
+      <li><strong>When to use / when NOT to use</strong>.</li>
+      <li><strong>Real-world examples</strong> — where you've already seen this pattern used in the wild.</li>
+    </ol>
+
+    <div class="callout">
+      <div class="callout-title">How to read this chapter</div>
+      Don't memorise. When you feel the pain described at the top of each section in your own code, come back here and apply the fix. Patterns are a recall tool, not a checklist.
+    </div>
+
+    <h2>Creational Patterns</h2>
+    <p>These patterns deal with <em>how objects come into being</em>. The common pain: <code>new SomeClass(...)</code> scattered everywhere makes the code rigid and hard to swap implementations.</p>
+
+    <h3>1. Singleton — one instance, everywhere</h3>
+    <p><strong>The pain:</strong> you have a single piece of shared state (a connection pool, a config, a logger). Callers keep creating new ones and bugs appear because they don't see each other's changes.</p>
+
+    <p><strong>The fix:</strong></p>
+    <pre><code>class ConfigSingleton:
+    _instance = None
+
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+            cls._instance._data = {}
+        return cls._instance
+
+    def set(self, k, v): self._data[k] = v
+    def get(self, k):    return self._data.get(k)
+
+a = ConfigSingleton()
+b = ConfigSingleton()
+a.set("db_url", "postgres://...")
+assert b.get("db_url") == "postgres://..."    # same instance
+assert a is b</code></pre>
+
+    <p><strong>When to use:</strong> a genuinely global resource — app-wide config, a single logger, a connection pool.</p>
+    <p><strong>When NOT to use:</strong> as a convenient global variable. Singletons are hard to test (shared state leaks between tests) and can hide dependencies.</p>
+    <p><strong>Real-world:</strong> Python's <code>logging</code> module uses a logger registry. Java's <code>Runtime.getRuntime()</code>. Database drivers often return a process-wide pool.</p>
+
+    <div class="callout danger">
+      <div class="callout-title">Singleton anti-pattern warning</div>
+      If you find yourself writing more than two or three Singletons in an app, you've probably re-invented global variables with extra steps. Prefer dependency injection.
+    </div>
+
+    <h3>2. Factory Method — decouple "what to create" from "who creates it"</h3>
+    <p><strong>The pain:</strong> your code decides which concrete class to instantiate based on some parameter. Every new type means editing every place that does this decision.</p>
+
+    <p><strong>The fix:</strong></p>
+    <pre><code>from abc import ABC, abstractmethod
+
+class Notification(ABC):
+    @abstractmethod
+    def send(self, msg): ...
+
+class Email(Notification):
+    def send(self, msg): print("email:", msg)
+
+class SMS(Notification):
+    def send(self, msg): print("sms:", msg)
+
+class Push(Notification):
+    def send(self, msg): print("push:", msg)
+
+class NotificationFactory:
+    @staticmethod
+    def create(channel: str) -&gt; Notification:
+        registry = {"email": Email, "sms": SMS, "push": Push}
+        cls = registry.get(channel)
+        if cls is None:
+            raise ValueError(f"unknown channel {channel}")
+        return cls()
+
+# callers never see concrete classes:
+NotificationFactory.create("sms").send("Your OTP is 1234")</code></pre>
+
+    <p><strong>When to use:</strong> the <em>type</em> of object depends on runtime input (user choice, config, data).</p>
+    <p><strong>When NOT to use:</strong> if you only ever create one kind of object, skip the factory.</p>
+    <p><strong>Real-world:</strong> Django's form field registry, SQLAlchemy's dialect loader, <code>logging.getLogger(name)</code>.</p>
+
+    <h3>3. Builder — construct complex objects step by step</h3>
+    <p><strong>The pain:</strong> a class has 12 optional constructor arguments. Callers pass <code>None, None, None, True, None, "x", None...</code> and nobody remembers which position is which.</p>
+
+    <p><strong>The fix:</strong></p>
+    <pre><code>class HttpRequest:
+    def __init__(self):
+        self.method = "GET"
+        self.url = ""
+        self.headers = {}
+        self.body = None
+        self.timeout = 30
+        self.retries = 0
+
+    def __repr__(self):
+        return f"&lt;{self.method} {self.url} h={self.headers} t={self.timeout}&gt;"
+
+class HttpRequestBuilder:
+    def __init__(self):
+        self._req = HttpRequest()
+
+    def method(self, m):       self._req.method = m;   return self
+    def url(self, u):          self._req.url = u;      return self
+    def header(self, k, v):    self._req.headers[k] = v; return self
+    def body(self, b):         self._req.body = b;     return self
+    def timeout(self, t):      self._req.timeout = t;  return self
+    def retries(self, n):      self._req.retries = n;  return self
+    def build(self):           return self._req
+
+req = (HttpRequestBuilder()
+       .method("POST")
+       .url("https://api.example.com/v1/orders")
+       .header("Authorization", "Bearer xyz")
+       .header("Content-Type", "application/json")
+       .body('{"item_id": 42}')
+       .timeout(10)
+       .retries(3)
+       .build())</code></pre>
+
+    <p><strong>When to use:</strong> many optional parameters, complex construction logic, or immutability (build, then freeze).</p>
+    <p><strong>When NOT to use:</strong> objects with only two or three fields — a simple constructor is clearer.</p>
+    <p><strong>Real-world:</strong> Java's <code>StringBuilder</code>, Python's <code>unittest.mock.Mock</code>, any SQL query builder (SQLAlchemy, Knex, jOOQ).</p>
+
+    <h2>Structural Patterns</h2>
+    <p>These patterns deal with <em>how objects are composed</em>. The common pain: two pieces of code need to work together but speak different languages.</p>
+
+    <h3>4. Adapter — make an incompatible API fit</h3>
+    <p><strong>The pain:</strong> your app speaks one interface; a library you must use speaks a different one. You can't rewrite the library.</p>
+
+    <p><strong>The fix:</strong></p>
+    <pre><code># Your app expects this interface:
+class PaymentGateway(ABC):
+    @abstractmethod
+    def charge(self, cents: int, token: str) -&gt; str: ...
+
+# Legacy third-party library with a weird API:
+class LegacyStripe:
+    def do_payment(self, amount_dollars, card_token, currency="usd"):
+        return {"id": f"ch_{card_token}", "amount": amount_dollars}
+
+# Adapter bridges the two:
+class StripeAdapter(PaymentGateway):
+    def __init__(self, legacy: LegacyStripe):
+        self.legacy = legacy
+
+    def charge(self, cents, token):
+        dollars = cents / 100
+        result = self.legacy.do_payment(dollars, token)
+        return result["id"]
+
+gateway: PaymentGateway = StripeAdapter(LegacyStripe())
+print(gateway.charge(1999, "tok_abc"))   # -&gt; "ch_tok_abc"</code></pre>
+
+    <p><strong>When to use:</strong> integrating a third-party library, migrating from an old API to a new one without rewriting callers.</p>
+    <p><strong>When NOT to use:</strong> when you own both sides — just fix the interface directly.</p>
+    <p><strong>Real-world:</strong> Python's <code>logging.handlers</code> adapting different log sinks, Django's database backends adapting each DB's wire protocol to a common ORM.</p>
+
+    <h3>5. Decorator — add behaviour without touching the original</h3>
+    <p><strong>The pain:</strong> you want to add logging / caching / auth to a function, but you'd have to modify every caller or every implementation to do it.</p>
+
+    <p><strong>The fix:</strong></p>
+    <pre><code>import time
+from functools import wraps
+
+def timed(fn):
+    @wraps(fn)
+    def inner(*args, **kwargs):
+        start = time.time()
+        result = fn(*args, **kwargs)
+        print(f"{fn.__name__} took {time.time() - start:.3f}s")
+        return result
+    return inner
+
+def cached(fn):
+    store = {}
+    @wraps(fn)
+    def inner(*args):
+        if args not in store:
+            store[args] = fn(*args)
+        return store[args]
+    return inner
+
+@timed
+@cached
+def fib(n):
+    return n if n &lt; 2 else fib(n - 1) + fib(n - 2)
+
+fib(30)   # first call: slow, then logged
+fib(30)   # cached, near-instant</code></pre>
+
+    <p><strong>Object-oriented form:</strong></p>
+    <pre><code>class Coffee:
+    def cost(self): return 5
+    def desc(self): return "coffee"
+
+class MilkDecorator:
+    def __init__(self, wrapped): self.wrapped = wrapped
+    def cost(self): return self.wrapped.cost() + 1
+    def desc(self): return self.wrapped.desc() + " + milk"
+
+class SugarDecorator:
+    def __init__(self, wrapped): self.wrapped = wrapped
+    def cost(self): return self.wrapped.cost() + 0.5
+    def desc(self): return self.wrapped.desc() + " + sugar"
+
+drink = SugarDecorator(MilkDecorator(Coffee()))
+print(drink.desc(), "$", drink.cost())   # coffee + milk + sugar $ 6.5</code></pre>
+
+    <p><strong>When to use:</strong> cross-cutting concerns (logging, caching, auth, retries), dynamically composing features.</p>
+    <p><strong>When NOT to use:</strong> when the behaviour is always-on and fundamental — bake it into the class directly.</p>
+    <p><strong>Real-world:</strong> Python's <code>@property</code>, <code>@staticmethod</code>, Flask's <code>@app.route</code>, Java's <code>BufferedReader(FileReader)</code> stack.</p>
+
+    <h3>6. Facade — one door into a complicated house</h3>
+    <p><strong>The pain:</strong> doing one business thing requires orchestrating five subsystems. Every caller has to know the orchestration — and they get it wrong.</p>
+
+    <p><strong>The fix:</strong></p>
+    <pre><code>class InventorySystem:
+    def reserve(self, sku, qty): print(f"reserved {qty} of {sku}")
+    def release(self, sku, qty): print(f"released {qty} of {sku}")
+
+class PaymentSystem:
+    def charge(self, user, amount): print(f"charged {user} ${amount}"); return "txn_1"
+
+class ShippingSystem:
+    def schedule(self, sku, qty, user): print(f"shipped {qty} of {sku} to {user}")
+
+class NotificationSystem:
+    def email(self, user, msg): print(f"emailed {user}: {msg}")
+
+class OrderFacade:
+    """One call that hides the orchestration."""
+    def __init__(self):
+        self.inv  = InventorySystem()
+        self.pay  = PaymentSystem()
+        self.ship = ShippingSystem()
+        self.mail = NotificationSystem()
+
+    def place_order(self, user, sku, qty, price):
+        self.inv.reserve(sku, qty)
+        try:
+            self.pay.charge(user, price * qty)
+        except Exception:
+            self.inv.release(sku, qty)
+            raise
+        self.ship.schedule(sku, qty, user)
+        self.mail.email(user, f"Your order for {qty}x {sku} is confirmed")
+
+OrderFacade().place_order("sanheen@x.com", "SKU-42", 2, 9.99)</code></pre>
+
+    <p><strong>When to use:</strong> you have a complex subsystem and most callers need only the "happy path" across it.</p>
+    <p><strong>When NOT to use:</strong> when callers legitimately need fine-grained control — a facade hides exactly that.</p>
+    <p><strong>Real-world:</strong> <code>requests.get()</code> hiding socket, TLS, connection pooling, redirects. <code>django.shortcuts.render()</code> hiding template loading and HTTP response construction.</p>
+
+    <h3>7. Proxy — stand in for something else</h3>
+    <p><strong>The pain:</strong> accessing the real object is expensive, dangerous, or remote. You want a stand-in that adds caching, access control, or lazy loading.</p>
+
+    <p><strong>The fix:</strong></p>
+    <pre><code>class ImageLoader(ABC):
+    @abstractmethod
+    def display(self): ...
+
+class RealImage(ImageLoader):
+    def __init__(self, path):
+        self.path = path
+        self._load()   # expensive — reads from disk
+    def _load(self):
+        print(f"loading {self.path} from disk...")
+    def display(self):
+        print(f"displaying {self.path}")
+
+class ImageProxy(ImageLoader):
+    def __init__(self, path):
+        self.path = path
+        self._real = None          # lazy: not loaded yet
+
+    def display(self):
+        if self._real is None:     # load only on first use
+            self._real = RealImage(self.path)
+        self._real.display()
+
+gallery = [ImageProxy(f"img_{i}.png") for i in range(100)]
+gallery[3].display()   # only this one actually loads from disk</code></pre>
+
+    <p><strong>Flavours of proxy:</strong></p>
+    <ul>
+      <li><strong>Virtual proxy</strong> — lazy load expensive objects (example above).</li>
+      <li><strong>Protection proxy</strong> — check permissions before forwarding.</li>
+      <li><strong>Remote proxy</strong> — local stub that calls across the network (RPC).</li>
+      <li><strong>Caching proxy</strong> — memoise expensive calls.</li>
+    </ul>
+
+    <p><strong>When NOT to use:</strong> when the overhead of a proxy outweighs the resource it's guarding.</p>
+    <p><strong>Real-world:</strong> SQLAlchemy's lazy-loaded relationships, Kubernetes' kube-proxy, every RPC client stub ever written.</p>
+
+    <h2>Behavioral Patterns</h2>
+    <p>These patterns deal with <em>how objects communicate and share responsibility</em>. The common pain: control flow is tangled and hard to change.</p>
+
+    <h3>8. Strategy — interchangeable algorithms</h3>
+    <p><strong>The pain:</strong> you have multiple ways to do the same thing (sort, price, route) and the choice depends on runtime context. An <code>if/elif</code> chain keeps growing.</p>
+
+    <p><strong>The fix:</strong></p>
+    <pre><code>class ShippingStrategy(ABC):
+    @abstractmethod
+    def cost(self, weight_kg: float) -&gt; float: ...
+
+class StandardShipping(ShippingStrategy):
+    def cost(self, w): return 5 + 2 * w
+
+class ExpressShipping(ShippingStrategy):
+    def cost(self, w): return 15 + 3 * w
+
+class FreeShipping(ShippingStrategy):
+    def cost(self, w): return 0
+
+class Order:
+    def __init__(self, weight, strategy: ShippingStrategy):
+        self.weight = weight
+        self.strategy = strategy
+
+    def total_shipping(self):
+        return self.strategy.cost(self.weight)
+
+# runtime choice:
+order = Order(weight=2.5, strategy=ExpressShipping())
+print(order.total_shipping())    # 22.5
+
+# black-friday promo? swap at runtime:
+order.strategy = FreeShipping()
+print(order.total_shipping())    # 0</code></pre>
+
+    <p><strong>When to use:</strong> multiple algorithms for the same logical task, chosen at runtime. This is the cleanest fix for most long conditional chains.</p>
+    <p><strong>When NOT to use:</strong> when there's genuinely only one algorithm and there never will be another.</p>
+    <p><strong>Real-world:</strong> Python's <code>list.sort(key=...)</code> takes a strategy function. Every pluggable compression, encryption, or routing algorithm is Strategy under the hood.</p>
+
+    <h3>9. Observer — fan out events</h3>
+    <p><strong>The pain:</strong> when something happens (an order is placed), multiple unrelated systems care (inventory, email, analytics). Hard-coding all of them into the order service creates tight coupling.</p>
+
+    <p><strong>The fix:</strong></p>
+    <pre><code>class EventBus:
+    def __init__(self):
+        self._subs: dict[str, list] = {}
+
+    def subscribe(self, event, handler):
+        self._subs.setdefault(event, []).append(handler)
+
+    def publish(self, event, payload):
+        for h in self._subs.get(event, []):
+            h(payload)
+
+bus = EventBus()
+
+# subscribers each know their own concern:
+def update_inventory(order): print("inventory --", order)
+def send_receipt(order):     print("receipt sent to", order["user"])
+def track_metric(order):     print("metrics: +1 order")
+
+bus.subscribe("order_placed", update_inventory)
+bus.subscribe("order_placed", send_receipt)
+bus.subscribe("order_placed", track_metric)
+
+# publisher doesn't know or care who listens:
+bus.publish("order_placed", {"user": "sanheen@x.com", "sku": "SKU-1", "qty": 2})</code></pre>
+
+    <p><strong>When to use:</strong> one event, many consumers; consumers should be able to come and go without the publisher changing.</p>
+    <p><strong>When NOT to use:</strong> when you need a guaranteed ordered response or a return value from each handler — events are fire-and-forget.</p>
+    <p><strong>Real-world:</strong> every UI framework (DOM <code>addEventListener</code>, React state), Django signals, Kafka consumers, Redis pub/sub.</p>
+
+    <h3>10. State — behaviour depends on an internal mode</h3>
+    <p><strong>The pain:</strong> an object behaves differently depending on what "state" it's in (draft, published, archived; pending, shipped, delivered). You have <code>if self.state == "X"</code> scattered through every method.</p>
+
+    <p><strong>The fix:</strong></p>
+    <pre><code>class OrderState(ABC):
+    @abstractmethod
+    def pay(self, order): ...
+    @abstractmethod
+    def ship(self, order): ...
+    @abstractmethod
+    def cancel(self, order): ...
+
+class Pending(OrderState):
+    def pay(self, order):
+        print("payment received"); order.state = Paid()
+    def ship(self, order):
+        raise RuntimeError("can't ship unpaid order")
+    def cancel(self, order):
+        print("cancelled pending order"); order.state = Cancelled()
+
+class Paid(OrderState):
+    def pay(self, order):
+        raise RuntimeError("already paid")
+    def ship(self, order):
+        print("shipping!"); order.state = Shipped()
+    def cancel(self, order):
+        print("refunding"); order.state = Cancelled()
+
+class Shipped(OrderState):
+    def pay(self, order):    raise RuntimeError("already paid")
+    def ship(self, order):   raise RuntimeError("already shipped")
+    def cancel(self, order): raise RuntimeError("in transit — can't cancel")
+
+class Cancelled(OrderState):
+    def pay(self, order):    raise RuntimeError("order is cancelled")
+    def ship(self, order):   raise RuntimeError("order is cancelled")
+    def cancel(self, order): pass   # idempotent
+
+class Order:
+    def __init__(self):
+        self.state: OrderState = Pending()
+    def pay(self):    self.state.pay(self)
+    def ship(self):   self.state.ship(self)
+    def cancel(self): self.state.cancel(self)
+
+o = Order(); o.pay(); o.ship()</code></pre>
+
+    <p><strong>When to use:</strong> clear finite-state lifecycle (documents, orders, workflows, connection protocols).</p>
+    <p><strong>When NOT to use:</strong> two or three states with trivial differences — a simple enum and if-statement is fine.</p>
+    <p><strong>Real-world:</strong> TCP connection states, Git object states, any workflow engine (Airflow, Temporal).</p>
+
+    <h3>11. Command — turn actions into objects</h3>
+    <p><strong>The pain:</strong> you want to queue, log, undo, or schedule operations. A direct method call is ephemeral — once done, it's gone.</p>
+
+    <p><strong>The fix:</strong></p>
+    <pre><code>class Command(ABC):
+    @abstractmethod
+    def execute(self): ...
+    @abstractmethod
+    def undo(self): ...
+
+class Light:
+    def __init__(self): self.on = False
+    def turn_on(self):  self.on = True;  print("light ON")
+    def turn_off(self): self.on = False; print("light OFF")
+
+class TurnOnCommand(Command):
+    def __init__(self, light): self.light = light
+    def execute(self): self.light.turn_on()
+    def undo(self):    self.light.turn_off()
+
+class TurnOffCommand(Command):
+    def __init__(self, light): self.light = light
+    def execute(self): self.light.turn_off()
+    def undo(self):    self.light.turn_on()
+
+class RemoteControl:
+    def __init__(self):
+        self.history: list[Command] = []
+    def press(self, cmd: Command):
+        cmd.execute()
+        self.history.append(cmd)
+    def undo_last(self):
+        if self.history:
+            self.history.pop().undo()
+
+light = Light()
+remote = RemoteControl()
+remote.press(TurnOnCommand(light))   # light ON
+remote.press(TurnOffCommand(light))  # light OFF
+remote.undo_last()                   # light ON
+remote.undo_last()                   # light OFF</code></pre>
+
+    <p><strong>When to use:</strong> undo/redo stacks, task queues, macro recording, transactional operations, CQRS command side.</p>
+    <p><strong>When NOT to use:</strong> simple, one-off, un-undoable operations. A function will do.</p>
+    <p><strong>Real-world:</strong> every text editor's undo stack, Celery/Sidekiq tasks, database migration frameworks (each migration is a command with <code>up</code>/<code>down</code>).</p>
+
+    <h3>12. Template Method — fixed skeleton, swappable steps</h3>
+    <p><strong>The pain:</strong> you have an algorithm that is 80% the same across variants, but a few steps differ. You copy-paste the whole thing per variant.</p>
+
+    <p><strong>The fix:</strong></p>
+    <pre><code>class ReportGenerator(ABC):
+    """Template method fixes the skeleton; subclasses fill the gaps."""
+
+    def generate(self, data):
+        header = self.build_header()
+        body   = self.format_body(data)
+        footer = self.build_footer()
+        output = header + body + footer
+        self.deliver(output)
+        return output
+
+    def build_header(self):            # default; subclass may override
+        return "=== REPORT ===\n"
+
+    def build_footer(self):
+        return "\n=== END ===\n"
+
+    @abstractmethod
+    def format_body(self, data): ...   # must override
+
+    @abstractmethod
+    def deliver(self, output): ...     # must override
+
+class CsvEmailReport(ReportGenerator):
+    def format_body(self, rows):
+        return "\n".join(",".join(map(str, r)) for r in rows)
+    def deliver(self, output):
+        print("emailing report:\n", output)
+
+class JsonS3Report(ReportGenerator):
+    def format_body(self, rows):
+        import json
+        return json.dumps(rows)
+    def deliver(self, output):
+        print("uploading to s3:\n", output)
+
+CsvEmailReport().generate([["sanheen", 1], ["bob", 2]])
+JsonS3Report().generate([{"user": "sanheen", "score": 9}])</code></pre>
+
+    <p><strong>When to use:</strong> an algorithm with a clear skeleton and a few pluggable steps. Frameworks use this constantly.</p>
+    <p><strong>When NOT to use:</strong> when the variations are so large that almost every step differs — Strategy composition is cleaner.</p>
+    <p><strong>Real-world:</strong> Django's class-based views (<code>View.dispatch</code> is the template), Python's <code>unittest.TestCase</code> (<code>setUp → test → tearDown</code>), any HTTP framework's request lifecycle.</p>
+
+    <h2>Pattern Selection Heatmap</h2>
+    <p>When you feel one of these pains, reach for the matching pattern.</p>
+
+    <table>
+      <thead>
+        <tr><th>Symptom in your code</th><th>Probable pattern</th><th>Category</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Long <code>if/elif</code> on a type field</td><td>Strategy or Polymorphism</td><td>Behavioral</td></tr>
+        <tr><td>12-argument constructor with mostly optional params</td><td>Builder</td><td>Creational</td></tr>
+        <tr><td>Need a truly global shared resource</td><td>Singleton</td><td>Creational</td></tr>
+        <tr><td>Choice of concrete class depends on runtime input</td><td>Factory Method</td><td>Creational</td></tr>
+        <tr><td>Third-party library has the wrong interface</td><td>Adapter</td><td>Structural</td></tr>
+        <tr><td>Need to add logging / caching / auth around existing calls</td><td>Decorator</td><td>Structural</td></tr>
+        <tr><td>Callers must orchestrate 5 subsystems to do one thing</td><td>Facade</td><td>Structural</td></tr>
+        <tr><td>Real object is expensive / remote / needs access control</td><td>Proxy</td><td>Structural</td></tr>
+        <tr><td>One event → many listeners that come and go</td><td>Observer</td><td>Behavioral</td></tr>
+        <tr><td>Object behaves differently based on mode/lifecycle</td><td>State</td><td>Behavioral</td></tr>
+        <tr><td>Need undo/redo, queue of actions, or macros</td><td>Command</td><td>Behavioral</td></tr>
+        <tr><td>Algorithm is 80% the same across variants, 20% differs</td><td>Template Method</td><td>Behavioral</td></tr>
+        <tr><td>Sequence of validators/filters, each may short-circuit</td><td>Chain of Responsibility</td><td>Behavioral</td></tr>
+        <tr><td>Walking a collection without exposing its internals</td><td>Iterator</td><td>Behavioral</td></tr>
+      </tbody>
+    </table>
+
+    <div class="callout success">
+      <div class="callout-title">The meta-rule</div>
+      Don't start with a pattern. Start with the pain. If no pain exists yet, writing a pattern now is speculative — you're paying complexity costs for flexibility you haven't needed. YAGNI still applies, even to patterns.
+    </div>
+
+    <div class="callout warn">
+      <div class="callout-title">Pattern overload in interviews</div>
+      Naming three patterns in a design is great. Naming eleven is a red flag. Interviewers read that as "memorised the Gang of Four book, hasn't felt the pain." Pick the two or three that genuinely fit and explain the trade-offs.
+    </div>
+
+    <h2>Recap</h2>
+    <ul>
+      <li><strong>Creational:</strong> Singleton, Factory Method, Builder — <em>how objects come into being</em>.</li>
+      <li><strong>Structural:</strong> Adapter, Decorator, Facade, Proxy — <em>how objects are composed</em>.</li>
+      <li><strong>Behavioral:</strong> Strategy, Observer, State, Command, Template Method — <em>how objects communicate and share responsibility</em>.</li>
+      <li>Every pattern started as a pain someone felt repeatedly. Learn to recognise the pain first.</li>
+      <li>Patterns are a compression format for experienced developers — they let you say "use Strategy here" instead of describing the whole refactor.</li>
+    </ul>
+
+    <p>Now that you have the vocabulary (SOLID + patterns), the next three chapters practise it on real problems: basic, intermediate, advanced. We'll design parking lots, elevators, food-delivery systems — and every design will map back to the principles in this chapter.</p>
+
+    <div class="chapter-nav">
+      <a href="01-foundations.html"><div class="label">← Previous</div><div class="title">1. Foundations (OOP, SOLID)</div></a>
+      <a class="next" href="03-basic-problems.html"><div class="label">Next →</div><div class="title">3. Basic Problems</div></a>
+    </div>
+  </main>
+</div>
+<script src="../assets/js/nav.js"></script>
+</body>
+</html>

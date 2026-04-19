@@ -1,0 +1,763 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Intermediate Systems — Book II · HLD</title>
+<link rel="stylesheet" href="../assets/css/style.css">
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">System Design Books</div>
+    <div class="brand-sub">by Sanheen · Progressive Learning</div>
+    <div class="nav-section">
+      <h3>Home</h3>
+      <a href="../index.html">Overview</a>
+    </div>
+    <div class="nav-section">
+      <h3>Book I — Low Level Design</h3>
+      <a href="../lld/index.html">LLD Index</a>
+    </div>
+    <div class="nav-section">
+      <h3>Book II — High Level Design</h3>
+      <a href="index.html">HLD Index</a>
+      <a href="01-foundations.html">1. Foundations &amp; Capacity</a>
+      <a href="02-building-blocks.html">2. Building Blocks</a>
+      <a href="03-basic-systems.html">3. Basic Systems</a>
+      <a href="04-intermediate.html">4. Intermediate Systems</a>
+      <a href="05-advanced.html">5. Advanced Systems</a>
+      <a href="06-very-high-scale.html">6. Very High Scale</a>
+      <a href="07-war-room.html">7. War Room Scenarios</a>
+      <a href="08-real-architectures.html">8. Real Architectures</a>
+    </div>
+  </aside>
+  <main class="main">
+    <div class="breadcrumb"><a href="../index.html">Home</a> / <a href="index.html">Book II · HLD</a> / Chapter 4</div>
+    <h1>Chapter 4: Intermediate Systems</h1>
+
+    <p class="lede">We now design five consumer-scale systems: Twitter/X, Instagram, WhatsApp, YouTube, and Dropbox. These systems cross the boundary where architecture is no longer obvious — every one contains at least one counter-intuitive tradeoff that a senior engineer has to internalize. We keep the same v1→v6 progression but spend more time on the "why" for each component.</p>
+
+    <h2>System 1 — Twitter / X Home Timeline</h2>
+
+    <h3>1.1 Functional Requirements</h3>
+    <ul>
+      <li>Post a tweet (text &le; 280 chars, optional media).</li>
+      <li>View your home timeline: tweets from people you follow, newest first.</li>
+      <li>View a user's profile timeline: their own tweets.</li>
+      <li>Like, retweet, reply.</li>
+      <li>Search (deferred to Chapter 5).</li>
+    </ul>
+
+    <h3>1.2 Non-Functional Requirements</h3>
+    <table>
+      <thead><tr><th>Dimension</th><th>Target</th></tr></thead>
+      <tbody>
+        <tr><td>Daily active users</td><td>500M</td></tr>
+        <tr><td>Tweets posted</td><td>500M / day ≈ 6k / sec avg, 20k / sec peak</td></tr>
+        <tr><td>Timeline reads</td><td>50B / day ≈ 600k reads / sec (100:1 read:write)</td></tr>
+        <tr><td>Timeline latency</td><td>p99 &lt; 200 ms</td></tr>
+        <tr><td>Avg follower count</td><td>200; power-law distribution</td></tr>
+        <tr><td>Max followers (celebs)</td><td>100M+ (Elon, Cristiano, Taylor)</td></tr>
+      </tbody>
+    </table>
+
+    <h3>1.3 Capacity Estimation</h3>
+    <pre><code>Writes (tweets):  6k/s avg, 20k/s peak
+Reads (timelines): 600k/s, p99 latency budget 200ms
+
+Per tweet storage:
+  id (snowflake int64)     8 B
+  user_id                  8 B
+  text (avg 140 B)       140 B
+  media_ptr (0-4 URLs)    40 B
+  created_at               8 B
+  reply_to / quote_ref    16 B
+  counters (likes, RTs)   24 B
+  overhead               ~50 B
+  ───────────────────────
+  ≈ 300 B per tweet
+
+500M tweets/day * 300 B = 150 GB / day = ~55 TB / year
+5-year horizon ≈ 275 TB (with 3x replication, ~825 TB of storage)
+
+Fan-out math:
+  avg tweet → pushed to 200 followers' inboxes
+  6k tweets/s * 200 = 1.2M inbox writes / sec avg
+  peak: 4M/s — non-trivial
+
+Celebrity problem:
+  Taylor Swift (100M followers) tweets once → 100M inbox writes
+  if Taylor tweets 5x/day, that's 500M writes just for one user</code></pre>
+
+    <div class="callout"><strong>The core insight.</strong> Every timeline architecture is really answering one question: <em>do we pre-compute the timeline on write (fan-out on write), or compute it on read (fan-out on read)?</em> Neither is right alone. Twitter's answer: hybrid.</div>
+
+    <h3>1.4 API Design</h3>
+    <pre><code>POST /api/v1/tweets
+  body: { "text": "...", "media_ids": [...] }
+  -&gt; 201 { "id": 1795...", "created_at": "..." }
+
+GET  /api/v1/timeline/home?cursor=<opaque>&limit=20
+  -&gt; 200 { "tweets": [...], "next_cursor": "..." }
+
+GET  /api/v1/users/{uid}/tweets?cursor=...&limit=20
+POST /api/v1/tweets/{id}/like
+POST /api/v1/tweets/{id}/retweet</code></pre>
+
+    <h3>1.5 Data Model</h3>
+    <pre><code>tweets     (id, user_id, text, media_ids, reply_to, created_at)   -- Manhattan / Cassandra, sharded by id
+users      (id, handle, display_name, follower_count, ...)         -- MySQL, sharded by id
+follows    (follower_id, followee_id, ts)                          -- MySQL, composite index both directions
+inbox      (user_id, tweet_id, ts)                                 -- Redis zset per user, TTL 1 day
+                                                                      persistent backing in Cassandra</code></pre>
+
+    <h3>1.6 v1: Simple Fan-Out-on-Read (Pull Model)</h3>
+    <p>No inboxes. To compute home timeline for user U:</p>
+    <pre><code>followees = SELECT followee_id FROM follows WHERE follower_id = U   -- 200 rows
+tweets = SELECT * FROM tweets
+         WHERE user_id IN followees
+         ORDER BY created_at DESC
+         LIMIT 20</code></pre>
+    <p><strong>What breaks.</strong> This query hits 200 shards of the tweets table on every timeline request. At 600k req/s that's 120M shard lookups/sec. Database dies.</p>
+
+    <h3>1.7 v2: Fan-Out-on-Write (Push Model)</h3>
+    <p>When user U tweets, look up U's followers (say 200 of them), and append the tweet ID to each follower's inbox (a Redis zset keyed by <code>inbox:{user_id}</code>, score = timestamp).</p>
+    <pre><code>on tweet(text, user_id=U):
+   save tweet to tweets table
+   followers = follows.get_followers(U)
+   for f in followers:
+      redis.zadd("inbox:" + f, ts, tweet_id)
+      redis.zremrangebyrank("inbox:" + f, 0, -801)   -- keep top 800</code></pre>
+    <p>Reading a timeline is now O(20) — fetch top 20 IDs from Redis, then batch-fetch tweet bodies from the tweets service.</p>
+    <p><strong>What breaks.</strong> Celebrities. A tweet by someone with 100M followers triggers 100M Redis writes. That one event becomes a 10-minute write storm, delaying timeline updates for everyone. Fan-out-on-write falls over on the long tail of follower counts.</p>
+
+    <h3>1.8 v3: Hybrid Fan-Out</h3>
+    <p>Split users by follower count:</p>
+    <ul>
+      <li><strong>Normal users</strong> (&lt; 10k followers): push. Fan-out inserts into each follower's inbox.</li>
+      <li><strong>Celebrities</strong> (&ge; 10k followers or manually flagged): pull. Their tweets are <em>not</em> fanned out. On timeline read, fetch them separately and merge.</li>
+    </ul>
+    <pre><code>timeline(U):
+  pushed  = redis.zrevrange("inbox:" + U, 0, 20)     # IDs from normal users (already pushed)
+  pulled_ids = []
+  for celeb in follows.get_celebs(U):                # usually &lt;100
+      pulled_ids += tweets_by_user(celeb, since=now-24h, limit=20)
+  merged = merge_by_ts(pushed, pulled_ids)[0:20]
+  return batch_fetch(merged)</code></pre>
+
+    <h3>1.9 v4: Fanout Workers (decouple write path)</h3>
+    <p>The tweet POST endpoint cannot block on 10k inbox inserts. Publish the tweet to a Kafka topic and return 201 immediately. A pool of fanout workers consumes the topic and does the heavy inbox writes.</p>
+    <div class="diagram"><pre>
+ POST /tweet
+      │
+      ▼
+   app pool  ──► tweets service ──► Cassandra (durable write)
+      │
+      └─► Kafka topic "new_tweets" (after durable write confirmed)
+                     │
+                     ▼
+           fanout worker pool
+             │
+             ├── lookup followers (from follow service)
+             ├── classify: push vs pull
+             ├── for push users: redis.zadd + backing Cassandra
+             └── emit push notifications
+    </pre></div>
+
+    <h3>1.10 v5: Multi-Region + Smart Caching</h3>
+    <div class="diagram"><pre>
+    ┌── region us-east ───┐      ┌── region ap-south ──┐
+    │                     │      │                     │
+    │ edge CDN (images)   │◄────►│ edge CDN            │
+    │                     │      │                     │
+    │ ALB → app pool      │      │ ALB → app pool      │
+    │                     │      │                     │
+    │ home timeline cache │      │ home timeline cache │
+    │ (redis, 800 IDs/u)  │      │ (redis, replicated) │
+    │                     │      │                     │
+    │ tweets (Cassandra   │◄────►│ tweets (replica)    │
+    │ master)             │      │                     │
+    │                     │      │                     │
+    │ Kafka ── fanout ────┼──────┼─► cross-region push │
+    └─────────────────────┘      └─────────────────────┘
+    </pre></div>
+
+    <h3>1.11 v6: Production Stack (what Twitter actually does, simplified)</h3>
+    <ul>
+      <li><strong>Tweets service:</strong> Manhattan (Twitter's key-value store) sharded by tweet ID (snowflake). Immutable.</li>
+      <li><strong>Follow graph:</strong> FlockDB-ish, MySQL-backed, shards by user ID, bidirectional adjacency lists.</li>
+      <li><strong>Timeline service:</strong> per-user Redis zset of the latest ~800 tweet IDs. Evicted on inactivity.</li>
+      <li><strong>Fanout service:</strong> Kafka + worker pool. Separate high-priority lane for verified / low-follower tweets.</li>
+      <li><strong>Celebrity pull:</strong> on read, fetch latest tweets from each celebrity the user follows, merge.</li>
+      <li><strong>Search:</strong> Earlybird (Lucene-based), separate pipeline — Chapter 5.</li>
+      <li><strong>Ranking:</strong> a separate ML service re-ranks the chronological merge (Twitter's For-You ranking). Out of scope here.</li>
+    </ul>
+
+    <h3>1.12 Deep Dive 1 — Tweet ID Generation (Snowflake)</h3>
+    <pre><code>64-bit tweet ID layout (Twitter Snowflake):
+  sign      : 1 bit  (0)
+  timestamp : 41 bits (ms since custom epoch — 69 years of range)
+  machine   : 10 bits (1024 workers)
+  sequence  : 12 bits (4096 IDs/ms/worker)
+  -----------------------------------------
+   total    : 64 bits
+
+Pros:
+  - sortable by time (good for timeline queries)
+  - no central coordinator
+  - each worker generates up to 4M IDs/sec
+
+Cons:
+  - clock skew → if worker's clock goes backward, IDs can duplicate
+    → workers refuse to issue IDs until clock catches up</code></pre>
+
+    <h3>1.13 Deep Dive 2 — What if you miss a tweet in your timeline?</h3>
+    <p>Edge case: you follow someone at 12:00:00.500, they tweet at 12:00:00.400. The tweet came before your follow, so it should not appear. You follow them at 12:00:00.500, they tweet at 12:00:00.600 — fanout might miss you if the follower list was snapshotted at 12:00:00.400. Solutions: (a) re-read follower list at fan-out time with slight cost; (b) on new follow, also backfill the last hour of that user's tweets into your inbox.</p>
+
+    <h2>System 2 — Instagram Photo Sharing</h2>
+
+    <h3>2.1 Functional Requirements</h3>
+    <ul>
+      <li>Upload a photo (single or carousel of up to 10).</li>
+      <li>View home feed (photos from accounts you follow).</li>
+      <li>View user profile (their photos in grid).</li>
+      <li>Like, comment, save.</li>
+      <li>Image processing: multiple resolutions for different screens.</li>
+    </ul>
+
+    <h3>2.2 Non-Functional Requirements</h3>
+    <table>
+      <thead><tr><th>Dimension</th><th>Target</th></tr></thead>
+      <tbody>
+        <tr><td>Daily active users</td><td>1B</td></tr>
+        <tr><td>Uploads / day</td><td>100M photos</td></tr>
+        <tr><td>Feed reads / day</td><td>20B</td></tr>
+        <tr><td>Avg photo size uploaded</td><td>4 MB (modern phones)</td></tr>
+        <tr><td>Storage / photo after processing</td><td>~1.5 MB (sum of all rendition sizes)</td></tr>
+        <tr><td>Feed p99 latency</td><td>&lt; 400 ms</td></tr>
+      </tbody>
+    </table>
+
+    <h3>2.3 Capacity Estimation</h3>
+    <pre><code>Uploads:   100M / 86,400 ≈ 1,200 / sec avg; peak 5,000 / sec
+Bandwidth in:  1,200 * 4 MB = 4.8 GB/sec = 40 Gbps
+After processing:  1,200 * 1.5 MB = 1.8 GB/sec stored
+Storage / year:  1,200/s * 86400 * 365 * 1.5 MB ≈ 57 PB / year
+
+Reads:   20B / 86,400 ≈ 230k / sec (average feed item view)
+Bandwidth out: 230k * ~200 KB (thumbnail) = 46 GB/sec = ~370 Gbps
+→ 99% of this MUST be served from CDN, not origin.</code></pre>
+
+    <h3>2.4 API Design</h3>
+    <pre><code>POST /api/v1/photos/upload           (multipart, streamed to S3 via signed URL)
+POST /api/v1/photos                  (create post: caption, photo_ids, location)
+GET  /api/v1/feed?cursor=...&limit=20
+GET  /api/v1/users/{uid}/photos?cursor=...
+POST /api/v1/photos/{id}/like
+POST /api/v1/photos/{id}/comments</code></pre>
+
+    <h3>2.5 Data Model</h3>
+    <pre><code>photos (id, user_id, caption, created_at, status, ...)          Cassandra, sharded by id
+renditions (photo_id, resolution, s3_key, bytes, w, h)           same row with photo
+likes (photo_id, user_id, ts)                                    Cassandra, sharded by photo_id
+comments (photo_id, id, user_id, text, ts)                       Cassandra
+feeds (user_id, photo_id, ts)                                    Redis zset, Cassandra backing
+follow_graph (follower, followee)                                sharded MySQL
+blobs                                                            S3 with keys by photo_id hash prefix</code></pre>
+
+    <h3>2.6 v1: Naive Upload + DB</h3>
+    <p>Client uploads via <code>POST /photos</code>. App saves bytes into a DB TEXT column. Feed reads the rows.</p>
+    <p><strong>What breaks.</strong> Everything, instantly. 4 MB in a DB = bloat, slow backups, expensive reads. Bandwidth to the app server consumes a worker thread for seconds per upload.</p>
+
+    <h3>2.7 v2: S3 + Metadata Separation</h3>
+    <p>Client requests a pre-signed S3 upload URL, uploads directly to S3, then posts the photo metadata to the app. The app stores only the S3 key.</p>
+    <div class="diagram"><pre>
+ client ──(1) POST /upload_url──► app ──► returns S3 signed PUT URL
+        ──(2) PUT {bytes} ───────────────► S3 bucket
+        ──(3) POST /photos {s3_key, ...} ► app ──► Cassandra metadata
+    </pre></div>
+    <p><strong>What breaks.</strong> The photo is only one resolution. Serving the original 4 MB image to a phone on 3G = user abandonment. Also no CDN yet = 370 Gbps hammering origin.</p>
+
+    <h3>2.8 v3: Image Processing Pipeline</h3>
+    <p>After upload, create multiple renditions: 320px, 640px, 1080px, original. Each is a separate S3 object. Processing is CPU-heavy (JPEG/WebP encode), so we offload asynchronously.</p>
+    <div class="diagram"><pre>
+ client ──► S3 (raw/{photo_id})
+            │
+            └── S3 event ──► Kafka "photo_uploaded"
+                                │
+                                ▼
+                    transcode worker pool (autoscaled)
+                        │
+                        ├── reads raw photo
+                        ├── generates 4-6 renditions
+                        ├── writes to S3 (cdn/{photo_id}/{resolution})
+                        ├── runs NSFW / abuse detection
+                        └── updates photos table status=PROCESSED
+    </pre></div>
+    <p>Until <code>status = PROCESSED</code>, the photo is not shown in feeds. Client typically polls or receives a push.</p>
+
+    <h3>2.9 v4: CDN + Feed Service</h3>
+    <div class="diagram"><pre>
+   client (app)
+      │
+      ├── feed API ─► feed service ─► Redis zsets (inbox per user)
+      │                                      │
+      │                                      └── miss: Cassandra
+      │
+      └── image URL points at CDN ─► CDN pop ─► S3 origin
+    </pre></div>
+    <p>CDN turns a 370 Gbps egress problem into a ~10 Gbps origin problem. CDN cache hit rate target: 98%+.</p>
+
+    <h3>2.10 v5: Hybrid Feed + Celebrity Pull</h3>
+    <p>Same logic as Twitter. Normal user posts → pushed to followers' Redis feed. Celebrity post → not fanned out, pulled at read time.</p>
+
+    <h3>2.11 v6: Production Architecture</h3>
+    <div class="diagram"><pre>
+   mobile client
+        │
+        ├──(signed URL)──► S3 raw bucket ──► Kafka ──► transcoder fleet
+        │                                                 │
+        │                                                 ▼
+        │                                          S3 rendition bucket
+        │                                                 │
+        │                                          CloudFront edge
+        │                                                 ▲
+        └───(API)─► API gateway ─► feed service ─► Redis ─┘
+                                      │
+                                      └─► Cassandra (photos, likes, comments)
+
+   post lifecycle:
+      1. client PUT to S3 raw
+      2. S3 event → Kafka
+      3. transcoder creates 5 renditions, runs ML safety classifier
+      4. metadata + rendition URLs committed to Cassandra
+      5. fanout worker pushes photo_id to followers' feed zsets
+      6. push notification sent via notification service
+    </pre></div>
+
+    <h3>2.12 Deep Dive — Storage Tiering</h3>
+    <p>Not all photos are accessed equally. A photo's access probability decays exponentially after posting.</p>
+    <ul>
+      <li><strong>Hot tier</strong> (0–7 days): SSD-backed S3 Standard, replicated to many CDN pops.</li>
+      <li><strong>Warm tier</strong> (7–90 days): S3 Infrequent Access. Still retrievable instantly, cheaper.</li>
+      <li><strong>Cold tier</strong> (&gt; 90 days): Glacier-class. Takes minutes to retrieve — only accessed via profile scrolling, acceptable.</li>
+    </ul>
+
+    <h2>System 3 — WhatsApp / Chat</h2>
+
+    <h3>3.1 Functional Requirements</h3>
+    <ul>
+      <li>1:1 messaging between users.</li>
+      <li>Group chat (up to 1024 members).</li>
+      <li>Delivery receipts (sent, delivered, read).</li>
+      <li>Online presence / last-seen.</li>
+      <li>Media (photos, videos, voice notes).</li>
+      <li>End-to-end encryption.</li>
+    </ul>
+
+    <h3>3.2 Non-Functional Requirements</h3>
+    <table>
+      <thead><tr><th>Dimension</th><th>Target</th></tr></thead>
+      <tbody>
+        <tr><td>Daily active users</td><td>2B</td></tr>
+        <tr><td>Messages / day</td><td>100B (≈ 1.2M / sec avg, 5M peak)</td></tr>
+        <tr><td>Simultaneous connected users</td><td>500M+</td></tr>
+        <tr><td>Delivery latency p99</td><td>&lt; 500 ms between sender and recipient</td></tr>
+        <tr><td>Ordering guarantee</td><td>Per-chat total order</td></tr>
+        <tr><td>Delivery semantics</td><td>At-least-once from server; client dedupes for exactly-once UX</td></tr>
+      </tbody>
+    </table>
+
+    <h3>3.3 Transport: Why WebSocket</h3>
+    <p>HTTP polling is wrong: to be responsive you'd poll every second, which is 500M req/sec of mostly-empty responses. WebSocket holds a persistent TCP connection, so the server can push messages instantly. Typical WhatsApp-scale deployments use WebSocket (or XMPP over TCP) over port 443.</p>
+
+    <h3>3.4 Capacity Estimation</h3>
+    <pre><code>Connections: 500M concurrent
+  C10K x 50,000 → each gateway node handles ~500k persistent conns (Linux tuned)
+  → need 1,000 gateway nodes minimum
+
+Messages: 1.2M/sec avg
+  per-message size: ~500 B metadata + body (1-2 KB text, 100 KB-10 MB media URL not body)
+  → backend write throughput manageable in Cassandra (partition by chat_id)
+
+Message storage:
+  100B/day * 200 B (excluding media bytes, those are S3) ≈ 20 TB/day metadata
+  on-device storage is the source of truth; server is a transient queue
+  WhatsApp retains ~30 days, deletes after delivery in many regions</code></pre>
+
+    <h3>3.5 v1: Two Clients, One Server</h3>
+    <p>Client A POSTs "hello" to server; server stores message; client B polls every 2s. Works for 10 users. Fails instantly at scale.</p>
+
+    <h3>3.6 v2: WebSocket Gateway</h3>
+    <div class="diagram"><pre>
+  client A ◄──WebSocket──► GW node 1 ─┐
+                                       │
+                                       │   broker
+                                       ├──► message service ─► Cassandra
+                                       │
+  client B ◄──WebSocket──► GW node 2 ─┘
+    </pre></div>
+    <p>Each client opens a persistent WebSocket to a gateway. Gateway node publishes inbound messages to a message service; that service looks up the recipient's gateway (a presence service returns <code>user_id → gw_node_id</code>) and pushes via that gateway's outbound channel.</p>
+
+    <h3>3.7 v3: Per-Chat Partitioning for Ordering</h3>
+    <p>To guarantee per-chat total order, all messages for a chat must be processed by the same partition in order. Use a Kafka-like broker with the chat_id as the partition key. Within a partition, offsets give a monotonic sequence — that is the message order seen by every recipient.</p>
+    <pre><code>on send(sender, chat_id, body):
+   msg_id = snowflake()
+   broker.publish(topic="messages", key=chat_id, value={sender, chat_id, msg_id, body, ts})
+
+consumer (per partition):
+   for msg in partition:
+      persist(msg)                                   # Cassandra (chat_id, msg_id)
+      recipients = chat_service.get_members(chat_id)
+      for r in recipients:
+          gw = presence.get_gateway(r)               # may be nil if offline
+          if gw:
+              gw.push(r, msg)
+          else:
+              inbox.enqueue(r, msg)                  # offline queue</code></pre>
+
+    <h3>3.8 v4: Delivery Guarantees</h3>
+    <p>Three checkpoints:</p>
+    <ol>
+      <li><strong>Sent</strong> — server received and ACKed the sender.</li>
+      <li><strong>Delivered</strong> — recipient's device received the payload (client-side ACK travels back upstream).</li>
+      <li><strong>Read</strong> — recipient opened the chat; client emits a "read" receipt.</li>
+    </ol>
+    <p>At-least-once: server may deliver the same message twice during failover. Client dedupes by <code>msg_id</code> (monotonic snowflake). Net effect: exactly-once UX.</p>
+
+    <h3>3.9 v5: Groups — Fan-Out Strategy</h3>
+    <p>A group message is delivered to every member. Two options:</p>
+    <ul>
+      <li><strong>Server-side fan-out.</strong> Sender sends once; server replicates to all N members. Efficient upstream, but N times downstream bandwidth from server.</li>
+      <li><strong>Client-side fan-out.</strong> Sender sends N copies (one per recipient). Used by Signal/WhatsApp for E2E reasons — each copy is independently encrypted with the recipient's key.</li>
+    </ul>
+    <p>WhatsApp uses client-fanout per recipient for E2E (see 3.11), but limits groups to ~1024 members so the sender's bandwidth doesn't explode.</p>
+
+    <h3>3.10 v6: Production Architecture</h3>
+    <div class="diagram"><pre>
+    ┌── GeoDNS ──► closest region ──► TLS LB ──► WebSocket gateway pool ──┐
+    │                                                                     │
+    │                                  │                                  │
+    │                                  ▼                                  │
+    │                          presence service (etcd / custom)           │
+    │                          user_id → gateway_id map                   │
+    │                                                                     │
+    │                                  ▼                                  │
+    │            ┌──► chat service ──► Kafka (partition by chat_id) ──┐   │
+    │            │                                                     │   │
+    │            │    consumer pool writes Cassandra + pushes via gw   │   │
+    │            │                                                     │   │
+    │            │    offline inbox: per-user Redis queue + S3 for big │   │
+    │            │                                                     │   │
+    │            └───────────────────────────────────────────────── ◄──┘   │
+    │                                                                     │
+    │   media: upload to S3 via signed URL; chat carries only the S3 key  │
+    │   (already end-to-end encrypted client-side before upload)          │
+    │                                                                     │
+    └─────────────────────────────────────────────────────────────────────┘
+    </pre></div>
+
+    <h3>3.11 Deep Dive — End-to-End Encryption (Signal Protocol)</h3>
+    <ul>
+      <li>Each user has a long-term identity key and regularly-rotated pre-keys, published to the server.</li>
+      <li>On first message, sender fetches recipient's pre-key bundle and derives a shared session key via X3DH.</li>
+      <li>Subsequent messages use the Double Ratchet for forward secrecy.</li>
+      <li>Server stores only ciphertext. Metadata (who talked to whom, when) is still visible — this is why groups encrypt per-recipient.</li>
+    </ul>
+
+    <h3>3.12 Deep Dive — Presence at Scale</h3>
+    <p>A naive "online users" table updated on every heartbeat = 500M writes/minute. Instead: each gateway node maintains an in-memory list of its connected users, publishes a summary (user_id → true) to a presence service every N seconds. Last-seen is derived from the last time the user's gateway saw them. This cuts write volume by 10-100x.</p>
+
+    <div class="callout warn"><strong>Common interview trap.</strong> "How do you guarantee exactly-once?" You don't, at the transport level. You guarantee at-least-once delivery plus client-side deduplication by message ID. The two together give exactly-once semantics from the user's viewpoint.</div>
+
+    <h2>System 4 — YouTube / Video Platform</h2>
+
+    <h3>4.1 Functional Requirements</h3>
+    <ul>
+      <li>Upload a video (up to a few GB).</li>
+      <li>Transcode into multiple resolutions (240p, 360p, 480p, 720p, 1080p, 4K).</li>
+      <li>Stream to viewers with adaptive bitrate.</li>
+      <li>Video metadata page: title, description, channel, view count.</li>
+      <li>Search (deferred).</li>
+      <li>Recommendations (simplified).</li>
+      <li>Watch history.</li>
+    </ul>
+
+    <h3>4.2 Non-Functional Requirements</h3>
+    <table>
+      <thead><tr><th>Dimension</th><th>Target</th></tr></thead>
+      <tbody>
+        <tr><td>Video uploads / min</td><td>500 hours of video / minute</td></tr>
+        <tr><td>Daily watch time</td><td>1B hours</td></tr>
+        <tr><td>Peak egress</td><td>100+ Tbps globally</td></tr>
+        <tr><td>Playback start latency</td><td>&lt; 2 s</td></tr>
+        <tr><td>Availability</td><td>99.95%</td></tr>
+      </tbody>
+    </table>
+
+    <h3>4.3 Capacity Estimation</h3>
+    <pre><code>Storage:
+  500 hours/min * 1440 min/day * 365 days = 263M hours/year
+  Avg bitrate across renditions: ~5 Mbps blended (low-res heavy)
+  263M hours * 3600 s * 5 Mbps / 8 = ~5.9 exabytes/year raw
+
+  But we encode multiple renditions:
+  Typical ladder: 240p (0.4), 360p (0.75), 480p (1), 720p (2.5), 1080p (5), 4K (15)
+  Sum ≈ 25 Mbps worth of bitrate per video
+  → 5x raw. ~25-30 EB/year if stored forever.
+  In practice, lower-popularity videos are stored at fewer resolutions;
+  cold content is re-encoded on demand.
+
+Bandwidth out:
+  1B hours watched/day ≈ 11.6M concurrent streams (averaged)
+  Peak ~3x → 35M concurrent
+  Avg viewing bitrate ≈ 3 Mbps (mobile dominates)
+  Total egress: 35M * 3 Mbps = 105 Tbps
+  → 99.9% must hit CDN. No origin could serve this.</code></pre>
+
+    <h3>4.4 Upload Path</h3>
+    <div class="diagram"><pre>
+ client
+   │
+   │ 1. POST /videos/init  → upload_id, chunk_size, upload_url
+   │
+   │ 2. resumable multipart upload of chunks to S3 (with retries)
+   │    (Google uses BigTable-backed chunk store, same idea)
+   │
+   │ 3. POST /videos/finalize → triggers processing
+   │
+   ▼
+ app ──► S3 raw ──► Kafka "raw_video" ──► transcoding workers
+                                               │
+                                               ├── ffmpeg: 6 rendition ladder
+                                               ├── generate thumbnails
+                                               ├── run content moderation ML
+                                               ├── extract audio track (for subtitles)
+                                               └── write renditions to S3 (hot tier)
+                                               │
+                                               ▼
+                                       metadata updated: READY
+    </pre></div>
+
+    <h3>4.5 Transcoding Pipeline Details</h3>
+    <ul>
+      <li>A long video (say 1 hour) is split into small chunks (4-10 seconds each) and transcoded in parallel across many workers. A 1-hour 4K video might finish in under 5 minutes with 100 workers.</li>
+      <li>Each chunk is processed at each target resolution independently → 6 renditions × ~400 chunks = 2400 transcode tasks for one video.</li>
+      <li>Tasks are idempotent (same input → same output), so Kafka at-least-once is fine.</li>
+      <li>After all chunks finish, a manifest file (HLS <code>.m3u8</code> or DASH <code>.mpd</code>) is generated listing the chunks per resolution.</li>
+    </ul>
+
+    <h3>4.6 Playback Path (Adaptive Bitrate)</h3>
+    <pre><code>client
+  1. GET /videos/{id}/manifest  → returns m3u8 with chunk URLs at each bitrate
+  2. player picks initial rendition by bandwidth estimate
+  3. fetches 4-10s chunks from CDN
+  4. if bandwidth drops, downshifts to lower rendition on next chunk
+  5. if buffer grows, upshifts</code></pre>
+    <p>Chunks are cacheable for years at CDN because each chunk URL is immutable. Cache hit rate for popular videos: &gt; 99%.</p>
+
+    <h3>4.7 v6: Full Production Architecture</h3>
+    <div class="diagram"><pre>
+                 viewer (global)
+                     │
+                     ▼
+              ┌───── CDN pops (YouTube Google Global Cache) ─────┐
+              │  peered into every major ISP; some run in ISP DC │
+              └──────────────────────┬───────────────────────────┘
+                                     │ miss
+                                     ▼
+                               Origin serving tier
+                                     │
+                                     ▼
+                               S3 / blob store
+                                     ▲
+                                     │
+              upload ──► chunk store ──► transcoder fleet ──► S3
+                           │
+                           ├── metadata DB (Spanner-like)
+                           ├── Kafka control plane
+                           └── content-moderation ML
+
+   metadata DB holds:
+     videos (id, owner, title, desc, status, created_at, duration)
+     renditions (video_id, resolution, manifest_url, size_bytes)
+     views (video_id, ts, user_id?, watch_seconds)     → ClickHouse for analytics
+     channels, playlists, subscriptions, comments
+    </pre></div>
+
+    <h3>4.8 Deep Dive — View Count Counting</h3>
+    <p>A popular video might accumulate 10M views/hour. Directly writing "INCR view_count" into the DB is a hot-row death. Real approach:</p>
+    <ul>
+      <li>Views are logged to Kafka.</li>
+      <li>A stream job (Flink) aggregates per-minute counts.</li>
+      <li>Counts are written to a counter store in batches.</li>
+      <li>The displayed view count is eventually consistent — perfectly fine for UX.</li>
+      <li>Bot filtering happens in the stream job before committing to the "official" counter.</li>
+    </ul>
+
+    <h3>4.9 Deep Dive — Watch History</h3>
+    <p>Per-user, append-heavy log of (user_id, video_id, ts, watch_seconds). Sharded by user_id. Used for resuming playback, recommendations, continue-watching. Store latest 1000 entries online; older entries move to a colder tier.</p>
+
+    <h3>4.10 Deep Dive — Recommendations (very light sketch)</h3>
+    <ul>
+      <li><strong>Candidate generation:</strong> a two-tower neural network maps (user, context) → embedding; nearest-neighbor lookup over video embeddings to find ~1000 candidates.</li>
+      <li><strong>Ranking:</strong> a deeper model scores each candidate on watch-time probability, click probability, satisfaction. Top 20 served.</li>
+      <li><strong>Serving infra:</strong> pre-computed user embeddings refreshed every minute; candidate lookup via Faiss/ScaNN; re-ranking in a real-time inference service. Details in Chapter 5.</li>
+    </ul>
+
+    <h2>System 5 — Dropbox / Google Drive</h2>
+
+    <h3>5.1 Functional Requirements</h3>
+    <ul>
+      <li>Client uploads a file; file appears on all of the user's devices.</li>
+      <li>Conflict resolution when two devices edit the same file offline.</li>
+      <li>Version history.</li>
+      <li>Sharing: send a link or invite collaborators.</li>
+      <li>Efficient sync: only changed parts re-uploaded.</li>
+    </ul>
+
+    <h3>5.2 Non-Functional Requirements</h3>
+    <table>
+      <thead><tr><th>Dimension</th><th>Target</th></tr></thead>
+      <tbody>
+        <tr><td>Registered users</td><td>700M</td></tr>
+        <tr><td>Daily active devices</td><td>200M</td></tr>
+        <tr><td>Files</td><td>Trillions</td></tr>
+        <tr><td>New/changed files / day</td><td>1B</td></tr>
+        <tr><td>Sync latency</td><td>p99 &lt; 10 s between save and remote visibility</td></tr>
+        <tr><td>Storage dedup rate</td><td>&gt; 30% (identical blocks across users)</td></tr>
+      </tbody>
+    </table>
+
+    <h3>5.3 Core Trick: Chunking + Content-Addressable Storage</h3>
+    <p>Break each file into fixed-size (4 MB) or content-defined (Rabin rolling hash) chunks. Store each chunk once, keyed by its SHA-256. The file's metadata is an ordered list of chunk hashes.</p>
+    <pre><code>file "essay.docx" (20 MB) → 5 chunks
+  chunk[0] = sha256(bytes 0..4MB)         = abc123...
+  chunk[1] = sha256(bytes 4..8MB)         = def456...
+  chunk[2] = sha256(bytes 8..12MB)        = ghi789...
+  chunk[3] = sha256(bytes 12..16MB)       = jkl012...
+  chunk[4] = sha256(bytes 16..20MB)       = mno345...
+
+file metadata row:
+  path: /users/alice/essay.docx
+  version: 42
+  chunks: [abc123..., def456..., ghi789..., jkl012..., mno345...]</code></pre>
+
+    <p><strong>Why this rocks:</strong></p>
+    <ul>
+      <li>On edit, only changed chunks need to upload.</li>
+      <li>If 10M users have the same YouTube-rip MP3, it's stored once (!).</li>
+      <li>Easy integrity check: recompute chunk hashes.</li>
+    </ul>
+
+    <h3>5.4 Sync Protocol</h3>
+    <div class="diagram"><pre>
+   client watches local folder
+      │
+      ├── file changed on disk
+      │
+      ▼
+   1. compute new chunk list for file
+   2. diff against last-known chunk list (stored in local DB)
+   3. for each new chunk: send to block server (skip if server already has it)
+   4. commit new file version via metadata service
+      commit includes: path, old_version, new_version, chunk_hashes
+
+   other devices of same user
+      │
+      ├── long-poll / WebSocket on "notification" stream
+      │
+      ▼
+   receive "path /essay.docx v42 by device X"
+   fetch metadata → diff local version → fetch missing chunks → reassemble
+    </pre></div>
+
+    <h3>5.5 Data Model</h3>
+    <pre><code>user             (id, email, quota_bytes, used_bytes)
+namespaces       (id, type='user'|'team', owner_id)
+files            (namespace_id, path, current_version, size, mtime)
+file_versions    (namespace_id, path, version, chunk_list, created_by, created_at)
+chunks           (sha256 PRIMARY KEY, size, blob_location)
+blob_store       S3/custom block storage, keyed by sha256</code></pre>
+
+    <h3>5.6 Conflict Resolution</h3>
+    <p>Two devices edit the same file offline. They both come online and push new versions based on the same parent version.</p>
+    <ul>
+      <li><strong>Last-writer-wins</strong> is easy but lossy.</li>
+      <li><strong>Dropbox's answer:</strong> both versions are accepted, but the second becomes <code>essay (alice's conflicted copy 2025-11-19).docx</code>. User resolves manually.</li>
+      <li><strong>Google Docs' answer:</strong> operational transformation or CRDTs, because Docs is a collaborative document editor, not just a sync tool.</li>
+    </ul>
+    <p>For a generic file-sync service, "keep both + surface conflict" is the right default. Don't pretend you can merge binary Word docs.</p>
+
+    <h3>5.7 Version Vectors</h3>
+    <pre><code>Each file version carries a vector clock {device_id → counter}.
+  v42 by device A:  {A:42, B:7}
+  v43 by device B:  {A:41, B:8}       (B didn't see A's v42 before editing)
+
+When server receives v43 with parent {A:41, B:7}, and current is v42 {A:42, B:7}:
+  neither dominates → conflict → create "conflicted copy"
+When server receives v43 with parent {A:42, B:7}:
+  parent = current → linear succession → accept as v43</code></pre>
+
+    <h3>5.8 v6: Full Architecture</h3>
+    <div class="diagram"><pre>
+    client (desktop, mobile, web)
+        │
+        ├── block server (POST sha256 → upload if missing) ──► S3-compatible block store
+        │
+        ├── metadata service ─► sharded metadata DB (Edgestore / Spanner-like)
+        │        ├── file tree
+        │        ├── version history (append-only)
+        │        └── share ACLs
+        │
+        ├── notification service ── WebSocket / long-poll per client ──► pushes path changes
+        │
+        └── sharing service ─► share links, link expiry, email invites
+
+ pipelines:
+  - content scanner (malware, DMCA) subscribes to chunks feed
+  - search indexer subscribes to file events, indexes filenames + textual content
+  - quota accountant tallies per-user bytes and enforces limits
+  - cold-tier migrator moves chunks not accessed in N days to Glacier-class
+    </pre></div>
+
+    <h3>5.9 Deep Dive — Block-Level Deduplication at Scale</h3>
+    <p>Chunks table has trillions of rows. A SELECT-BEFORE-INSERT check on every chunk upload is too expensive. Real design:</p>
+    <ul>
+      <li>Client maintains a bloom filter of "chunks I know the server has" (gossiped from server). Before upload, check bloom; if positive, just reference the hash.</li>
+      <li>Server keeps its own in-memory bloom / cuckoo filter over the global chunks table for negative checks.</li>
+      <li>Reference counting: each chunk row has a refcount. GC runs when refcount → 0 (and a grace period).</li>
+    </ul>
+
+    <h3>5.10 Deep Dive — Delta Sync via Rolling Hash</h3>
+    <p>When you edit a 100 MB file and insert 1 byte at the beginning, fixed-size chunking breaks (every chunk shifts). A rolling hash (Rabin-Karp) chooses chunk boundaries based on content, so inserting bytes only affects the local neighborhood. This is why rsync works and why Dropbox adopted a similar content-defined chunking scheme for large files.</p>
+
+    <h3>5.11 Deep Dive — Sharing</h3>
+    <ul>
+      <li>Link share: mint a cryptographically random token, store <code>(token → namespace_id, path, permission)</code>. Optionally short TTL.</li>
+      <li>Collaborator invite: add user to ACL on the namespace; notification service pushes new path visibility to their clients.</li>
+      <li>Permission lookup on every read is cache-hot — permissions service uses Redis with a short TTL and a bust channel via pub/sub.</li>
+    </ul>
+
+    <h3>5.12 Tradeoffs Recap</h3>
+    <table>
+      <thead><tr><th>Decision</th><th>Why</th><th>Cost</th></tr></thead>
+      <tbody>
+        <tr><td>Content-addressable chunks</td><td>Huge dedup savings; efficient delta sync</td><td>Need global dedup index; orphan-chunk GC</td></tr>
+        <tr><td>Version vectors over LWW</td><td>No silent data loss</td><td>Conflicted-copy UX surface</td></tr>
+        <tr><td>Push notifications for sync</td><td>Sub-second cross-device latency</td><td>Must maintain millions of long-lived connections</td></tr>
+        <tr><td>Separate block store from metadata</td><td>Metadata queries stay on fast storage; blocks use cheap object storage</td><td>Extra hop for cold chunks</td></tr>
+      </tbody>
+    </table>
+
+    <div class="callout success"><strong>End of chapter.</strong> These five systems dominate modern consumer internet. Their patterns — hybrid fan-out, media pipelines, WebSocket presence, transcoder ladders, content-addressable storage — recur throughout Chapter 5's advanced systems. Next up: search, recommendations, ride-sharing, and trading — each of which combines two or three of the tricks learned here.</div>
+
+    <div class="chapter-nav">
+      <a href="03-basic-systems.html"><div class="label">← Previous</div><div class="title">3. Basic Systems</div></a>
+      <a class="next" href="05-advanced.html"><div class="label">Next →</div><div class="title">5. Advanced Systems</div></a>
+    </div>
+  </main>
+</div>
+<script src="../assets/js/nav.js"></script>
+</body>
+</html>

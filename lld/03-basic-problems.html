@@ -1,0 +1,671 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Basic Problems — Book I · LLD</title>
+<link rel="stylesheet" href="../assets/css/style.css">
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">System Design Books</div>
+    <div class="brand-sub">by Sanheen · Progressive Learning</div>
+    <div class="nav-section">
+      <h3>Home</h3>
+      <a href="../index.html">Overview</a>
+    </div>
+    <div class="nav-section">
+      <h3>Book I — Low Level Design</h3>
+      <a href="index.html">LLD Index</a>
+      <a href="01-foundations.html">1. Foundations (OOP, SOLID)</a>
+      <a href="02-patterns.html">2. Design Patterns Primer</a>
+      <a href="03-basic-problems.html">3. Basic Problems</a>
+      <a href="04-intermediate.html">4. Intermediate Problems</a>
+      <a href="05-advanced.html">5. Advanced Problems</a>
+      <a href="06-concurrency.html">6. Concurrency in LLD</a>
+      <a href="07-war-room.html">7. War Room Scenarios</a>
+      <a href="08-real-code.html">8. Real Company Code</a>
+    </div>
+    <div class="nav-section">
+      <h3>Book II — High Level Design</h3>
+      <a href="../hld/index.html">HLD Index</a>
+    </div>
+  </aside>
+  <main class="main">
+    <div class="breadcrumb"><a href="../index.html">Home</a> / <a href="index.html">Book I · LLD</a> / Chapter 3</div>
+    <h1>Chapter 3: Basic Problems</h1>
+
+    <div class="callout">
+      <div class="callout-title">How to Read This Chapter</div>
+      <p>We solve four classic LLD problems the way engineers actually solve them in real life: write something ugly that works, feel the pain, fix one pain at a time. Each "version" is a checkpoint. Resist the urge to skip to the final version — the pain is the lesson.</p>
+    </div>
+
+    <h2>3.1 Parking Lot</h2>
+    <p>Asked at Amazon, Google, Uber. The question: "Design a parking lot." Most candidates freeze or over-engineer. Let's walk the progression.</p>
+
+    <h3>v1 — Everything in one class</h3>
+    <p>Start brute force. One class. A flat list of spots. Strings for vehicle types.</p>
+<pre><code>class ParkingLot:
+    def __init__(self, n):
+        self.spots = [None] * n  # None = empty, else "CAR-123"
+
+    def park(self, plate):
+        for i, s in enumerate(self.spots):
+            if s is None:
+                self.spots[i] = plate
+                return i
+        return -1
+
+    def leave(self, i):
+        self.spots[i] = None</code></pre>
+    <p><strong>Pain:</strong> No concept of vehicle type, floor, pricing, or ownership. Everything is a string. Adding a feature breaks everything.</p>
+
+    <h3>v2 — Separate Vehicle, Spot, Floor classes</h3>
+<pre><code>from dataclasses import dataclass
+
+@dataclass
+class Vehicle:
+    plate: str
+
+@dataclass
+class Spot:
+    id: int
+    vehicle: Vehicle | None = None
+
+class Floor:
+    def __init__(self, level, n):
+        self.level = level
+        self.spots = [Spot(i) for i in range(n)]
+
+class ParkingLot:
+    def __init__(self, floors):
+        self.floors = floors
+
+    def park(self, v: Vehicle):
+        for f in self.floors:
+            for s in f.spots:
+                if s.vehicle is None:
+                    s.vehicle = v
+                    return (f.level, s.id)
+        return None</code></pre>
+    <p><strong>Pain:</strong> All vehicles are equal. A truck fits in a bike spot. No size matching.</p>
+
+    <h3>v3 — Inheritance for vehicle types</h3>
+<pre><code>from enum import Enum
+
+class Size(Enum):
+    SMALL = 1; MEDIUM = 2; LARGE = 3
+
+class Vehicle:
+    def __init__(self, plate, size):
+        self.plate, self.size = plate, size
+
+class Bike(Vehicle):
+    def __init__(self, plate): super().__init__(plate, Size.SMALL)
+class Car(Vehicle):
+    def __init__(self, plate): super().__init__(plate, Size.MEDIUM)
+class Truck(Vehicle):
+    def __init__(self, plate): super().__init__(plate, Size.LARGE)
+
+class Spot:
+    def __init__(self, id, size):
+        self.id, self.size = id, size
+        self.vehicle = None
+
+    def fits(self, v):
+        return self.vehicle is None and self.size.value &gt;= v.size.value</code></pre>
+    <p><strong>Pain:</strong> <code>park()</code> is still O(n·floors). At a 5000-spot mall on Saturday, this scans thousands of spots per entry. Queue forms at the gate.</p>
+
+    <h3>v4 — HashMap by type for O(1) find</h3>
+<pre><code>from collections import defaultdict
+
+class ParkingLot:
+    def __init__(self):
+        # size -&gt; set of free spot ids
+        self.free = defaultdict(set)
+        self.spots = {}  # id -&gt; Spot
+
+    def add_spot(self, spot):
+        self.spots[spot.id] = spot
+        self.free[spot.size].add(spot.id)
+
+    def park(self, v):
+        # try same size first, then bigger
+        for size in Size:
+            if size.value &lt; v.size.value: continue
+            if self.free[size]:
+                sid = next(iter(self.free[size]))
+                self.free[size].remove(sid)
+                self.spots[sid].vehicle = v
+                return sid
+        return None
+
+    def leave(self, sid):
+        s = self.spots[sid]
+        s.vehicle = None
+        self.free[s.size].add(sid)</code></pre>
+    <p><strong>Pain:</strong> Two cars arrive at the same nanosecond. Both threads read the same free set, both get the same spot id, one overwrites the other. Data corruption.</p>
+
+    <h3>v5 — Thread-safe with locks</h3>
+<pre><code>import threading
+
+class ParkingLot:
+    def __init__(self):
+        self.free = defaultdict(set)
+        self.spots = {}
+        self.lock = threading.Lock()
+
+    def park(self, v):
+        with self.lock:
+            for size in Size:
+                if size.value &lt; v.size.value: continue
+                if self.free[size]:
+                    sid = self.free[size].pop()
+                    self.spots[sid].vehicle = v
+                    return sid
+            return None</code></pre>
+    <p><strong>Pain:</strong> Pricing is hardcoded. Weekday flat rate. Business wants weekend surge, EV discount, monthly passes.</p>
+
+    <h3>v6 — Strategy pattern for pricing</h3>
+<pre><code>from abc import ABC, abstractmethod
+from datetime import datetime
+
+class PricingStrategy(ABC):
+    @abstractmethod
+    def price(self, vehicle, entry, exit): ...
+
+class FlatHourly(PricingStrategy):
+    def __init__(self, rate): self.rate = rate
+    def price(self, v, e, x):
+        hours = max(1, (x - e).seconds // 3600)
+        return hours * self.rate
+
+class WeekendSurge(PricingStrategy):
+    def price(self, v, e, x):
+        hours = max(1, (x - e).seconds // 3600)
+        base = 50 if v.size == Size.LARGE else 30
+        if e.weekday() &gt;= 5: base *= 1.5
+        return hours * base
+
+class ParkingLot:
+    def __init__(self, pricing: PricingStrategy):
+        self.pricing = pricing
+        # ...
+
+    def checkout(self, sid, exit_time):
+        ticket = self.tickets.pop(sid)
+        return self.pricing.price(ticket.vehicle, ticket.entry, exit_time)</code></pre>
+
+    <table>
+      <thead><tr><th>Version</th><th>Pattern / Technique</th><th>Pain it solved</th></tr></thead>
+      <tbody>
+        <tr><td>v2</td><td>Separation of concerns</td><td>God class</td></tr>
+        <tr><td>v3</td><td>Inheritance + Enum</td><td>No size matching</td></tr>
+        <tr><td>v4</td><td>HashMap by type</td><td>O(n) search</td></tr>
+        <tr><td>v5</td><td>Lock (mutex)</td><td>Race condition on same spot</td></tr>
+        <tr><td>v6</td><td>Strategy</td><td>Pricing rules change monthly</td></tr>
+      </tbody>
+    </table>
+
+    <h2>3.2 Vending Machine</h2>
+    <p>The vending machine problem is the canonical State Pattern question. Watch how if/else turns into a mess, then dissolves.</p>
+
+    <h3>v1 — if/else state chaos</h3>
+<pre><code>class VendingMachine:
+    def __init__(self):
+        self.state = "IDLE"
+        self.balance = 0
+        self.selected = None
+
+    def insert(self, amt):
+        if self.state == "IDLE":
+            self.state = "HAS_MONEY"
+            self.balance += amt
+        elif self.state == "HAS_MONEY":
+            self.balance += amt
+        elif self.state == "DISPENSING":
+            print("wait")
+        # ... 5 more elifs
+
+    def select(self, item):
+        if self.state == "HAS_MONEY":
+            if self.balance &gt;= price[item]:
+                self.state = "DISPENSING"
+                # ...
+        elif self.state == "IDLE":
+            print("pay first")
+        # ... etc</code></pre>
+    <p><strong>Pain:</strong> Every method has the same if/elif ladder. Adding a "REFUND" state means editing every method.</p>
+
+    <h3>v2 — Enum states (still branching)</h3>
+<pre><code>from enum import Enum, auto
+class S(Enum):
+    IDLE = auto(); HAS_MONEY = auto(); DISPENSING = auto(); SOLD_OUT = auto()</code></pre>
+    <p>Cleaner names, same problem. Still one big <code>if self.state == ...</code> in every method.</p>
+
+    <h3>v3 — State Pattern (each state is a class)</h3>
+<pre><code>from abc import ABC, abstractmethod
+
+class State(ABC):
+    @abstractmethod
+    def insert(self, m, amt): ...
+    @abstractmethod
+    def select(self, m, item): ...
+    @abstractmethod
+    def dispense(self, m): ...
+
+class Idle(State):
+    def insert(self, m, amt):
+        m.balance += amt
+        m.set_state(HasMoney())
+    def select(self, m, item):
+        print("insert money first")
+    def dispense(self, m):
+        print("nothing to dispense")
+
+class HasMoney(State):
+    def insert(self, m, amt):
+        m.balance += amt
+    def select(self, m, item):
+        if m.inventory.get(item, 0) == 0:
+            m.set_state(SoldOut()); return
+        if m.balance &gt;= m.price[item]:
+            m.selected = item
+            m.set_state(Dispensing())
+            m.state.dispense(m)
+    def dispense(self, m): print("select an item")
+
+class Dispensing(State):
+    def insert(self, m, amt): print("busy"); m.refund(amt)
+    def select(self, m, item): print("busy")
+    def dispense(self, m):
+        m.inventory[m.selected] -= 1
+        m.balance -= m.price[m.selected]
+        print(f"enjoy your {m.selected}")
+        m.set_state(Idle() if m.balance == 0 else HasMoney())
+
+class VendingMachine:
+    def __init__(self, inv, price):
+        self.inventory, self.price = inv, price
+        self.balance, self.selected = 0, None
+        self.state = Idle()
+    def set_state(self, s): self.state = s
+    def insert(self, amt): self.state.insert(self, amt)
+    def select(self, item): self.state.select(self, item)</code></pre>
+    <p><strong>Pain:</strong> Payment is hardcoded to cash. Need to add card, UPI, wallet.</p>
+
+    <h3>v4 — Strategy for payment</h3>
+<pre><code>class PaymentStrategy(ABC):
+    @abstractmethod
+    def pay(self, amount) -&gt; bool: ...
+
+class Cash(PaymentStrategy):
+    def __init__(self, inserted): self.inserted = inserted
+    def pay(self, amt): return self.inserted &gt;= amt
+
+class Card(PaymentStrategy):
+    def __init__(self, gateway): self.gw = gateway
+    def pay(self, amt): return self.gw.charge(amt)
+
+class UPI(PaymentStrategy):
+    def pay(self, amt):
+        # generate QR, wait for webhook
+        return upi_client.request(amt)</code></pre>
+    <p><strong>Pain:</strong> Two customers hit the same UPI-paid vending machine; both expect their chips.</p>
+
+    <h3>v5 — Thread-safe</h3>
+<pre><code>import threading
+
+class VendingMachine:
+    def __init__(self, inv, price):
+        self.inventory, self.price = inv, price
+        self.lock = threading.Lock()
+        self.state = Idle()
+
+    def insert(self, amt):
+        with self.lock:
+            self.state.insert(self, amt)
+
+    def select(self, item):
+        with self.lock:
+            self.state.select(self, item)</code></pre>
+    <p><strong>Pain:</strong> Payment succeeds but the motor jams. Money taken, no chips delivered. Need compensation.</p>
+
+    <h3>v6 — Saga with compensation</h3>
+<pre><code>class DispenseSaga:
+    def run(self, m, item, payment):
+        steps = []
+        try:
+            if not payment.pay(m.price[item]):
+                raise Exception("payment failed")
+            steps.append(("refund", payment))
+
+            m.inventory[item] -= 1
+            steps.append(("restock", item))
+
+            if not m.motor.dispense(item):
+                raise Exception("motor jam")
+            return True
+        except Exception as e:
+            # unwind in reverse
+            for action, arg in reversed(steps):
+                if action == "refund": arg.refund()
+                elif action == "restock": m.inventory[item] += 1
+            m.alert_operator(str(e))
+            return False</code></pre>
+
+    <table>
+      <thead><tr><th>Version</th><th>Pattern</th><th>Pain solved</th></tr></thead>
+      <tbody>
+        <tr><td>v3</td><td>State Pattern</td><td>if/else explosion</td></tr>
+        <tr><td>v4</td><td>Strategy</td><td>Multiple payment methods</td></tr>
+        <tr><td>v5</td><td>Lock</td><td>Concurrent customers</td></tr>
+        <tr><td>v6</td><td>Saga / Compensation</td><td>Partial failure (paid, not dispensed)</td></tr>
+      </tbody>
+    </table>
+
+    <h2>3.3 Logger</h2>
+
+    <h3>v1 — print statements</h3>
+<pre><code>def log(msg): print(msg)</code></pre>
+    <p><strong>Pain:</strong> Disappears on crash, goes to stdout only, no timestamps.</p>
+
+    <h3>v2 — File handle</h3>
+<pre><code>class Logger:
+    def __init__(self, path):
+        self.f = open(path, "a")
+    def log(self, msg):
+        self.f.write(msg + "\n"); self.f.flush()</code></pre>
+    <p><strong>Pain:</strong> Every DEBUG line in production floods disk. No way to filter.</p>
+
+    <h3>v3 — Log levels with filter</h3>
+<pre><code>from enum import IntEnum
+class Level(IntEnum):
+    DEBUG = 10; INFO = 20; WARN = 30; ERROR = 40
+
+class Logger:
+    def __init__(self, path, min_level=Level.INFO):
+        self.f = open(path, "a")
+        self.min = min_level
+    def log(self, level, msg):
+        if level &lt; self.min: return
+        self.f.write(f"[{level.name}] {msg}\n")</code></pre>
+    <p><strong>Pain:</strong> Format is hardcoded. Ops wants JSON. Another team wants syslog format.</p>
+
+    <h3>v4 — Formatter Strategy</h3>
+<pre><code>import json, time
+from abc import ABC, abstractmethod
+
+class Formatter(ABC):
+    @abstractmethod
+    def format(self, level, msg) -&gt; str: ...
+
+class PlainFormatter(Formatter):
+    def format(self, level, msg):
+        return f"{time.time():.3f} [{level.name}] {msg}"
+
+class JsonFormatter(Formatter):
+    def format(self, level, msg):
+        return json.dumps({"ts": time.time(), "lvl": level.name, "msg": msg})
+
+class Logger:
+    def __init__(self, dest, fmt: Formatter, min_level=Level.INFO):
+        self.dest, self.fmt, self.min = dest, fmt, min_level
+    def log(self, level, msg):
+        if level &lt; self.min: return
+        self.dest.write(self.fmt.format(level, msg) + "\n")</code></pre>
+    <p><strong>Pain:</strong> ERROR should go to stderr AND file AND Slack. Single destination is wrong.</p>
+
+    <h3>v5 — Chain of Responsibility (multiple destinations)</h3>
+<pre><code>class Handler(ABC):
+    def __init__(self, next=None):
+        self.next = next
+    def handle(self, level, msg):
+        self._do(level, msg)
+        if self.next: self.next.handle(level, msg)
+    @abstractmethod
+    def _do(self, level, msg): ...
+
+class FileHandler(Handler):
+    def __init__(self, path, min_level, next=None):
+        super().__init__(next)
+        self.f = open(path, "a"); self.min = min_level
+    def _do(self, level, msg):
+        if level &gt;= self.min:
+            self.f.write(f"{msg}\n")
+
+class SlackHandler(Handler):
+    def _do(self, level, msg):
+        if level &gt;= Level.ERROR:
+            slack_client.post(f"#alerts", msg)
+
+class ConsoleHandler(Handler):
+    def _do(self, level, msg):
+        import sys
+        out = sys.stderr if level &gt;= Level.ERROR else sys.stdout
+        print(msg, file=out)
+
+# wire up
+chain = ConsoleHandler(
+    next=FileHandler("/var/log/app.log", Level.INFO,
+        next=SlackHandler()))</code></pre>
+    <p><strong>Pain:</strong> Slack API is slow. <code>log.error()</code> blocks the request thread for 300ms.</p>
+
+    <h3>v6 — Async queue</h3>
+<pre><code>import queue, threading
+
+class AsyncLogger:
+    def __init__(self, chain):
+        self.chain = chain
+        self.q = queue.Queue(maxsize=10_000)
+        self.stop = threading.Event()
+        self.worker = threading.Thread(target=self._drain, daemon=True)
+        self.worker.start()
+
+    def log(self, level, msg):
+        try:
+            self.q.put_nowait((level, msg))
+        except queue.Full:
+            # drop or fall back to sync; never block caller
+            pass
+
+    def _drain(self):
+        while not self.stop.is_set():
+            try:
+                lvl, m = self.q.get(timeout=0.1)
+                self.chain.handle(lvl, m)
+            except queue.Empty:
+                continue
+
+    def shutdown(self):
+        self.q.join()
+        self.stop.set()</code></pre>
+
+    <table>
+      <thead><tr><th>Version</th><th>Pattern</th><th>Pain solved</th></tr></thead>
+      <tbody>
+        <tr><td>v3</td><td>Enum levels</td><td>Debug spam</td></tr>
+        <tr><td>v4</td><td>Strategy (Formatter)</td><td>Multiple output formats</td></tr>
+        <tr><td>v5</td><td>Chain of Responsibility</td><td>Multiple destinations</td></tr>
+        <tr><td>v6</td><td>Producer-Consumer queue</td><td>Slow sinks block caller</td></tr>
+      </tbody>
+    </table>
+
+    <h2>3.4 Tic-Tac-Toe</h2>
+    <p>Looks trivial. The progression teaches algorithm refinement, generalization, and pattern layering.</p>
+
+    <h3>v1 — 2D array, check all lines O(n²)</h3>
+<pre><code>class TicTacToe:
+    def __init__(self):
+        self.b = [[" "]*3 for _ in range(3)]
+        self.turn = "X"
+    def move(self, r, c):
+        if self.b[r][c] != " ": return None
+        self.b[r][c] = self.turn
+        w = self._winner()
+        self.turn = "O" if self.turn == "X" else "X"
+        return w
+    def _winner(self):
+        lines = self.b + [list(col) for col in zip(*self.b)]
+        lines.append([self.b[i][i] for i in range(3)])
+        lines.append([self.b[i][2-i] for i in range(3)])
+        for line in lines:
+            if line[0] != " " and all(x == line[0] for x in line):
+                return line[0]
+        return None</code></pre>
+    <p><strong>Pain:</strong> After every move we rescan the whole board. O(n²) per move, wasteful for larger boards.</p>
+
+    <h3>v2 — Running counters O(1)</h3>
+<pre><code>class TicTacToe:
+    def __init__(self, n=3):
+        self.n = n
+        # +1 for X, -1 for O; win when abs == n
+        self.rows = [0]*n
+        self.cols = [0]*n
+        self.diag = 0
+        self.anti = 0
+        self.turn = 1  # X
+
+    def move(self, r, c):
+        s = self.turn
+        self.rows[r] += s
+        self.cols[c] += s
+        if r == c: self.diag += s
+        if r + c == self.n - 1: self.anti += s
+        won = (abs(self.rows[r]) == self.n or abs(self.cols[c]) == self.n
+               or abs(self.diag) == self.n or abs(self.anti) == self.n)
+        winner = ("X" if s == 1 else "O") if won else None
+        self.turn = -self.turn
+        return winner</code></pre>
+    <p><strong>Pain:</strong> Works for 3×3, but hardcoded "X/O". What about N players on an N×N board?</p>
+
+    <h3>v3 — Generalize to N×N</h3>
+<pre><code>class NInARow:
+    def __init__(self, n, target=None):
+        self.n = n
+        self.target = target or n
+        self.rows = [{} for _ in range(n)]
+        self.cols = [{} for _ in range(n)]
+        self.diag = {}
+        self.anti = {}
+        self.board = [[None]*n for _ in range(n)]
+
+    def move(self, player, r, c):
+        if self.board[r][c] is not None: return "invalid"
+        self.board[r][c] = player
+        def bump(d):
+            d[player] = d.get(player, 0) + 1
+            return d[player] &gt;= self.target
+        if (bump(self.rows[r]) or bump(self.cols[c])
+            or (r == c and bump(self.diag))
+            or (r + c == self.n - 1 and bump(self.anti))):
+            return f"{player} wins"
+        return "continue"</code></pre>
+    <p><strong>Pain:</strong> All players are humans typing at a terminal. How do we plug in an AI?</p>
+
+    <h3>v4 — Strategy for Player</h3>
+<pre><code>import random
+class Player(ABC):
+    def __init__(self, mark): self.mark = mark
+    @abstractmethod
+    def next_move(self, game): ...
+
+class Human(Player):
+    def next_move(self, game):
+        r, c = map(int, input("row col: ").split())
+        return r, c
+
+class RandomAI(Player):
+    def next_move(self, game):
+        empty = [(r, c) for r in range(game.n) for c in range(game.n)
+                 if game.board[r][c] is None]
+        return random.choice(empty)
+
+class MinimaxAI(Player):
+    def next_move(self, game):
+        return self._best(game, self.mark)[1]
+    def _best(self, game, mark):
+        # classic minimax, omitted for brevity
+        ...</code></pre>
+
+    <h3>v5 — Observer for game state</h3>
+<pre><code>class Observer(ABC):
+    @abstractmethod
+    def on_move(self, player, r, c): ...
+    @abstractmethod
+    def on_end(self, winner): ...
+
+class ConsoleView(Observer):
+    def on_move(self, p, r, c): print(f"{p.mark} -&gt; ({r},{c})")
+    def on_end(self, w): print(f"WINNER: {w}")
+
+class Scoreboard(Observer):
+    def __init__(self): self.wins = {}
+    def on_move(self, p, r, c): pass
+    def on_end(self, w):
+        if w: self.wins[w] = self.wins.get(w, 0) + 1
+
+class Game:
+    def __init__(self, n, players):
+        self.n, self.players = n, players
+        self.observers = []
+        # ...
+    def subscribe(self, o): self.observers.append(o)
+    def _notify_move(self, p, r, c):
+        for o in self.observers: o.on_move(p, r, c)</code></pre>
+
+    <h3>v6 — Undo via Command / Memento</h3>
+<pre><code>class MoveCommand:
+    def __init__(self, game, player, r, c):
+        self.game, self.player, self.r, self.c = game, player, r, c
+        # memento of counters BEFORE move
+        self.snapshot = None
+    def execute(self):
+        self.snapshot = self.game.snapshot()
+        self.game._apply(self.player, self.r, self.c)
+    def undo(self):
+        self.game.restore(self.snapshot)
+
+class Game:
+    def __init__(self, n):
+        self.history = []
+        # ...
+    def play(self, player, r, c):
+        cmd = MoveCommand(self, player, r, c)
+        cmd.execute()
+        self.history.append(cmd)
+    def undo(self):
+        if self.history:
+            self.history.pop().undo()
+    def snapshot(self):
+        import copy
+        return copy.deepcopy((self.board, self.rows, self.cols, self.diag, self.anti))
+    def restore(self, snap):
+        self.board, self.rows, self.cols, self.diag, self.anti = snap</code></pre>
+
+    <table>
+      <thead><tr><th>Version</th><th>Pattern</th><th>Pain solved</th></tr></thead>
+      <tbody>
+        <tr><td>v2</td><td>Running counters</td><td>O(n²) rescan per move</td></tr>
+        <tr><td>v3</td><td>Generalization</td><td>Hardcoded to 3×3, 2 players</td></tr>
+        <tr><td>v4</td><td>Strategy (Player)</td><td>Can't plug AI</td></tr>
+        <tr><td>v5</td><td>Observer</td><td>UI/scoreboard tangled with logic</td></tr>
+        <tr><td>v6</td><td>Command + Memento</td><td>No undo</td></tr>
+      </tbody>
+    </table>
+
+    <div class="callout success">
+      <div class="callout-title">Takeaway</div>
+      <p>You didn't memorize five patterns. You felt five different pains and reached for the pattern that fixed each one. That's the interviewer's signal: you can name the pain before you name the pattern.</p>
+    </div>
+
+    <div class="chapter-nav">
+      <a href="02-patterns.html"><div class="label">← Previous</div><div class="title">Design Patterns Primer</div></a>
+      <a class="next" href="04-intermediate.html"><div class="label">Next →</div><div class="title">Intermediate Problems</div></a>
+    </div>
+  </main>
+</div>
+<script src="../assets/js/nav.js"></script>
+</body>
+</html>

@@ -1,0 +1,459 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Advanced Systems — Book II · HLD</title>
+<link rel="stylesheet" href="../assets/css/style.css">
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">System Design Books</div>
+    <div class="brand-sub">by Sanheen · Progressive Learning</div>
+    <div class="nav-section">
+      <h3>Home</h3>
+      <a href="../index.html">Overview</a>
+    </div>
+    <div class="nav-section">
+      <h3>Book I — Low Level Design</h3>
+      <a href="../lld/index.html">LLD Index</a>
+    </div>
+    <div class="nav-section">
+      <h3>Book II — High Level Design</h3>
+      <a href="index.html">HLD Index</a>
+      <a href="01-foundations.html">1. Foundations & Capacity</a>
+      <a href="02-building-blocks.html">2. Building Blocks</a>
+      <a href="03-basic-systems.html">3. Basic Systems</a>
+      <a href="04-intermediate.html">4. Intermediate Systems</a>
+      <a href="05-advanced.html">5. Advanced Systems</a>
+      <a href="06-very-high-scale.html">6. Very High Scale</a>
+      <a href="07-war-room.html">7. War Room Scenarios</a>
+      <a href="08-real-architectures.html">8. Real Architectures</a>
+    </div>
+  </aside>
+  <main class="main">
+    <div class="breadcrumb"><a href="../index.html">Home</a> / <a href="index.html">Book II · HLD</a> / Chapter 5</div>
+    <h1>Chapter 5: Advanced Systems</h1>
+
+    <div class="callout">
+      <strong>What "advanced" means here.</strong> The systems in this chapter combine several non-trivial sub-systems where the individual parts interact in subtle ways. You cannot just "add a cache" — you have to reason about geospatial indexing, CDN tiering, graph algorithms at planetary scale, or consistent hashing under node churn. Expect every one of these to show up in senior interviews at FAANG.
+    </div>
+
+    <h2>5.1 Uber / Ride-Sharing</h2>
+
+    <p>Uber looks simple from the outside: rider opens an app, a car shows up. Behind it is one of the hardest real-time geospatial systems ever built. Every second, millions of drivers stream GPS pings, millions of riders ask "where are the cars near me?", and the matcher has a few hundred milliseconds to pick one driver without ever double-assigning them.</p>
+
+    <h3>Requirements and capacity</h3>
+
+    <div class="callout info">
+      <strong>Functional.</strong> Rider requests ride with pickup/drop pins → system finds nearby drivers → picks one → driver accepts → live track → trip completes → fare settled. Drivers stream location every 4 s while online.<br>
+      <strong>Non-functional.</strong> Match latency &lt; 2 s p99. Location pipeline handles 1M updates/s. No driver ever assigned to two riders. 99.99% availability.
+    </div>
+
+    <p>Back-of-envelope for a platform with <strong>5M active drivers</strong> globally and <strong>100M daily rides</strong>:</p>
+
+    <ul>
+      <li><strong>Location ingest:</strong> 5M drivers × (1 ping / 4 s) = 1.25M writes/s. Payload ~200 B ⇒ 250 MB/s ingress, ~22 TB/day raw.</li>
+      <li><strong>Rider "nearby cars" reads:</strong> 100M rides/day ≈ 1,200 req/s average, ~10× peak = 12k req/s. Each read scans O(drivers within 5 km).</li>
+      <li><strong>Matching:</strong> 1,200 matches/s avg, each match touches 20–50 candidate drivers. &lt; 500 ms budget.</li>
+      <li><strong>Storage:</strong> trip history 100M/day × 2 KB = 200 GB/day ⇒ ~70 TB/yr.</li>
+    </ul>
+
+    <h3>High-level architecture</h3>
+
+    <div class="diagram"><pre>
+  Driver App                                  Rider App
+      |                                          |
+      | WebSocket (location ping every 4s)       | HTTPS /nearby, /request
+      v                                          v
+  +--------------------+                   +--------------------+
+  | Location Gateway   |                   |  API Gateway       |
+  | (sticky by driver) |                   +--------------------+
+  +--------------------+                           |
+      |                                            |
+      | Kafka: driver_pings                        v
+      v                                  +--------------------+
+  +--------------------+                 | Dispatch Service   |
+  | Location Consumer  |  --- reads ---> | (matching logic)   |
+  |  (updates Redis)   |                 +--------------------+
+  +--------------------+                           |
+      |                                            | locks driver via
+      v                                            v Redis SETNX
+  +------------------------+          +----------------------------+
+  | Geo Index (S2 cells)   |          | Trip Service (Postgres     |
+  |  Redis per city shard  |<---------|  per-city shards)          |
+  +------------------------+          +----------------------------+
+      |                                            |
+      +--> Flink job (surge, heatmap) <------------+
+      |
+      +--> S3 + Hive (historical trips, ML features)
+    </pre></div>
+
+    <h3>Deep dive: geospatial index — Quadtree vs Geohash vs S2</h3>
+
+    <p>The core question: given a rider at (lat, lng), return all online drivers within radius R fast. A naive scan of 5M drivers is ~50 ms per read per core, which collapses at 12k QPS. We need a spatial index.</p>
+
+    <table>
+      <tr><th>Approach</th><th>Idea</th><th>Pro</th><th>Con</th></tr>
+      <tr><td>Quadtree</td><td>Recursive 4-way split of the plane, leaves hold points</td><td>Adapts to density; great for static data</td><td>Rebalancing under 1M writes/s is painful; tree locks</td></tr>
+      <tr><td>Geohash</td><td>Interleave lat/lng bits into a base-32 string, prefix = region</td><td>Dead simple, string-sortable, works in any KV</td><td>Boundary problem: neighbors may share no prefix; must query 8 neighbor cells</td></tr>
+      <tr><td>Uber H3</td><td>Hexagonal hierarchical grid</td><td>Uniform neighbor distance, 6 neighbors not 8</td><td>More complex math, no native DB support</td></tr>
+      <tr><td>Google S2</td><td>Hilbert curve on sphere, 64-bit cell IDs</td><td>Spherical accuracy, 30 levels, range queries are interval scans</td><td>Library-heavy; learning curve</td></tr>
+    </table>
+
+    <p>Uber famously uses <strong>H3</strong> for analytics and a city-sharded grid for dispatch; Lyft uses <strong>S2</strong>. In an interview, picking Geohash is fine if you describe the 9-cell neighbor trick:</p>
+
+    <pre><code>def nearby(lat, lng, radius_m):
+    cell = geohash.encode(lat, lng, precision=6)  # ~1.2km x 0.6km
+    candidates = set()
+    for nbr in [cell] + geohash.neighbors(cell):   # 9 cells total
+        for driver_id in redis.smembers(f"geo:{nbr}"):
+            d = redis.hgetall(f"driver:{driver_id}")
+            if haversine(lat, lng, d.lat, d.lng) &lt;= radius_m:
+                candidates.add(driver_id)
+    return candidates</code></pre>
+
+    <h3>Deep dive: preventing double-assignment</h3>
+
+    <p>Two riders across the city request at the same millisecond; dispatch selects the same driver for both. Classic race. The fix is a distributed lock on the driver, not on the rider.</p>
+
+    <pre><code># pseudo-code inside Dispatch
+for driver in ranked_candidates:
+    # atomic: SET driver:{id}:lock rider-123 NX EX 30
+    got = redis.set(f"driver:{driver.id}:lock", rider_id, nx=True, ex=30)
+    if got:
+        send_offer(driver, rider)
+        break   # winner; other dispatches will skip this driver</code></pre>
+
+    <p>Key properties: NX makes it a compare-and-set, EX ensures the lock auto-releases if the driver app crashes before responding. If the driver rejects, we DEL the key and move on. If they accept, we promote the lock to a trip row in Postgres.</p>
+
+    <div class="callout warn">
+      <strong>Why not a DB transaction?</strong> Postgres transaction per match at 1k+ TPS globally is fine, but the hot row is "driver.status" which would serialize all matches on the same driver. Redis SETNX is O(1) and the lock TTL bounds the blast radius of any failure.
+    </div>
+
+    <h3>Surge pricing &amp; ETA</h3>
+
+    <p>Surge is computed per H3 hexagon (roughly 1 km<sup>2</sup> at level 8). A Flink job windows driver_pings and ride_requests by hex, computes <code>demand / supply</code>, writes a multiplier table to Redis every 30 s. Dispatch reads it at quote time.</p>
+
+    <p>ETA is a learned model, not Dijkstra. Features: origin hex, destination hex, time of day, current traffic score, historical p50 for this OD pair. Online service returns seconds; offline Spark job retrains nightly.</p>
+
+    <h3>Multi-city sharding</h3>
+
+    <p>Cities are natural shards. A driver in Mumbai never matches a rider in Delhi, so we shard Postgres and Redis by <code>city_id</code>. The gateway looks up a driver's home city from a small global table and routes them to that region. Cross-region traffic is &lt; 0.1% (airport transfers), handled by a fallback gossip between nearby city shards.</p>
+
+    <h2>5.2 Netflix / Video Streaming</h2>
+
+    <p>Netflix streams 250M+ hours/day. The hardest engineering is not the website — it is the fact that every bit you watch was placed on a server physically close to your ISP hours or days before you pressed play.</p>
+
+    <h3>Requirements and capacity</h3>
+
+    <div class="callout info">
+      <strong>Functional.</strong> Browse catalogue, play any title on any device at the best quality the network supports, resume across devices, personalised recommendations.<br>
+      <strong>Non-functional.</strong> Start-of-play &lt; 2 s. Rebuffer ratio &lt; 0.5%. 200M+ concurrent streams at peak. 99.99%.
+    </div>
+
+    <ul>
+      <li><strong>Catalog:</strong> 20k titles × 10 language tracks × 6 ABR rungs × chunk of 6 s ≈ 100M file objects, ~100 PB.</li>
+      <li><strong>Peak bandwidth:</strong> 200M streams × 5 Mbps = 1 Pbps. Moving this from AWS would cost ~$100B/year at list; hence Open Connect.</li>
+      <li><strong>Metadata QPS:</strong> 500M users × 4 sessions/day = 2B sessions/day ⇒ ~60k metadata QPS peak.</li>
+      <li><strong>Recs:</strong> 500M users × nightly refresh = batch job scoring ~500M × 20k = 10<sup>13</sup> pairs; approximated with embeddings.</li>
+    </ul>
+
+    <h3>Architecture</h3>
+
+    <div class="diagram"><pre>
+  Client (TV / phone / web)
+      |
+      | 1. Authenticate, fetch manifest (HLS/DASH)
+      v
+  +-------------------+       +-----------------------+
+  | Edge API (AWS)    |------>| Metadata + Auth + DRM |
+  +-------------------+       +-----------------------+
+      |                               |
+      | 2. Manifest returns URLs      v
+      |    pointing to Open Connect  Cassandra (user state, history)
+      v
+  +--------------------------------+
+  | Open Connect Appliance (OCA)   |   <-- sits inside the ISP
+  |   SSDs full of recent content  |
+  +--------------------------------+
+      ^
+      | if OCA miss, pull from
+      |
+  +--------------+      +----------------+
+  | Regional     |----->| Origin / S3    |
+  | Fill Cluster |      | Master copies  |
+  +--------------+      +----------------+
+
+  Offline pipeline:
+      Source ---> Transcoder farm (per device × per bitrate) ---> S3 ---> Fill pyramid
+    </pre></div>
+
+    <h3>Deep dive: CDN hierarchy and pre-positioning</h3>
+
+    <p>Netflix runs its own CDN called <strong>Open Connect</strong>. A 3-tier hierarchy:</p>
+
+    <table>
+      <tr><th>Tier</th><th>Location</th><th>Storage</th><th>Role</th></tr>
+      <tr><td>Edge (OCA)</td><td>Inside ISP data centre</td><td>SSD, 100–280 TB</td><td>Serves 95%+ of bytes directly to users</td></tr>
+      <tr><td>Regional Fill</td><td>IXPs / AWS regions</td><td>Multi-PB</td><td>Fills edges; holds long tail</td></tr>
+      <tr><td>Origin</td><td>AWS S3</td><td>Full catalogue</td><td>Master copy; only touched for fills</td></tr>
+    </table>
+
+    <p>Every night, a job called <em>Proactive Caching</em> pushes tomorrow's likely watches to edges during the ISP's low-traffic window (02:00–06:00 local). It uses predicted popularity per region × content affinity to decide which of the 100 PB to put on each 200 TB appliance.</p>
+
+    <h3>Deep dive: Adaptive Bitrate (ABR) with HLS/DASH</h3>
+
+    <p>One encoded file does not fit all. Each title is transcoded into a ladder of (resolution, bitrate) pairs, chunked into 2–6 second segments. A manifest file (M3U8 for HLS, MPD for DASH) lists all segments for every rung.</p>
+
+    <pre><code>#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=5800000,RESOLUTION=1920x1080
+hd_1080p/index.m3u8
+#EXT-X-STREAM-INF:BANDWIDTH=2100000,RESOLUTION=1280x720
+hd_720p/index.m3u8
+#EXT-X-STREAM-INF:BANDWIDTH=560000,RESOLUTION=640x360
+sd_360p/index.m3u8</code></pre>
+
+    <p>The client measures throughput and buffer level every segment and decides which rung to request next. The magic is that switching rungs is cheap — each segment is independently decodable (starts with an I-frame). If Wi-Fi drops you fall from 1080p to 360p within 6 seconds; users do not see a rebuffer, just a quality dip.</p>
+
+    <h3>Transcoding pipeline</h3>
+
+    <p>Source masters land in S3 at ~50 Mbps. A workflow engine (Netflix's Cosmos/Conductor) fans out:</p>
+    <ol>
+      <li>Split into ~1 minute chunks.</li>
+      <li>For each chunk, transcode in parallel on EC2 spot instances — one job per (codec, resolution, bitrate). A full movie = 2,000+ jobs.</li>
+      <li>Per-chunk quality validation (VMAF score).</li>
+      <li>Stitch and write final assets to S3. Total wall-time: 30 min for a 2 h movie, even though CPU-time is ~500 core-hours.</li>
+    </ol>
+
+    <h3>Recommendations: offline + online</h3>
+
+    <div class="callout">
+      <strong>Two systems.</strong> <em>Offline</em>: nightly Spark job over watch history produces user and item embeddings (matrix factorisation + deep models). Written to a key-value store. <em>Online</em>: when the home screen loads, a low-latency service (Java on EC2) pulls the user's embedding + context (device, time, last watched) and re-ranks the top ~1000 candidates in &lt; 100 ms.
+    </div>
+
+    <h3>A/B testing infrastructure</h3>
+
+    <p>Every UI change (even poster art per user) is A/B tested. A centralized allocation service deterministically hashes <code>user_id ⊕ test_id</code> into a bucket, writes allocations to a Kafka stream, and a pipeline joins allocations with outcome metrics (stream starts, hours viewed) in a Druid cube. Product teams query the cube directly.</p>
+
+    <h2>5.3 Google Maps</h2>
+
+    <p>Maps renders the planet as tiles, computes routes across billion-edge road graphs, and fuses real-time traffic from a billion phones. The unusual thing about Maps is that <em>static</em> data dominates — the road network, the tiles, the geocoder. Most queries hit a cache.</p>
+
+    <h3>Requirements and capacity</h3>
+
+    <div class="callout info">
+      <strong>Functional.</strong> Render map tiles, route A→B with turn-by-turn, show traffic, geocode "1600 Amphitheatre Parkway" → (lat, lng) and reverse, offline mode.<br>
+      <strong>Non-functional.</strong> Tile fetch &lt; 100 ms p95. Route &lt; 500 ms p95. 1B DAU.
+    </div>
+
+    <ul>
+      <li><strong>Tiles:</strong> Zoom levels 0–21, 256×256 px PNG/vector. 4<sup>21</sup> ≈ 4 trillion tiles at max zoom (we only render ones with actual content; ocean tiles are blanks). Total storage ~1 PB across styles and languages.</li>
+      <li><strong>Tile QPS:</strong> 1B users × 50 tiles per session × 10 sessions/day = 500B tile fetches/day ≈ 6M QPS average, 20M peak. &gt;95% hit rate from CDN.</li>
+      <li><strong>Road graph:</strong> ~200M road segments, ~1 TB in compact format, fully loaded per-region into routing servers' RAM.</li>
+    </ul>
+
+    <h3>Architecture</h3>
+
+    <div class="diagram"><pre>
+   Client
+     |
+     | GET /tile/{z}/{x}/{y}   GET /route?from=..&to=..
+     v
+  +-----------------+
+  | Edge CDN        |  <-- ~97% of tile traffic stops here
+  +-----------------+
+     | misses
+     v
+  +-----------------+   +-----------------------+
+  | Tile Service    |   | Routing Service       |
+  | (per-zoom shard)|   | (per-continent shard) |
+  +-----------------+   +-----------------------+
+     |                         |
+     v                         v
+   Tile Store (Colossus/GCS)   Road graph in RAM
+                               + Contraction Hierarchies
+                                      ^
+                                      | traffic overlay
+                                      |
+                           +---------------------+
+                           | Traffic Aggregator  |
+                           |  Kafka + Flink      |
+                           +---------------------+
+                                      ^
+                                      | GPS pings from drivers
+    </pre></div>
+
+    <h3>Deep dive: tile pyramid and quadtree addressing</h3>
+
+    <p>The world is Mercator-projected into a square, then recursively divided. At zoom <em>z</em> there are 2<sup>z</sup> × 2<sup>z</sup> tiles, each addressed by <code>(z, x, y)</code>. A tile at (z, x, y) has four children at (z+1, 2x..2x+1, 2y..2y+1). This is literally a quadtree.</p>
+
+    <pre><code># Web Mercator: lat/lng -> tile
+def lonlat_to_tile(lon, lat, z):
+    n = 2 ** z
+    x = int(n * (lon + 180) / 360)
+    lat_rad = math.radians(lat)
+    y = int(n * (1 - math.log(math.tan(lat_rad) + 1/math.cos(lat_rad)) / math.pi) / 2)
+    return z, x, y</code></pre>
+
+    <p>Because addressing is deterministic, any edge CDN can cache by URL with near-perfect hit rates. Vector tiles (the client renders them) are a 5–10× size win over raster and allow rotation/tilt.</p>
+
+    <h3>Deep dive: routing with Contraction Hierarchies</h3>
+
+    <p>Plain Dijkstra on a 200M-edge graph is ~10 s. A* with a straight-line heuristic is ~1 s. Neither is good enough. Production systems use <strong>Contraction Hierarchies (CH)</strong>.</p>
+
+    <div class="callout info">
+      <strong>Idea.</strong> Preprocess the graph: rank every node by importance (highways &gt; arterials &gt; streets). "Contract" nodes bottom-up — when removing a node, add <em>shortcut edges</em> between its neighbors that preserve shortest path distances. Query-time: bidirectional Dijkstra that only follows edges going "up" the hierarchy. Reduces 10<sup>8</sup>-edge graph searches to &lt; 1 ms on a single core.
+    </div>
+
+    <p>Preprocessing takes hours and is rerun when the road graph changes (weekly). Traffic is overlaid as a dynamic edge-weight multiplier — CH must be rebuilt carefully or the speedups are lost. In practice, Google uses <strong>Customizable CH</strong> which separates the static contraction from the dynamic weights.</p>
+
+    <h3>Real-time traffic</h3>
+
+    <p>Every Android device with location enabled anonymously reports (segment_id, speed, timestamp) to a pipeline. Flink windows by segment, computes a percentile speed over the last 2 minutes, publishes an update if it deviates from historical baseline. Routing servers subscribe and adjust edge weights.</p>
+
+    <p>Privacy: GPS traces are chopped into short, non-contiguous segments with rotating pseudonymous IDs so no continuous trajectory can be reconstructed per user.</p>
+
+    <h3>Geocoding and reverse geocoding</h3>
+
+    <p>Geocoding = text → coordinates. Reverse = coordinates → address. Built on an index of every postal address, with fuzzy string matching (Lucene-style inverted index + edit distance) for forward, and an R-tree / S2-cell index on address polygons for reverse.</p>
+
+    <h3>Offline maps</h3>
+
+    <p>User selects a region → the client downloads a diff-packed bundle of vector tiles + a pruned road graph (major roads only) + a local POI index. All routing and rendering runs on-device; traffic is unavailable. Bundle size: 50–500 MB per city.</p>
+
+    <h2>5.4 Distributed Cache (Memcached at Scale)</h2>
+
+    <p>Every big web product runs on a warm distributed cache. Facebook's TAO, Twitter's Pelikan, Instagram's memcache fleet — all are variations of the same idea: RAM pooled across hundreds of boxes, addressable by key, accessed in &lt; 1 ms.</p>
+
+    <h3>Requirements and capacity</h3>
+
+    <div class="callout info">
+      <strong>Functional.</strong> GET/SET/DEL on string keys → opaque values up to 1 MB. TTL-based eviction. Optional replicas.<br>
+      <strong>Non-functional.</strong> p99 &lt; 1 ms. Horizontal scale to 1000s of nodes. Survive node failure with minimal re-partitioning.
+    </div>
+
+    <p>Sizing for a typical tier: <strong>1 PB hot working set</strong>, 20M QPS, 99.9% hit ratio.</p>
+
+    <ul>
+      <li>Nodes with 512 GB RAM each ⇒ 2,000 nodes for 1 PB.</li>
+      <li>20M QPS / 2,000 nodes = 10k QPS/node. One core can serve ~100k small GETs/s, so CPU is not the bottleneck — NIC is.</li>
+      <li>Value size p50 = 1 KB ⇒ 20 GB/s network aggregate = 160 Gbps. Fine across 2k nodes (80 Mbps each).</li>
+    </ul>
+
+    <h3>Architecture</h3>
+
+    <div class="diagram"><pre>
+   App Server
+      |
+      | GET "user:42"
+      v
+  +-----------------------+
+  | Cache Client Library  |
+  |  - Consistent hash    |
+  |  - Connection pool    |
+  |  - Local L1 (mcrouter)|
+  +-----------------------+
+      |   (TCP / UDP)
+      v
+  +------------------+  +------------------+  +------------------+
+  | Cache Node A     |  | Cache Node B     |  | Cache Node C     |
+  | slab allocator   |  | slab allocator   |  | slab allocator   |
+  | LRU per slab     |  | LRU per slab     |  | LRU per slab     |
+  +------------------+  +------------------+  +------------------+
+
+  Replica ring for HA (optional):
+       A' <----- A          B' <----- B        C' <----- C
+    </pre></div>
+
+    <h3>Deep dive: consistent hashing</h3>
+
+    <p>Naive hashing is <code>node = hash(key) % N</code>. When N changes (node added/removed), almost every key moves, and the database behind the cache is instantly melted by the stampede. Consistent hashing fixes this.</p>
+
+    <div class="callout">
+      <strong>Mechanism.</strong> Map nodes and keys onto a circular hash space (0 to 2<sup>32</sup>). A key is owned by the first node clockwise from its hash. Adding a node only steals keys from one neighbor; removing a node spreads its keys to the next one. Expected fraction of keys moved on membership change: 1/N.
+    </div>
+
+    <pre><code>class ConsistentHash:
+    def __init__(self, nodes, vnodes=150):
+        self.ring = {}   # hash -> node
+        for n in nodes:
+            for i in range(vnodes):
+                self.ring[hash(f"{n}-{i}")] = n
+        self.sorted_keys = sorted(self.ring.keys())
+
+    def get_node(self, key):
+        h = hash(key)
+        idx = bisect.bisect(self.sorted_keys, h) % len(self.sorted_keys)
+        return self.ring[self.sorted_keys[idx]]</code></pre>
+
+    <p><strong>Virtual nodes (vnodes)</strong> are critical: without them, load is uneven (bad luck on the ring leaves one node with 3× traffic). 100–200 vnodes per physical node smooths the distribution.</p>
+
+    <h3>Deep dive: client-side partitioning</h3>
+
+    <p>Memcached and Redis (without cluster mode) don't coordinate between nodes. The <em>client library</em> holds the ring and picks the node. This keeps servers stateless and dumb, but means all clients must agree on the ring.</p>
+
+    <p>At Facebook scale, a sidecar called <strong>mcrouter</strong> runs on every app server and handles: pooling, failover, replicated writes, L1 cache, shadow traffic for deploys. Apps just talk to localhost:11211.</p>
+
+    <h3>Replication and HA</h3>
+
+    <table>
+      <tr><th>Strategy</th><th>Read/Write behaviour</th><th>Use when</th></tr>
+      <tr><td>No replicas</td><td>GET miss = DB hit. Node down = cold period.</td><td>Workload tolerant to DB refill; cost-sensitive</td></tr>
+      <tr><td>Gutter pool</td><td>On GET failure, try a small secondary pool</td><td>FB-style; absorbs node outages without DB stampede</td></tr>
+      <tr><td>Master/replica per key</td><td>Write to both; read from either. Eventual consistency.</td><td>Cross-region, or hot keys needing 2× throughput</td></tr>
+    </table>
+
+    <h3>Cache coherence and invalidation</h3>
+
+    <div class="callout warn">
+      <strong>"There are only two hard things in CS: cache invalidation and naming things." — Phil Karlton.</strong> When the DB updates, the cache must either update or delete the key. Patterns in the wild:
+    </div>
+
+    <ul>
+      <li><strong>Write-through:</strong> app writes DB <em>and</em> cache synchronously. Simple but doubles write latency.</li>
+      <li><strong>Write-around:</strong> app writes DB only, deletes the cache key. Next read repopulates. Risk: stale read right after the delete.</li>
+      <li><strong>Write-behind:</strong> write to cache, async flush to DB. Great throughput, risky on crashes.</li>
+      <li><strong>CDC-driven:</strong> subscribe to the DB binlog with Debezium; a consumer invalidates cache keys. Decouples app and cache.</li>
+    </ul>
+
+    <h3>Multi-tier caching</h3>
+
+    <p>The production stack is usually three layers:</p>
+
+    <ol>
+      <li><strong>L1 (process-local):</strong> an in-process LRU (Caffeine, Guava) with ~10 μs latency. Holds the hottest 1% with a 30 s TTL.</li>
+      <li><strong>L2 (remote):</strong> memcached/Redis cluster, ~500 μs latency. Holds the working set.</li>
+      <li><strong>L3 (database):</strong> Postgres/MySQL, 5–50 ms latency. Source of truth.</li>
+    </ol>
+
+    <h3>Cache warming and stampede protection</h3>
+
+    <p>Cold cache = DB stampede. Techniques:</p>
+    <ul>
+      <li><strong>Staggered deploys:</strong> bring up 1% of new cache capacity at a time so DB tolerates the fill.</li>
+      <li><strong>Request coalescing:</strong> on a miss, only one thread queries the DB; others wait on a future.</li>
+      <li><strong>Probabilistic early refresh:</strong> when a key is near TTL, refresh with probability ∝ (age/TTL). Smooths the otherwise-cliff miss pattern.</li>
+      <li><strong>Negative caching:</strong> cache "does not exist" for 10 s to absorb hot-not-found lookups.</li>
+    </ul>
+
+    <div class="callout good">
+      <strong>Rule of thumb.</strong> At a 99% hit rate, doubling miss rate to 2% doubles your DB load. A cache's job is not just speed — it is the pressure-relief valve that lets the DB stay sized for "normal".
+    </div>
+
+    <h2>Summary</h2>
+
+    <div class="callout">
+      <strong>What ties these four together?</strong> Every advanced system is made tractable by the right <em>index</em>: a spatial index for Uber, a quadtree for Maps, a content pre-placement policy for Netflix, a consistent hash ring for cache. When the interviewer drills into an "advanced" system, they are testing whether you know that the index is where the engineering lives. State goes where the index goes, and the index is built for the query shape — not the other way round.
+    </div>
+
+    <div class="chapter-nav">
+      <a href="04-intermediate.html"><div class="label">← Previous</div><div class="title">4. Intermediate Systems</div></a>
+      <a class="next" href="06-very-high-scale.html"><div class="label">Next →</div><div class="title">6. Very High Scale</div></a>
+    </div>
+  </main>
+</div>
+<script src="../assets/js/nav.js"></script>
+</body>
+</html>

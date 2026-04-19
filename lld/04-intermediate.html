@@ -1,0 +1,758 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Intermediate Problems — Book I · LLD</title>
+<link rel="stylesheet" href="../assets/css/style.css">
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">System Design Books</div>
+    <div class="brand-sub">by Sanheen · Progressive Learning</div>
+    <div class="nav-section">
+      <h3>Home</h3>
+      <a href="../index.html">Overview</a>
+    </div>
+    <div class="nav-section">
+      <h3>Book I — Low Level Design</h3>
+      <a href="index.html">LLD Index</a>
+      <a href="01-foundations.html">1. Foundations (OOP, SOLID)</a>
+      <a href="02-patterns.html">2. Design Patterns Primer</a>
+      <a href="03-basic-problems.html">3. Basic Problems</a>
+      <a href="04-intermediate.html">4. Intermediate Problems</a>
+      <a href="05-advanced.html">5. Advanced Problems</a>
+      <a href="06-concurrency.html">6. Concurrency in LLD</a>
+      <a href="07-war-room.html">7. War Room Scenarios</a>
+      <a href="08-real-code.html">8. Real Company Code</a>
+    </div>
+    <div class="nav-section">
+      <h3>Book II — High Level Design</h3>
+      <a href="../hld/index.html">HLD Index</a>
+    </div>
+  </aside>
+  <main class="main">
+    <div class="breadcrumb"><a href="../index.html">Home</a> / <a href="index.html">Book I · LLD</a> / Chapter 4</div>
+    <h1>Chapter 4: Intermediate Problems</h1>
+
+    <div class="callout">
+      <div class="callout-title">Raising the Bar</div>
+      <p>These problems layer data-structure tricks on top of the patterns from Chapter 3. Expect doubly linked lists inside hash maps, atomic Lua scripts, and debt-simplification graphs. Same rule as before: feel the pain before adopting the fix.</p>
+    </div>
+
+    <h2>4.1 LRU Cache</h2>
+    <p>A cache with fixed capacity that evicts the least-recently-used entry. The archetypal Google interview question.</p>
+
+    <h3>v1 — List scan O(n)</h3>
+<pre><code>class LRU:
+    def __init__(self, cap):
+        self.cap = cap
+        self.data = []  # list of (key, value); most recent at end
+
+    def get(self, k):
+        for i, (kk, v) in enumerate(self.data):
+            if kk == k:
+                self.data.pop(i)
+                self.data.append((k, v))
+                return v
+        return -1
+
+    def put(self, k, v):
+        for i, (kk, _) in enumerate(self.data):
+            if kk == k:
+                self.data.pop(i); break
+        self.data.append((k, v))
+        if len(self.data) &gt; self.cap:
+            self.data.pop(0)</code></pre>
+    <p><strong>Pain:</strong> O(n) scans on every operation. A 10K-entry cache at 100K ops/sec is dead.</p>
+
+    <h3>v2 — HashMap + sorted list by timestamp</h3>
+<pre><code>import time
+class LRU:
+    def __init__(self, cap):
+        self.cap = cap
+        self.map = {}  # k -&gt; (v, ts)
+
+    def get(self, k):
+        if k not in self.map: return -1
+        v, _ = self.map[k]
+        self.map[k] = (v, time.monotonic_ns())
+        return v
+
+    def put(self, k, v):
+        self.map[k] = (v, time.monotonic_ns())
+        if len(self.map) &gt; self.cap:
+            # evict oldest -&gt; still O(n) to find min
+            oldest = min(self.map, key=lambda x: self.map[x][1])
+            del self.map[oldest]</code></pre>
+    <p><strong>Pain:</strong> Eviction is still O(n). We need true O(1) for all operations.</p>
+
+    <h3>v3 — HashMap + Doubly Linked List (the canonical answer)</h3>
+<pre><code>class Node:
+    __slots__ = ("k", "v", "prev", "nxt")
+    def __init__(self, k, v):
+        self.k, self.v = k, v
+        self.prev = self.nxt = None
+
+class LRU:
+    def __init__(self, cap):
+        self.cap = cap
+        self.map = {}
+        # sentinels: head &lt;-&gt; ... &lt;-&gt; tail
+        # head.next = MRU, tail.prev = LRU
+        self.head = Node(0, 0)
+        self.tail = Node(0, 0)
+        self.head.nxt = self.tail
+        self.tail.prev = self.head
+
+    def _remove(self, n):
+        n.prev.nxt = n.nxt
+        n.nxt.prev = n.prev
+
+    def _add_front(self, n):
+        n.nxt = self.head.nxt
+        n.prev = self.head
+        self.head.nxt.prev = n
+        self.head.nxt = n
+
+    def get(self, k):
+        if k not in self.map: return -1
+        n = self.map[k]
+        self._remove(n); self._add_front(n)
+        return n.v
+
+    def put(self, k, v):
+        if k in self.map:
+            n = self.map[k]
+            n.v = v
+            self._remove(n); self._add_front(n)
+            return
+        n = Node(k, v)
+        self.map[k] = n
+        self._add_front(n)
+        if len(self.map) &gt; self.cap:
+            lru = self.tail.prev
+            self._remove(lru)
+            del self.map[lru.k]</code></pre>
+
+    <div class="diagram">head &lt;-&gt; [MRU] &lt;-&gt; [...] &lt;-&gt; [LRU] &lt;-&gt; tail
+     get(k): unlink node, re-insert after head
+     evict: remove tail.prev</div>
+    <p><strong>Pain:</strong> Two threads call <code>get</code> simultaneously, both mutate the doubly linked list, pointers go wild.</p>
+
+    <h3>v4 — Thread-safe with RLock</h3>
+<pre><code>import threading
+class LRU:
+    def __init__(self, cap):
+        self.cap = cap
+        self.map = {}
+        self.head = Node(0, 0); self.tail = Node(0, 0)
+        self.head.nxt = self.tail; self.tail.prev = self.head
+        self.lock = threading.RLock()
+
+    def get(self, k):
+        with self.lock:
+            if k not in self.map: return -1
+            n = self.map[k]
+            self._remove(n); self._add_front(n)
+            return n.v
+
+    def put(self, k, v):
+        with self.lock:
+            # ... same as v3
+            ...</code></pre>
+    <p><strong>Pain:</strong> One big lock serializes all reads. Under heavy concurrency the cache becomes a bottleneck.</p>
+
+    <h3>v5 — Striped locks (sharded cache)</h3>
+<pre><code>class StripedLRU:
+    def __init__(self, cap, stripes=16):
+        per = max(1, cap // stripes)
+        self.shards = [LRU(per) for _ in range(stripes)]
+
+    def _shard(self, k):
+        return self.shards[hash(k) % len(self.shards)]
+
+    def get(self, k): return self._shard(k).get(k)
+    def put(self, k, v): self._shard(k).put(k, v)</code></pre>
+    <p>Contention divides by stripe count. Caveat: true global LRU ordering is lost — each shard has its own LRU, which is acceptable for most caching workloads.</p>
+
+    <table>
+      <thead><tr><th>Version</th><th>Technique</th><th>Pain solved</th></tr></thead>
+      <tbody>
+        <tr><td>v3</td><td>HashMap + DLL</td><td>O(n) get/put/evict</td></tr>
+        <tr><td>v4</td><td>RLock</td><td>Race on list pointers</td></tr>
+        <tr><td>v5</td><td>Lock striping</td><td>Single-lock contention</td></tr>
+      </tbody>
+    </table>
+
+    <h2>4.2 Rate Limiter</h2>
+
+    <h3>v1 — Count per minute bucket</h3>
+<pre><code>import time
+class RateLimiter:
+    def __init__(self, limit):
+        self.limit = limit
+        self.window = int(time.time()) // 60
+        self.count = 0
+
+    def allow(self):
+        now = int(time.time()) // 60
+        if now != self.window:
+            self.window = now; self.count = 0
+        if self.count &lt; self.limit:
+            self.count += 1; return True
+        return False</code></pre>
+    <p><strong>Pain:</strong> At 10:59:59 a burst of N requests, at 11:00:00 another burst of N. That's 2N in one second. Classic fixed-window edge.</p>
+
+    <h3>v2 — Sliding window log</h3>
+<pre><code>from collections import deque
+class SlidingWindow:
+    def __init__(self, limit, window_sec):
+        self.limit, self.win = limit, window_sec
+        self.q = deque()
+
+    def allow(self):
+        now = time.time()
+        while self.q and now - self.q[0] &gt; self.win:
+            self.q.popleft()
+        if len(self.q) &lt; self.limit:
+            self.q.append(now); return True
+        return False</code></pre>
+    <p><strong>Pain:</strong> Memory grows with request rate — we keep a timestamp per request. A client hitting 10K rps costs 10K floats of RAM per key.</p>
+
+    <h3>v3 — Token bucket</h3>
+<pre><code>class TokenBucket:
+    def __init__(self, rate, capacity):
+        self.rate = rate        # tokens per second
+        self.cap = capacity
+        self.tokens = capacity
+        self.ts = time.monotonic()
+
+    def allow(self, cost=1):
+        now = time.monotonic()
+        elapsed = now - self.ts
+        self.tokens = min(self.cap, self.tokens + elapsed * self.rate)
+        self.ts = now
+        if self.tokens &gt;= cost:
+            self.tokens -= cost; return True
+        return False</code></pre>
+    <p>Fixed memory per key, allows bursts up to <code>capacity</code>, smooths long-term to <code>rate</code>. This is what AWS, Stripe, and most APIs actually use.</p>
+    <p><strong>Pain:</strong> Single-process only. Behind a load balancer with 10 app servers, each enforces its own limit. Effective rate = 10× intended.</p>
+
+    <h3>v4 — Distributed via Redis + Lua (atomic)</h3>
+<pre><code>LUA = """
+local key = KEYS[1]
+local rate = tonumber(ARGV[1])
+local cap  = tonumber(ARGV[2])
+local now  = tonumber(ARGV[3])
+local cost = tonumber(ARGV[4])
+
+local data = redis.call('HMGET', key, 'tokens', 'ts')
+local tokens = tonumber(data[1]) or cap
+local ts = tonumber(data[2]) or now
+
+local elapsed = math.max(0, now - ts)
+tokens = math.min(cap, tokens + elapsed * rate)
+
+local allowed = 0
+if tokens &gt;= cost then
+    tokens = tokens - cost
+    allowed = 1
+end
+
+redis.call('HMSET', key, 'tokens', tokens, 'ts', now)
+redis.call('EXPIRE', key, math.ceil(cap / rate) * 2)
+return allowed
+"""
+
+class RedisTokenBucket:
+    def __init__(self, redis, rate, cap):
+        self.r, self.rate, self.cap = redis, rate, cap
+        self.sha = redis.script_load(LUA)
+
+    def allow(self, key, cost=1):
+        return bool(self.r.evalsha(
+            self.sha, 1, key, self.rate, self.cap, time.time(), cost))</code></pre>
+    <p>Lua runs atomically inside Redis — no two app servers can interleave a read-modify-write on the same key.</p>
+    <p><strong>Pain:</strong> Now the team wants to A/B test sliding window vs token bucket. Different endpoints need different algorithms.</p>
+
+    <h3>v5 — Strategy pattern</h3>
+<pre><code>class LimiterStrategy(ABC):
+    @abstractmethod
+    def allow(self, key) -&gt; bool: ...
+
+class TokenBucketStrategy(LimiterStrategy): ...
+class SlidingWindowStrategy(LimiterStrategy): ...
+class LeakyBucketStrategy(LimiterStrategy): ...
+
+class Gateway:
+    def __init__(self):
+        self.routes = {
+            "/login": SlidingWindowStrategy(5, 60),
+            "/api/":  TokenBucketStrategy(rate=100, cap=200),
+        }
+    def allow(self, path, user):
+        for prefix, strat in self.routes.items():
+            if path.startswith(prefix):
+                return strat.allow(user)
+        return True</code></pre>
+
+    <table>
+      <thead><tr><th>Version</th><th>Technique</th><th>Pain solved</th></tr></thead>
+      <tbody>
+        <tr><td>v2</td><td>Sliding window</td><td>Fixed-window burst at edges</td></tr>
+        <tr><td>v3</td><td>Token bucket</td><td>Unbounded memory</td></tr>
+        <tr><td>v4</td><td>Redis + Lua</td><td>Multi-node inconsistency</td></tr>
+        <tr><td>v5</td><td>Strategy</td><td>Per-endpoint algorithms</td></tr>
+      </tbody>
+    </table>
+
+    <h2>4.3 Elevator System</h2>
+
+    <h3>v1 — Naive FIFO queue</h3>
+<pre><code>from collections import deque
+class Elevator:
+    def __init__(self):
+        self.floor = 0
+        self.q = deque()
+
+    def request(self, f):
+        self.q.append(f)
+
+    def step(self):
+        if not self.q: return
+        target = self.q[0]
+        self.floor += 1 if target &gt; self.floor else -1
+        if self.floor == target: self.q.popleft()</code></pre>
+    <p><strong>Pain:</strong> If requests arrive as [5, 1, 6], elevator goes 0→5→1→6. Wasteful. Real elevators use SCAN (sweep up, then down).</p>
+
+    <h3>v2 — Directional scheduling (SCAN)</h3>
+<pre><code>class ScanElevator:
+    def __init__(self):
+        self.floor = 0
+        self.direction = 0  # -1 down, 0 idle, +1 up
+        self.up_set = set()
+        self.down_set = set()
+
+    def request(self, f):
+        if f &gt; self.floor: self.up_set.add(f)
+        elif f &lt; self.floor: self.down_set.add(f)
+
+    def step(self):
+        if self.direction == 0:
+            self.direction = 1 if self.up_set else (-1 if self.down_set else 0)
+        if self.direction == 1:
+            if not self.up_set:
+                self.direction = -1 if self.down_set else 0; return
+            self.floor += 1
+            self.up_set.discard(self.floor)
+        elif self.direction == -1:
+            if not self.down_set:
+                self.direction = 1 if self.up_set else 0; return
+            self.floor -= 1
+            self.down_set.discard(self.floor)</code></pre>
+    <p><strong>Pain:</strong> Works for one car. A real building has 4–8 elevators. Need dispatch.</p>
+
+    <h3>v3 — Multiple elevators with load balancing</h3>
+<pre><code>class Dispatcher:
+    def __init__(self, cars):
+        self.cars = cars
+
+    def assign(self, floor, direction):
+        # score each elevator: lower = better
+        def score(e):
+            if e.direction == 0:
+                return abs(e.floor - floor)
+            # same direction and along the way = ideal
+            if e.direction == direction:
+                along = (direction == 1 and floor &gt;= e.floor) or \
+                        (direction == -1 and floor &lt;= e.floor)
+                return abs(e.floor - floor) if along else 1000 + abs(e.floor - floor)
+            # opposite direction = must finish sweep first
+            return 500 + abs(e.floor - floor)
+        best = min(self.cars, key=score)
+        best.request(floor)
+        return best</code></pre>
+    <p><strong>Pain:</strong> Each elevator still has a blob of state flags (direction, maintenance, door_open, emergency). State transitions scattered across many if checks.</p>
+
+    <h3>v4 — State pattern per elevator</h3>
+<pre><code>class ElevatorState(ABC):
+    @abstractmethod
+    def step(self, e): ...
+
+class Idle(ElevatorState):
+    def step(self, e):
+        if e.up_set: e.set_state(GoingUp())
+        elif e.down_set: e.set_state(GoingDown())
+
+class GoingUp(ElevatorState):
+    def step(self, e):
+        if not e.up_set:
+            e.set_state(GoingDown() if e.down_set else Idle()); return
+        e.floor += 1
+        if e.floor in e.up_set:
+            e.up_set.remove(e.floor)
+            e.open_doors()
+
+class GoingDown(ElevatorState):
+    def step(self, e):
+        if not e.down_set:
+            e.set_state(GoingUp() if e.up_set else Idle()); return
+        e.floor -= 1
+        if e.floor in e.down_set:
+            e.down_set.remove(e.floor)
+            e.open_doors()
+
+class Maintenance(ElevatorState):
+    def step(self, e): pass  # frozen</code></pre>
+
+    <h3>v5 — Observer for floor requests / display panels</h3>
+<pre><code>class FloorPanel:
+    def __init__(self, floor, dispatcher):
+        self.floor, self.dispatcher = floor, dispatcher
+        self.observers = []
+
+    def press_up(self):
+        car = self.dispatcher.assign(self.floor, +1)
+        for o in self.observers:
+            o.on_call_accepted(self.floor, car)
+
+class FloorDisplay:
+    def on_car_move(self, car):
+        print(f"Car {car.id} at floor {car.floor}")
+
+class EmergencyLogger:
+    def on_emergency(self, car): pager.alert(car.id)</code></pre>
+
+    <table>
+      <thead><tr><th>Version</th><th>Pattern / Algo</th><th>Pain solved</th></tr></thead>
+      <tbody>
+        <tr><td>v2</td><td>SCAN scheduling</td><td>Zig-zag waste</td></tr>
+        <tr><td>v3</td><td>Dispatcher + scoring</td><td>Multi-car coordination</td></tr>
+        <tr><td>v4</td><td>State pattern</td><td>Scattered state flags</td></tr>
+        <tr><td>v5</td><td>Observer</td><td>Displays / alarms coupled to core logic</td></tr>
+      </tbody>
+    </table>
+
+    <h2>4.4 Splitwise</h2>
+
+    <h3>v1 — Direct IOU list</h3>
+<pre><code>class Splitwise:
+    def __init__(self):
+        self.ious = []  # (debtor, creditor, amount)
+
+    def add(self, payer, participants, amount):
+        each = amount / len(participants)
+        for p in participants:
+            if p != payer:
+                self.ious.append((p, payer, each))
+
+    def what_owes(self, user):
+        owed = sum(a for d, c, a in self.ious if d == user)
+        owes = sum(a for d, c, a in self.ious if c == user)
+        return owed - owes</code></pre>
+    <p><strong>Pain:</strong> 1000 people, 50K transactions — a single "who owes whom" query is O(n). Also, A→B→C→A loops don't cancel.</p>
+
+    <h3>v2 — Balance matrix</h3>
+<pre><code>from collections import defaultdict
+class Splitwise:
+    def __init__(self):
+        # balance[a][b] = amount a owes b
+        self.balance = defaultdict(lambda: defaultdict(float))
+
+    def add(self, payer, participants, amount):
+        each = amount / len(participants)
+        for p in participants:
+            if p == payer: continue
+            # net out if already owes in reverse
+            self.balance[p][payer] += each
+            if self.balance[payer][p] &gt; 0:
+                d = min(self.balance[p][payer], self.balance[payer][p])
+                self.balance[p][payer] -= d
+                self.balance[payer][p] -= d</code></pre>
+    <p><strong>Pain:</strong> Cycles A→B→C→A still waste settlements. 3 transfers when 0 are needed.</p>
+
+    <h3>v3 — Graph with debt simplification</h3>
+<pre><code>import heapq
+class DebtSimplifier:
+    def simplify(self, transactions):
+        # 1. compute net balance per person
+        net = defaultdict(float)
+        for payer, parts, amt in transactions:
+            each = amt / len(parts)
+            for p in parts:
+                net[p] -= each
+            net[payer] += amt
+
+        # 2. greedy: pair largest creditor with largest debtor
+        creditors = [(-v, u) for u, v in net.items() if v &gt; 0.01]
+        debtors   = [(v, u) for u, v in net.items() if v &lt; -0.01]
+        heapq.heapify(creditors); heapq.heapify(debtors)
+
+        settlements = []
+        while creditors and debtors:
+            cv, cu = heapq.heappop(creditors)
+            dv, du = heapq.heappop(debtors)
+            pay = min(-cv, -dv)
+            settlements.append((du, cu, pay))
+            if -cv - pay &gt; 0.01:
+                heapq.heappush(creditors, (cv + pay, cu))
+            if -dv - pay &gt; 0.01:
+                heapq.heappush(debtors, (dv + pay, du))
+        return settlements</code></pre>
+    <p>A→B→C→A with equal amounts collapses to zero transfers. Minimum cash-settlement problem (NP-hard in general, greedy is usually fine in practice).</p>
+    <p><strong>Pain:</strong> Only equal splits supported. Real groups need "exact amounts", "by percentage", "by shares".</p>
+
+    <h3>v4 — Strategy for split types</h3>
+<pre><code>class SplitStrategy(ABC):
+    @abstractmethod
+    def split(self, total, participants, meta) -&gt; dict: ...
+
+class EqualSplit(SplitStrategy):
+    def split(self, total, participants, meta):
+        each = total / len(participants)
+        return {p: each for p in participants}
+
+class ExactSplit(SplitStrategy):
+    def split(self, total, participants, meta):
+        # meta[p] = exact amount
+        assert abs(sum(meta.values()) - total) &lt; 0.01
+        return dict(meta)
+
+class PercentSplit(SplitStrategy):
+    def split(self, total, participants, meta):
+        # meta[p] = percent
+        assert abs(sum(meta.values()) - 100) &lt; 0.01
+        return {p: total * meta[p] / 100 for p in participants}
+
+class ShareSplit(SplitStrategy):
+    def split(self, total, participants, meta):
+        # meta[p] = share units (e.g., 2 roommates + 1 kid = 2,2,1)
+        units = sum(meta.values())
+        return {p: total * meta[p] / units for p in participants}</code></pre>
+
+    <h3>v5 — Observer for notifications</h3>
+<pre><code>class ExpenseObserver(ABC):
+    @abstractmethod
+    def on_expense(self, expense): ...
+
+class PushNotifier(ExpenseObserver):
+    def on_expense(self, e):
+        for p in e.participants:
+            push.send(p, f"{e.payer} paid {e.amount} for {e.title}")
+
+class EmailDigest(ExpenseObserver):
+    def __init__(self): self.buffer = []
+    def on_expense(self, e): self.buffer.append(e)
+    def flush_daily(self):
+        # send one email per user with today's expenses
+        ...</code></pre>
+
+    <h3>v6 — Group expenses</h3>
+<pre><code>class Group:
+    def __init__(self, name, members):
+        self.name, self.members = name, set(members)
+        self.expenses = []
+        self.simplifier = DebtSimplifier()
+        self.observers = []
+
+    def add_expense(self, payer, amount, strategy, participants=None, meta=None):
+        parts = participants or self.members
+        shares = strategy.split(amount, parts, meta or {})
+        e = Expense(payer, amount, shares)
+        self.expenses.append(e)
+        for o in self.observers: o.on_expense(e)
+
+    def settle_up(self):
+        return self.simplifier.simplify(
+            [(e.payer, list(e.shares), e.amount) for e in self.expenses])</code></pre>
+
+    <table>
+      <thead><tr><th>Version</th><th>Pattern / Algo</th><th>Pain solved</th></tr></thead>
+      <tbody>
+        <tr><td>v2</td><td>Balance matrix</td><td>O(n) balance query</td></tr>
+        <tr><td>v3</td><td>Greedy min-transfers</td><td>Cyclic debts</td></tr>
+        <tr><td>v4</td><td>Strategy</td><td>Multiple split types</td></tr>
+        <tr><td>v5</td><td>Observer</td><td>Notifications coupled to core</td></tr>
+        <tr><td>v6</td><td>Aggregate (Group)</td><td>Expenses scoped to group</td></tr>
+      </tbody>
+    </table>
+
+    <h2>4.5 Library Management</h2>
+
+    <h3>v1 — Dict of books</h3>
+<pre><code>class Library:
+    def __init__(self):
+        self.books = {}  # isbn -&gt; count
+
+    def add(self, isbn): self.books[isbn] = self.books.get(isbn, 0) + 1
+    def borrow(self, isbn):
+        if self.books.get(isbn, 0) &gt; 0:
+            self.books[isbn] -= 1; return True
+        return False</code></pre>
+    <p><strong>Pain:</strong> No idea who borrowed what, no due dates, no fines.</p>
+
+    <h3>v2 — Book / Member / Transaction classes</h3>
+<pre><code>from datetime import datetime, timedelta
+
+class Book:
+    def __init__(self, isbn, title, author):
+        self.isbn, self.title, self.author = isbn, title, author
+        self.copies = []  # list of Copy
+
+class Copy:
+    def __init__(self, id, book):
+        self.id, self.book = id, book
+        self.borrower = None
+        self.due = None
+
+class Member:
+    def __init__(self, id, name):
+        self.id, self.name = id, name
+        self.loans = []
+
+class Transaction:
+    def __init__(self, member, copy, borrowed, due):
+        self.member, self.copy = member, copy
+        self.borrowed, self.due = borrowed, due
+        self.returned = None
+
+class Library:
+    def borrow(self, member, isbn):
+        book = self.catalog[isbn]
+        for c in book.copies:
+            if c.borrower is None:
+                c.borrower = member
+                c.due = datetime.now() + timedelta(days=14)
+                t = Transaction(member, c, datetime.now(), c.due)
+                self.transactions.append(t)
+                return t
+        return None</code></pre>
+    <p><strong>Pain:</strong> Textbooks, reference books, and magazines all have different lending rules. Hardcoding types into <code>Book</code> is fragile.</p>
+
+    <h3>v3 — Factory for book types</h3>
+<pre><code>class BookBase(ABC):
+    @abstractmethod
+    def loan_period_days(self) -&gt; int: ...
+    @abstractmethod
+    def is_lendable(self) -&gt; bool: ...
+
+class Novel(BookBase):
+    def loan_period_days(self): return 14
+    def is_lendable(self): return True
+
+class Textbook(BookBase):
+    def loan_period_days(self): return 30
+    def is_lendable(self): return True
+
+class Reference(BookBase):
+    def loan_period_days(self): return 0
+    def is_lendable(self): return False  # read in library only
+
+class Magazine(BookBase):
+    def loan_period_days(self): return 7
+    def is_lendable(self): return True
+
+class BookFactory:
+    @staticmethod
+    def create(kind, **kwargs):
+        cls = {"novel": Novel, "textbook": Textbook,
+               "reference": Reference, "magazine": Magazine}[kind]
+        return cls(**kwargs)</code></pre>
+
+    <h3>v4 — Observer for overdue notifications</h3>
+<pre><code>class OverdueObserver(ABC):
+    @abstractmethod
+    def on_overdue(self, transaction): ...
+
+class EmailReminder(OverdueObserver):
+    def on_overdue(self, t):
+        email.send(t.member.email,
+                   f"'{t.copy.book.title}' is overdue")
+
+class SMSReminder(OverdueObserver):
+    def on_overdue(self, t):
+        sms.send(t.member.phone,
+                 f"Please return '{t.copy.book.title}'")
+
+class OverdueScanner:
+    def __init__(self, library, observers):
+        self.lib, self.observers = library, observers
+
+    def scan(self):
+        now = datetime.now()
+        for t in self.lib.transactions:
+            if t.returned is None and now &gt; t.due:
+                for o in self.observers: o.on_overdue(t)</code></pre>
+
+    <h3>v5 — Strategy for fine calculation</h3>
+<pre><code>class FineStrategy(ABC):
+    @abstractmethod
+    def calculate(self, transaction, returned_at) -&gt; float: ...
+
+class FlatDailyFine(FineStrategy):
+    def __init__(self, per_day): self.per_day = per_day
+    def calculate(self, t, ret):
+        days = max(0, (ret - t.due).days)
+        return days * self.per_day
+
+class TieredFine(FineStrategy):
+    """1–7 days: $1/day, 8–14: $2/day, 15+: $5/day."""
+    def calculate(self, t, ret):
+        days = max(0, (ret - t.due).days)
+        fine, rem = 0, days
+        for limit, rate in [(7, 1), (7, 2), (float('inf'), 5)]:
+            used = min(rem, limit)
+            fine += used * rate; rem -= used
+            if rem &lt;= 0: break
+        return fine
+
+class MembershipTierFine(FineStrategy):
+    """Premium members: free for 3 days, then half rate."""
+    def __init__(self, base: FineStrategy): self.base = base
+    def calculate(self, t, ret):
+        raw = self.base.calculate(t, ret)
+        if t.member.tier == "premium":
+            grace_days = 3
+            effective_due = t.due + timedelta(days=grace_days)
+            if ret &lt;= effective_due: return 0
+            return raw / 2
+        return raw
+
+class Library:
+    def __init__(self, fine_strategy):
+        self.fine_strategy = fine_strategy
+        # ...
+
+    def return_book(self, copy_id):
+        t = self._find_transaction(copy_id)
+        t.returned = datetime.now()
+        fine = self.fine_strategy.calculate(t, t.returned)
+        t.copy.borrower = None
+        return fine</code></pre>
+
+    <table>
+      <thead><tr><th>Version</th><th>Pattern</th><th>Pain solved</th></tr></thead>
+      <tbody>
+        <tr><td>v2</td><td>Entity separation</td><td>No user/transaction tracking</td></tr>
+        <tr><td>v3</td><td>Factory + inheritance</td><td>Type-specific lending rules</td></tr>
+        <tr><td>v4</td><td>Observer</td><td>Notifications need multiple channels</td></tr>
+        <tr><td>v5</td><td>Strategy (+ Decorator)</td><td>Fine policies change by member tier</td></tr>
+      </tbody>
+    </table>
+
+    <div class="callout success">
+      <div class="callout-title">You now have a vocabulary</div>
+      <p>Across these nine problems you've used: State, Strategy, Observer, Factory, Command, Memento, Chain of Responsibility, Decorator, plus data structures (DLL+HashMap, token bucket, min-heap, debt graph). Advanced problems in Chapter 5 will compose these — no new patterns, just bigger layering.</p>
+    </div>
+
+    <div class="chapter-nav">
+      <a href="03-basic-problems.html"><div class="label">← Previous</div><div class="title">Basic Problems</div></a>
+      <a class="next" href="05-advanced.html"><div class="label">Next →</div><div class="title">Advanced Problems</div></a>
+    </div>
+  </main>
+</div>
+<script src="../assets/js/nav.js"></script>
+</body>
+</html>

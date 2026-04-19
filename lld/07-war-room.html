@@ -1,0 +1,590 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>War Room Scenarios — Book I · LLD</title>
+<link rel="stylesheet" href="../assets/css/style.css">
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">System Design Books</div>
+    <div class="brand-sub">by Sanheen · Progressive Learning</div>
+    <div class="nav-section">
+      <h3>Home</h3>
+      <a href="../index.html">Overview</a>
+    </div>
+    <div class="nav-section">
+      <h3>Book I — Low Level Design</h3>
+      <a href="index.html">LLD Index</a>
+      <a href="01-foundations.html">1. Foundations (OOP, SOLID)</a>
+      <a href="02-patterns.html">2. Design Patterns Primer</a>
+      <a href="03-basic-problems.html">3. Basic Problems</a>
+      <a href="04-intermediate.html">4. Intermediate Problems</a>
+      <a href="05-advanced.html">5. Advanced Problems</a>
+      <a href="06-concurrency.html">6. Concurrency in LLD</a>
+      <a href="07-war-room.html">7. War Room Scenarios</a>
+      <a href="08-real-code.html">8. Real Company Code</a>
+    </div>
+    <div class="nav-section">
+      <h3>Book II — High Level Design</h3>
+      <a href="../hld/index.html">HLD Index</a>
+    </div>
+  </aside>
+  <main class="main">
+    <div class="breadcrumb"><a href="../index.html">Home</a> / <a href="index.html">Book I · LLD</a> / Chapter 7</div>
+    <h1>Chapter 7: War Room Scenarios — Production LLD Bugs</h1>
+
+    <p class="lede">It is 2:47 AM. PagerDuty fires. Someone on Slack is typing in all-caps. The dashboard is red. Welcome to the war room. In this chapter we walk through eight real-flavored production incidents, each rooted in a subtle LLD mistake. You will see the alert, the investigation, the bad code, the diagnosis, the fix, and — most important — the pattern or test that would have prevented the page.</p>
+
+    <p>If you have read chapters 1 through 6 carefully, you will recognize the mistakes as violations of principles you already know. That is the point: clean LLD is not academic. It is what lets you sleep through the night.</p>
+
+    <hr>
+
+    <h2>Scenario 1: The Race Condition Refund</h2>
+
+    <div class="callout danger">
+      <div class="callout-title">INCIDENT · P0 · 02:47 AM</div>
+      <p><strong>Alert:</strong> <code>payments.refund.duplicate_count</code> exceeded threshold (87 duplicates in last 10 min). Finance Slack: "why are we refunding orders twice on Black Friday?!"</p>
+    </div>
+
+    <p><strong>Initial investigation.</strong> On-call pulls up Grafana: refund volume is 3x normal (expected — it's Black Friday returns). But <code>duplicate_refund</code> counter, which is normally zero, has spiked. Engineer 1 greps the logs: same <code>order_id</code> appears in two consecutive <code>refund_issued</code> events, 40ms apart.</p>
+
+    <p><em>Engineer 2 on Slack:</em> "Customer service bot retries on timeout. If the first call is slow and they retry, we get two threads refunding the same order."</p>
+
+    <p><strong>The bad code.</strong></p>
+
+    <pre><code>class PaymentService:
+    def __init__(self, db, gateway):
+        self.db = db
+        self.gateway = gateway
+
+    def refund(self, order_id: str) -&gt; Refund:
+        order = self.db.get_order(order_id)
+        if order.refunded:                      # TOCTOU check
+            raise AlreadyRefundedError(order_id)
+
+        # ... slow network call to Stripe ...
+        result = self.gateway.refund(
+            order.charge_id, order.amount
+        )                                        # ~800ms
+
+        order.refunded = True                   # TOCTOU use
+        self.db.save(order)
+        return Refund(order_id, result.id)</code></pre>
+
+    <p><strong>The diagnosis.</strong> Classic <strong>TOCTOU</strong> (Time Of Check, Time Of Use). Thread A reads <code>refunded=False</code>, enters the gateway call. Before A writes <code>refunded=True</code>, thread B reads <code>refunded=False</code> too. Both refund. The "check" and the "use" are not atomic.</p>
+
+    <p><strong>The fix.</strong> Push the atomicity into the database with a conditional update, or use a lock keyed on <code>order_id</code>.</p>
+
+    <div class="callout success">
+      <div class="callout-title">FIX · Atomic compare-and-set</div>
+      <pre><code>def refund(self, order_id: str) -&gt; Refund:
+    # Atomic: only flips flag if it was False, returns rows affected.
+    claimed = self.db.execute(
+        "UPDATE orders SET refunded=TRUE, refund_started_at=NOW() "
+        "WHERE id=%s AND refunded=FALSE",
+        (order_id,),
+    )
+    if claimed == 0:
+        raise AlreadyRefundedError(order_id)
+
+    try:
+        order = self.db.get_order(order_id)
+        result = self.gateway.refund(order.charge_id, order.amount)
+        self.db.execute(
+            "UPDATE orders SET refund_id=%s WHERE id=%s",
+            (result.id, order_id),
+        )
+        return Refund(order_id, result.id)
+    except Exception:
+        # Release the claim so a retry can succeed.
+        self.db.execute(
+            "UPDATE orders SET refunded=FALSE WHERE id=%s", (order_id,)
+        )
+        raise</code></pre>
+    </div>
+
+    <div class="callout warn">
+      <div class="callout-title">PREVENTION</div>
+      <ul>
+        <li>Unit test with two threads hitting <code>refund()</code> simultaneously; assert exactly one succeeds.</li>
+        <li>Make idempotency a first-class concept: require an <code>idempotency_key</code> on every mutating endpoint (Stripe does this — see chapter 8).</li>
+        <li>Code review rule: any <code>if x.flag: ... x.flag = True</code> pattern is a red flag without a lock or atomic update.</li>
+      </ul>
+    </div>
+
+    <hr>
+
+    <h2>Scenario 2: The Memory Leak Cache</h2>
+
+    <div class="callout danger">
+      <div class="callout-title">INCIDENT · P1 · Thursday 11:14 AM</div>
+      <p><strong>Alert:</strong> <code>product-catalog-svc</code> pod OOM-killed for the 4th time this week. Each pod runs ~18 hours before it dies. Restart fixes it temporarily.</p>
+    </div>
+
+    <p><strong>Initial investigation.</strong> Engineer 1 runs <code>kubectl top pod</code> and watches memory climb linearly — 200 MB/hour. Heap dump shows 12 million entries in <code>ProductCache._store</code>. The catalog has 80,000 products. Something is wrong.</p>
+
+    <p><em>Engineer 2:</em> "We cache by the full request key — which includes user_id, filters, sort order. Every unique combination is a new entry. And nothing ever evicts."</p>
+
+    <p><strong>The bad code.</strong></p>
+
+    <pre><code>class ProductCache:
+    """Simple in-memory cache. Fast! No dependencies!"""
+
+    def __init__(self):
+        self._store: dict[str, Product] = {}
+
+    def get_or_load(self, key: str, loader) -&gt; Product:
+        if key not in self._store:
+            self._store[key] = loader()
+        return self._store[key]
+
+    def invalidate(self, key: str) -&gt; None:
+        self._store.pop(key, None)</code></pre>
+
+    <p><strong>The diagnosis.</strong> The cache has no upper bound, no TTL, and no eviction policy. Every unique <code>key</code> adds memory that never goes away unless someone calls <code>invalidate</code> explicitly — which nobody does for recommendation queries like <code>user=42,filter=shoes,sort=price</code>.</p>
+
+    <p><strong>The fix.</strong> Bound the cache. Use an LRU (or LFU) eviction policy. Optionally add a TTL.</p>
+
+    <div class="callout success">
+      <div class="callout-title">FIX · LRU with size cap</div>
+      <pre><code>from collections import OrderedDict
+from threading import Lock
+import time
+
+class ProductCache:
+    def __init__(self, max_size: int = 10_000, ttl_seconds: int = 300):
+        self._store: OrderedDict[str, tuple[Product, float]] = OrderedDict()
+        self._max = max_size
+        self._ttl = ttl_seconds
+        self._lock = Lock()
+
+    def get_or_load(self, key: str, loader) -&gt; Product:
+        now = time.monotonic()
+        with self._lock:
+            hit = self._store.get(key)
+            if hit and now - hit[1] &lt; self._ttl:
+                self._store.move_to_end(key)       # mark recently used
+                return hit[0]
+
+        value = loader()                           # outside lock (may be slow)
+
+        with self._lock:
+            self._store[key] = (value, now)
+            self._store.move_to_end(key)
+            while len(self._store) &gt; self._max:
+                self._store.popitem(last=False)    # evict LRU
+            return value</code></pre>
+    </div>
+
+    <div class="callout warn">
+      <div class="callout-title">PREVENTION</div>
+      <ul>
+        <li>Never write an unbounded in-memory cache. Always set a size cap. Always.</li>
+        <li>Expose cache size as a metric (<code>cache.size</code>, <code>cache.evictions</code>). Alert on growth.</li>
+        <li>Prefer libraries (<code>functools.lru_cache</code>, <code>cachetools.TTLCache</code>) over hand-rolled dicts for exactly this reason.</li>
+      </ul>
+    </div>
+
+    <hr>
+
+    <h2>Scenario 3: The Deadlock Order Service</h2>
+
+    <div class="callout danger">
+      <div class="callout-title">INCIDENT · P0 · Friday 6:12 PM (yes, Friday)</div>
+      <p><strong>Alert:</strong> <code>orders-svc</code> thread pool saturated. p99 latency went from 80ms → ∞. Half of checkout requests are timing out. "Deadlock detected" in the JVM thread dump (we run a Python service but the MySQL thread dump shows it too).</p>
+    </div>
+
+    <p><strong>Initial investigation.</strong> Engineer 1 pulls <code>py-spy dump</code> on a stuck worker. Two threads are blocked: one holds <code>order_lock</code> and is waiting on <code>inventory_lock</code>. The other holds <code>inventory_lock</code> and is waiting on <code>order_lock</code>.</p>
+
+    <p><em>Engineer 2:</em> "The <code>place_order</code> path acquires order first, then inventory. The <code>restock</code> path acquires inventory first, then order. When they meet, boom."</p>
+
+    <p><strong>The bad code.</strong></p>
+
+    <pre><code>class OrderService:
+    def __init__(self):
+        self.order_lock = Lock()
+        self.inventory_lock = Lock()
+
+    def place_order(self, order):
+        with self.order_lock:
+            # ... validate order ...
+            with self.inventory_lock:
+                self._reserve_stock(order)
+
+    def restock(self, product, qty):
+        with self.inventory_lock:
+            # ... update stock ...
+            with self.order_lock:
+                self._notify_waitlisted_orders(product)</code></pre>
+
+    <p><strong>The diagnosis.</strong> Two locks, acquired in opposite orders by two methods. Under concurrent load, each thread holds one lock and waits forever for the other. Textbook deadlock (see chapter 6).</p>
+
+    <p><strong>The fix.</strong> Enforce a global lock ordering. Pick an order (alphabetical by name is fine) and every code path acquires locks in that order.</p>
+
+    <div class="callout success">
+      <div class="callout-title">FIX · Consistent lock ordering</div>
+      <pre><code>class OrderService:
+    def __init__(self):
+        # Fixed ordering: inventory_lock is always acquired BEFORE order_lock.
+        self.inventory_lock = Lock()
+        self.order_lock = Lock()
+
+    def place_order(self, order):
+        with self.inventory_lock:
+            with self.order_lock:
+                self._reserve_stock(order)
+
+    def restock(self, product, qty):
+        with self.inventory_lock:
+            with self.order_lock:
+                self._notify_waitlisted_orders(product)</code></pre>
+      <p>Even better: collapse to a single lock if contention allows, or move to per-product locks so the two paths rarely touch the same product at the same time.</p>
+    </div>
+
+    <div class="callout warn">
+      <div class="callout-title">PREVENTION</div>
+      <ul>
+        <li>Document lock hierarchy in a module docstring. Treat violations as code-review blockers.</li>
+        <li>Write a stress test that hammers both paths concurrently with a timeout; a deadlock will surface as test failure.</li>
+        <li>Prefer lock-free data structures (queues, atomic counters) over explicit locks when possible.</li>
+      </ul>
+    </div>
+
+    <hr>
+
+    <h2>Scenario 4: The God Class Nightmare</h2>
+
+    <div class="callout danger">
+      <div class="callout-title">INCIDENT · P2 · ongoing for 8 months</div>
+      <p><strong>Symptom:</strong> every release breaks something. Fixing shipping breaks email. Fixing email breaks payment retries. The <code>OrderService</code> file is 4,083 lines. It has 71 methods. Two engineers have quit.</p>
+    </div>
+
+    <p><strong>The bad code (abridged).</strong></p>
+
+    <pre><code>class OrderService:
+    def place_order(self, cart, user, card): ...
+    def charge_card(self, card, amount): ...
+    def retry_failed_charge(self, charge_id): ...
+    def reserve_inventory(self, items): ...
+    def release_inventory(self, items): ...
+    def send_confirmation_email(self, order): ...
+    def send_shipping_update_email(self, order): ...
+    def generate_shipping_label(self, order): ...
+    def schedule_pickup(self, order): ...
+    def calculate_tax(self, order, address): ...
+    def apply_promo_code(self, order, code): ...
+    def compute_loyalty_points(self, user, order): ...
+    def flag_for_fraud_review(self, order): ...
+    # ... 58 more methods, 4000 more lines ...</code></pre>
+
+    <p><strong>The diagnosis.</strong> Textbook violation of the <em>Single Responsibility Principle</em>. The class has half a dozen reasons to change: pricing team changes tax rules, growth team tweaks promos, ops changes shipping carriers, security adds fraud rules. Every change touches the same file; merge conflicts are a weekly sport.</p>
+
+    <p><strong>The fix.</strong> Extract collaborators. Make <code>OrderService</code> a thin orchestrator that delegates.</p>
+
+    <div class="callout success">
+      <div class="callout-title">FIX · Extract responsibilities</div>
+      <pre><code>class OrderService:
+    def __init__(
+        self,
+        payments: PaymentService,
+        inventory: InventoryService,
+        notifier: NotificationService,
+        shipping: ShippingService,
+        pricing: PricingService,
+        fraud: FraudService,
+    ):
+        self.payments = payments
+        self.inventory = inventory
+        self.notifier = notifier
+        self.shipping = shipping
+        self.pricing = pricing
+        self.fraud = fraud
+
+    def place_order(self, cart, user, card) -&gt; Order:
+        priced = self.pricing.price(cart, user)
+        self.fraud.check(user, priced)
+        self.inventory.reserve(priced.items)
+        try:
+            charge = self.payments.charge(card, priced.total)
+        except PaymentError:
+            self.inventory.release(priced.items)
+            raise
+        order = Order.create(user, priced, charge)
+        self.shipping.schedule(order)
+        self.notifier.order_confirmed(order)
+        return order</code></pre>
+    </div>
+
+    <div class="diagram">
+Before: OrderService (4083 lines)           After: OrderService (60 lines)
+   [ does everything ]                         |
+                                               v
+                                     Pricing  Payments  Inventory
+                                     Shipping Notifier  Fraud
+                                     (each owned by one team, small, testable)
+    </div>
+
+    <div class="callout warn">
+      <div class="callout-title">PREVENTION</div>
+      <ul>
+        <li>Code review rule: any PR that makes a file grow past ~400 lines gets scrutinized hard.</li>
+        <li>Feature-team boundaries should map to service-class boundaries. If pricing changes require editing <code>OrderService</code>, the design is wrong.</li>
+        <li>Use dependency injection (chapter 8) so the orchestrator stays testable.</li>
+      </ul>
+    </div>
+
+    <hr>
+
+    <h2>Scenario 5: The Exception Swallower</h2>
+
+    <div class="callout danger">
+      <div class="callout-title">INCIDENT · P1 · discovered by accident</div>
+      <p><strong>Alert:</strong> finance notices loyalty-points ledger is short by $180k over six months. Nobody got paged — which is the real bug. The service was silently failing the whole time.</p>
+    </div>
+
+    <p><em>Engineer 1 on Slack:</em> "I diffed the ledger vs. orders. About 2% of orders award zero points. No errors logged."</p>
+
+    <p><strong>The bad code.</strong></p>
+
+    <pre><code>class LoyaltyService:
+    def award_points(self, user_id, order):
+        try:
+            points = self._compute(order)
+            self.ledger.credit(user_id, points)
+            self.notifier.send_points_email(user_id, points)
+        except:
+            pass   # "don't want to fail the order just because loyalty broke"</code></pre>
+
+    <p><strong>The diagnosis.</strong> The bare <code>except: pass</code> swallows <em>everything</em> — including <code>KeyError</code> on malformed input, network errors calling the notifier, and <code>DatabaseError</code> when the ledger is down. The original intent (don't fail the order if the email fails) got over-applied to real data corruption.</p>
+
+    <p><strong>The fix.</strong> Be specific. Log. Split concerns by severity.</p>
+
+    <div class="callout success">
+      <div class="callout-title">FIX · Specific exceptions, explicit logging</div>
+      <pre><code>class LoyaltyService:
+    def award_points(self, user_id, order):
+        try:
+            points = self._compute(order)
+        except (InvalidOrderError, KeyError) as e:
+            log.error("loyalty.compute_failed", user_id=user_id,
+                      order_id=order.id, error=str(e))
+            metrics.incr("loyalty.compute_failed")
+            raise   # data bug: surface it
+
+        try:
+            self.ledger.credit(user_id, points)
+        except DatabaseError as e:
+            log.error("loyalty.ledger_failed", user_id=user_id, error=str(e))
+            metrics.incr("loyalty.ledger_failed")
+            raise   # financial correctness: surface it
+
+        try:
+            self.notifier.send_points_email(user_id, points)
+        except NotificationError as e:
+            log.warning("loyalty.email_failed", user_id=user_id, error=str(e))
+            metrics.incr("loyalty.email_failed")
+            # Email is best-effort; don't fail the award.</code></pre>
+    </div>
+
+    <div class="callout warn">
+      <div class="callout-title">PREVENTION</div>
+      <ul>
+        <li>Lint rule: forbid bare <code>except:</code> and <code>except Exception: pass</code>. Use <code>ruff</code> rule <code>BLE001</code>.</li>
+        <li>Every caught exception must either re-raise, log at ERROR, or be explicitly commented as benign with a reason.</li>
+        <li>Pager on <code>metrics.incr("*.failed")</code> rates so silent failures surface within minutes, not months.</li>
+      </ul>
+    </div>
+
+    <hr>
+
+    <h2>Scenario 6: The Missing State Validation</h2>
+
+    <div class="callout danger">
+      <div class="callout-title">INCIDENT · P1 · Tuesday 09:30 AM</div>
+      <p><strong>Alert:</strong> customer service ticket: "I cancelled my order but the package still arrived AND I got a refund." 23 similar tickets in the last week. Finance: "We refunded $14k on orders that were already delivered."</p>
+    </div>
+
+    <p><strong>The bad code.</strong></p>
+
+    <pre><code>class OrderStateMachine:
+    VALID_STATES = {"CREATED", "PAID", "SHIPPED", "DELIVERED", "CANCELLED"}
+
+    def __init__(self, order):
+        self.order = order
+
+    def cancel(self):
+        if self.order.status != "CANCELLED":
+            self.order.status = "CANCELLED"
+            self.refunds.issue(self.order)
+
+    def mark_delivered(self):
+        self.order.status = "DELIVERED"</code></pre>
+
+    <p><strong>The diagnosis.</strong> The only check is "not already cancelled". Cancelling a <code>DELIVERED</code> order is still allowed, so the refund fires on a package the customer already has. The state machine is implicit — a set of strings — with no enforcement of legal transitions.</p>
+
+    <p><strong>The fix.</strong> Model transitions explicitly. Raise on illegal transitions (see chapter 2's State pattern).</p>
+
+    <div class="callout success">
+      <div class="callout-title">FIX · Explicit transition table</div>
+      <pre><code>class OrderStatus(str, Enum):
+    CREATED = "CREATED"
+    PAID = "PAID"
+    SHIPPED = "SHIPPED"
+    DELIVERED = "DELIVERED"
+    CANCELLED = "CANCELLED"
+
+# Only these transitions are legal. Anything else raises.
+TRANSITIONS = {
+    OrderStatus.CREATED:   {OrderStatus.PAID, OrderStatus.CANCELLED},
+    OrderStatus.PAID:      {OrderStatus.SHIPPED, OrderStatus.CANCELLED},
+    OrderStatus.SHIPPED:   {OrderStatus.DELIVERED},   # no cancel after shipped
+    OrderStatus.DELIVERED: set(),                     # terminal
+    OrderStatus.CANCELLED: set(),                     # terminal
+}
+
+class OrderStateMachine:
+    def transition(self, target: OrderStatus) -&gt; None:
+        allowed = TRANSITIONS[self.order.status]
+        if target not in allowed:
+            raise IllegalTransition(
+                f"{self.order.status} -&gt; {target} not allowed"
+            )
+        self.order.status = target
+
+    def cancel(self):
+        self.transition(OrderStatus.CANCELLED)   # raises if SHIPPED/DELIVERED
+        self.refunds.issue(self.order)</code></pre>
+    </div>
+
+    <div class="callout warn">
+      <div class="callout-title">PREVENTION</div>
+      <ul>
+        <li>Every status field deserves a transition table. Strings-in-a-set is not a state machine.</li>
+        <li>Property-based test: generate random transition sequences; assert invariants (e.g., "a refund only ever fires from CREATED or PAID").</li>
+        <li>Make the enum exhaustive in code reviews — adding a new state should force updating <code>TRANSITIONS</code>.</li>
+      </ul>
+    </div>
+
+    <hr>
+
+    <h2>Scenario 7: The Shared Mutable Default</h2>
+
+    <div class="callout danger">
+      <div class="callout-title">INCIDENT · P2 · "why is every new user seeing someone else's cart?"</div>
+      <p><strong>Alert:</strong> support tickets: users logging in see items they never added. Security is worried about a session mix-up. Engineer 1 opens the code.</p>
+    </div>
+
+    <p><strong>The bad code.</strong></p>
+
+    <pre><code>class Cart:
+    def __init__(self, items=[]):     # &lt;-- Python footgun
+        self.items = items
+
+    def add(self, item):
+        self.items.append(item)</code></pre>
+
+    <p><em>Engineer 2:</em> "Wait. In Python, default arguments are evaluated <em>once</em>, at function definition. Every <code>Cart()</code> without an explicit list is sharing the <em>same</em> list object."</p>
+
+    <p><strong>The diagnosis.</strong> <code>items=[]</code> creates one list at module load time. Every <code>Cart()</code> constructed without passing <code>items</code> gets that same list. Add a banana, and every other cart also has a banana. Session mix-up is real — the object graph was actually shared across users.</p>
+
+    <p><strong>The fix.</strong> Use <code>None</code> as the sentinel and allocate inside the constructor.</p>
+
+    <div class="callout success">
+      <div class="callout-title">FIX · Sentinel default</div>
+      <pre><code>class Cart:
+    def __init__(self, items: list | None = None):
+        self.items: list = list(items) if items is not None else []
+
+    def add(self, item):
+        self.items.append(item)</code></pre>
+      <p>The same trap applies to <code>dict</code>, <code>set</code>, and any other mutable. For dataclasses, use <code>field(default_factory=list)</code>.</p>
+    </div>
+
+    <div class="callout warn">
+      <div class="callout-title">PREVENTION</div>
+      <ul>
+        <li>Ruff rule <code>B006</code> catches mutable defaults. Turn it on. No exceptions.</li>
+        <li>Teach this in onboarding: it is the single most common Python-specific bug in production code.</li>
+        <li>Prefer dataclasses with <code>default_factory</code> for models with list/dict fields.</li>
+      </ul>
+    </div>
+
+    <hr>
+
+    <h2>Scenario 8: The O(n²) Hidden in a Decorator</h2>
+
+    <div class="callout danger">
+      <div class="callout-title">INCIDENT · P1 · "search is slow only in prod"</div>
+      <p><strong>Alert:</strong> p99 of <code>/search</code> went from 80ms to 4.2s overnight. No code deploys. Engineer 1 is baffled. Engineer 2: "Did the log level change last night?"</p>
+    </div>
+
+    <p><strong>The bad code.</strong></p>
+
+    <pre><code>def log_calls(func):
+    """Decorator: log every call with args and result."""
+    def wrapper(*args, **kwargs):
+        log.debug(f"calling {func.__name__} args={args} kwargs={kwargs}")
+        result = func(*args, **kwargs)
+        log.debug(f"{func.__name__} -&gt; {result}")
+        return result
+    return wrapper
+
+class SearchService:
+    @log_calls
+    def search(self, query: str, index: SearchIndex) -&gt; list[Doc]:
+        ...
+        return matches   # a list of 50,000 Doc objects</code></pre>
+
+    <p><strong>The diagnosis.</strong> The f-string eagerly calls <code>str(result)</code> <em>even when debug logging is disabled</em>. In staging, log level was INFO — the string was built and discarded; nobody noticed the cost. At 3 AM, SRE flipped prod to DEBUG for an unrelated service, and the global formatter changed. Now the full 50k-doc list serializes on every call — O(n) in the result — and because <code>Doc.__repr__</code> iterates its fields, the effective cost is O(n · fields) per call, which behaves like O(n²) relative to query size.</p>
+
+    <p><strong>The fix.</strong> Use lazy logging so the string is built only when the log line actually emits. And never <code>repr</code> unbounded collections.</p>
+
+    <div class="callout success">
+      <div class="callout-title">FIX · Lazy logging, bounded repr</div>
+      <pre><code>def log_calls(func):
+    def wrapper(*args, **kwargs):
+        # %-style args are evaluated lazily by the logger; skipped if DEBUG off.
+        log.debug("calling %s args=%s kwargs=%s", func.__name__, args, kwargs)
+        result = func(*args, **kwargs)
+        log.debug("%s -&gt; (%d results)", func.__name__, len(result))
+        return result
+    return wrapper</code></pre>
+      <p>Two fixes in one: (a) lazy <code>%s</code> formatting means <code>str()</code> is skipped when DEBUG is off, and (b) we log a <em>count</em>, not the collection itself.</p>
+    </div>
+
+    <div class="callout warn">
+      <div class="callout-title">PREVENTION</div>
+      <ul>
+        <li>Benchmark with DEBUG on in CI. If a log-level change tanks performance, catch it before prod.</li>
+        <li>Never put unbounded objects in log lines. Summarize: counts, ids, hashes.</li>
+        <li>Prefer lazy formatting APIs (<code>log.debug("msg %s", x)</code>) over f-strings in decorators and hot paths.</li>
+      </ul>
+    </div>
+
+    <hr>
+
+    <h2>Closing: What the War Room Teaches</h2>
+
+    <p>Every scenario in this chapter is a violation of a principle you already met in chapters 1 through 6:</p>
+
+    <ul>
+      <li>Race / deadlock / cache leak → failures of concurrency and resource management (chapter 6).</li>
+      <li>God class → SRP violation (chapter 1).</li>
+      <li>Missing state validation → State pattern not fully applied (chapter 2).</li>
+      <li>Exception swallower, mutable default, lazy-log footgun → defensive coding discipline.</li>
+    </ul>
+
+    <p>Good LLD is what lets you <em>not</em> be in the war room at 2 AM. The next and final chapter of Book I shows how real companies encode these lessons into libraries you already use.</p>
+
+    <div class="chapter-nav">
+      <a href="06-concurrency.html"><div class="label">← Previous</div><div class="title">6. Concurrency in LLD</div></a>
+      <a class="next" href="08-real-code.html"><div class="label">Next →</div><div class="title">8. Real Company Code</div></a>
+    </div>
+  </main>
+</div>
+<script src="../assets/js/nav.js"></script>
+</body>
+</html>

@@ -1,0 +1,646 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Foundations (OOP, SOLID) — Book I · LLD</title>
+<link rel="stylesheet" href="../assets/css/style.css">
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">System Design Books</div>
+    <div class="brand-sub">by Sanheen · Progressive Learning</div>
+    <div class="nav-section">
+      <h3>Home</h3>
+      <a href="../index.html">Overview</a>
+    </div>
+    <div class="nav-section">
+      <h3>Book I — Low Level Design</h3>
+      <a href="index.html">LLD Index</a>
+      <a href="01-foundations.html">1. Foundations (OOP, SOLID)</a>
+      <a href="02-patterns.html">2. Design Patterns Primer</a>
+      <a href="03-basic-problems.html">3. Basic Problems</a>
+      <a href="04-intermediate.html">4. Intermediate Problems</a>
+      <a href="05-advanced.html">5. Advanced Problems</a>
+      <a href="06-concurrency.html">6. Concurrency in LLD</a>
+      <a href="07-war-room.html">7. War Room Scenarios</a>
+      <a href="08-real-code.html">8. Real Company Code</a>
+    </div>
+    <div class="nav-section">
+      <h3>Book II — High Level Design</h3>
+      <a href="../hld/index.html">HLD Index</a>
+    </div>
+  </aside>
+  <main class="main">
+    <div class="breadcrumb"><a href="../index.html">Home</a> / <a href="index.html">Book I · LLD</a> / Chapter 1</div>
+    <h1>Chapter 1: Foundations (OOP, SOLID)</h1>
+
+    <div class="pills">
+      <span class="pill">OOP</span>
+      <span class="pill">SOLID</span>
+      <span class="pill">DRY</span>
+      <span class="pill">KISS</span>
+      <span class="pill">Cohesion</span>
+      <span class="pill">Coupling</span>
+    </div>
+
+    <h2>1. Why LLD Matters</h2>
+    <p>There's a quiet moment that happens to every developer, usually around month six of their first real job. You open a file you wrote three months ago to add a small feature. You stare at it. You don't remember why you wrote half of it. The "small feature" requires you to change seven other files. A test breaks that has nothing to do with what you changed. You sigh.</p>
+
+    <p>That moment is the gap between <em>code that works</em> and <em>code that lasts</em>. Low-Level Design (LLD) is the discipline of closing that gap. It is not about being clever. It is about being kind to the person reading your code in six months — which is almost always you.</p>
+
+    <div class="callout">
+      <div class="callout-title">The LLD Mindset</div>
+      HLD answers: <em>how do the boxes on the whiteboard talk to each other?</em> LLD answers: <em>what's inside the box, and will it survive the next three feature requests?</em>
+    </div>
+
+    <h3>A concrete example: the payment class that ages badly</h3>
+    <p>Let's say you're building a checkout flow. Day one, you only accept credit cards. You write this:</p>
+
+    <pre><code>class PaymentProcessor:
+    def process(self, amount, card_number, cvv, expiry):
+        # validate card
+        if not card_number.isdigit() or len(card_number) != 16:
+            raise ValueError("bad card")
+        # charge via Stripe
+        print(f"Charging ${amount} to card {card_number[-4:]}")
+        return {"status": "ok", "txn_id": "stripe_abc123"}</code></pre>
+
+    <p>This works. Ship it. Two weeks later, product says: "Let's add PayPal." You add an <code>if</code>. Two weeks after that: "Add Apple Pay." Another <code>if</code>. Then UPI. Then a store gift-card balance. Then partial payments (gift card + credit card together). Six months in, <code>process()</code> is 400 lines, takes 12 optional arguments, has a bug in the refund path because someone forgot to add an <code>elif</code>, and nobody wants to touch it.</p>
+
+    <p>The code worked on day one. It didn't <em>last</em>. Nothing about the initial requirement was wrong — the design was. A payment processor shouldn't know about card numbers at all. It should know about a generic <code>PaymentMethod</code> and delegate. That small shift — from concrete to abstract at the right seam — is what the rest of this chapter is about.</p>
+
+    <div class="callout warn">
+      <div class="callout-title">The test</div>
+      Good LLD is invisible when things are calm and <em>obvious</em> when things change. If adding a new payment method means editing five files, your design is wrong. If it means adding one new file, your design is right.
+    </div>
+
+    <h2>2. The Four Pillars of OOP</h2>
+    <p>You've seen these words on a hundred slide decks. We're going to ignore the textbook definitions and focus on what each one actually <em>buys</em> you in production.</p>
+
+    <h3>2.1 Encapsulation — hide the mess</h3>
+    <p><strong>What it is:</strong> bundling data and the methods that operate on that data, and hiding the internal state so callers can't poke at it directly.</p>
+
+    <p><strong>Why it matters:</strong> every public field is a promise you have to keep forever. Every private field is a detail you can change on a rainy Tuesday.</p>
+
+    <p><strong>Violation — no encapsulation:</strong></p>
+    <pre><code>class BankAccount:
+    def __init__(self):
+        self.balance = 0  # public — anyone can touch
+
+# caller code, somewhere else in the codebase:
+acct = BankAccount()
+acct.balance = -500   # nothing stops this
+acct.balance += "oops"  # type error at runtime</code></pre>
+
+    <p><strong>Fix — encapsulate behind methods:</strong></p>
+    <pre><code>class BankAccount:
+    def __init__(self):
+        self._balance = 0  # convention: underscore = "don't touch"
+
+    def deposit(self, amount: float) -&gt; None:
+        if amount &lt;= 0:
+            raise ValueError("deposit must be positive")
+        self._balance += amount
+
+    def withdraw(self, amount: float) -&gt; None:
+        if amount &gt; self._balance:
+            raise ValueError("insufficient funds")
+        self._balance -= amount
+
+    @property
+    def balance(self) -&gt; float:
+        return self._balance</code></pre>
+
+    <p>Now the <em>class</em> protects its own invariants. No external code can put the account into a broken state.</p>
+
+    <div class="callout">
+      <div class="callout-title">When to use</div>
+      Always. Encapsulation is the default; if you're exposing raw fields, you should be able to explain why.
+    </div>
+
+    <h3>2.2 Inheritance — share, don't copy</h3>
+    <p><strong>What it is:</strong> a mechanism to say "class B is a specialised kind of class A and gets all its capabilities by default."</p>
+
+    <p><strong>Why it matters:</strong> when you catch yourself copy-pasting a method into three classes, you need shared behaviour — but only when the classes are genuinely <em>kinds-of</em> the same thing.</p>
+
+    <p><strong>Violation — copy-paste instead of inherit:</strong></p>
+    <pre><code>class EmailNotifier:
+    def format_header(self, user):
+        return f"Hi {user.name}, this is a notification from Acme Corp."
+
+    def send(self, user, body):
+        print(self.format_header(user) + "\n" + body)
+
+class SMSNotifier:
+    def format_header(self, user):
+        return f"Hi {user.name}, this is a notification from Acme Corp."  # duplicated
+
+    def send(self, user, body):
+        print(self.format_header(user) + "\n" + body)  # duplicated</code></pre>
+
+    <p><strong>Fix — shared base class:</strong></p>
+    <pre><code>class Notifier:
+    def format_header(self, user):
+        return f"Hi {user.name}, this is a notification from Acme Corp."
+
+    def send(self, user, body):
+        raise NotImplementedError
+
+class EmailNotifier(Notifier):
+    def send(self, user, body):
+        print("[email]", self.format_header(user), body)
+
+class SMSNotifier(Notifier):
+    def send(self, user, body):
+        print("[sms]", self.format_header(user)[:60], body)</code></pre>
+
+    <div class="callout danger">
+      <div class="callout-title">The inheritance trap</div>
+      Inheritance is the most <em>over-used</em> pillar. If the relationship isn't genuinely "X is a kind of Y," prefer composition (having Y as a field of X). We'll revisit this in the Strategy pattern.
+    </div>
+
+    <h3>2.3 Polymorphism — same call, different behaviour</h3>
+    <p><strong>What it is:</strong> callers use a common interface; the object decides what actually runs.</p>
+
+    <p><strong>Why it matters:</strong> polymorphism is how you eliminate long <code>if/elif</code> chains on type.</p>
+
+    <p><strong>Violation — type-sniffing with if/elif:</strong></p>
+    <pre><code>def area(shape):
+    if shape["kind"] == "circle":
+        return 3.14159 * shape["r"] ** 2
+    elif shape["kind"] == "square":
+        return shape["side"] ** 2
+    elif shape["kind"] == "triangle":
+        return 0.5 * shape["base"] * shape["height"]
+    # add a new shape? edit this function. forever.</code></pre>
+
+    <p><strong>Fix — polymorphic dispatch:</strong></p>
+    <pre><code>from abc import ABC, abstractmethod
+import math
+
+class Shape(ABC):
+    @abstractmethod
+    def area(self) -&gt; float: ...
+
+class Circle(Shape):
+    def __init__(self, r): self.r = r
+    def area(self): return math.pi * self.r ** 2
+
+class Square(Shape):
+    def __init__(self, side): self.side = side
+    def area(self): return self.side ** 2
+
+class Triangle(Shape):
+    def __init__(self, b, h): self.b, self.h = b, h
+    def area(self): return 0.5 * self.b * self.h
+
+# caller is blissfully unaware of the concrete type:
+shapes = [Circle(3), Square(4), Triangle(5, 6)]
+total = sum(s.area() for s in shapes)</code></pre>
+
+    <p>Adding a new shape now means adding one class. No existing code changes.</p>
+
+    <h3>2.4 Abstraction — program to a concept, not a thing</h3>
+    <p><strong>What it is:</strong> exposing <em>what</em> something does while hiding <em>how</em> it does it.</p>
+
+    <p><strong>Why it matters:</strong> abstraction lets you swap implementations (mock in tests, swap Stripe for PayPal in prod) without callers noticing.</p>
+
+    <p><strong>Violation — caller knows the concrete implementation:</strong></p>
+    <pre><code>import stripe  # concrete dependency
+
+class Checkout:
+    def charge(self, amount, token):
+        # hard-coded to Stripe forever
+        stripe.Charge.create(amount=amount, source=token, currency="usd")</code></pre>
+
+    <p>Now try to write a unit test for <code>Checkout</code> without hitting Stripe's servers. Good luck.</p>
+
+    <p><strong>Fix — depend on an abstract interface:</strong></p>
+    <pre><code>from abc import ABC, abstractmethod
+
+class PaymentGateway(ABC):
+    @abstractmethod
+    def charge(self, amount: int, token: str) -&gt; str: ...
+
+class StripeGateway(PaymentGateway):
+    def charge(self, amount, token):
+        # real stripe call here
+        return "stripe_txn_123"
+
+class FakeGateway(PaymentGateway):
+    def charge(self, amount, token):
+        return "fake_txn_" + token
+
+class Checkout:
+    def __init__(self, gateway: PaymentGateway):
+        self.gateway = gateway
+
+    def pay(self, amount, token):
+        return self.gateway.charge(amount, token)
+
+# prod
+Checkout(StripeGateway()).pay(1000, "tok_live")
+# test
+Checkout(FakeGateway()).pay(1000, "tok_test")</code></pre>
+
+    <div class="callout success">
+      <div class="callout-title">Abstraction rule of thumb</div>
+      If a change in <em>how</em> something works forces a change in <em>who uses</em> it, your abstraction is leaking.
+    </div>
+
+    <h2>3. SOLID Principles</h2>
+    <p>SOLID is five principles that together describe what "a well-designed class" means. Memorising the acronym isn't the point; recognising violations in your own code is.</p>
+
+    <h3>3.1 S — Single Responsibility Principle</h3>
+    <p><strong>Definition:</strong> a class should have one, and only one, reason to change.</p>
+
+    <p><strong>Violation:</strong></p>
+    <pre><code>class User:
+    def __init__(self, name, email):
+        self.name = name
+        self.email = email
+
+    def save_to_db(self):
+        # opens a DB connection, writes a row
+        print(f"INSERT INTO users ...")
+
+    def send_welcome_email(self):
+        # opens SMTP, sends mail
+        print(f"Sending mail to {self.email}")
+
+    def to_json(self):
+        return {"name": self.name, "email": self.email}</code></pre>
+
+    <p>This class has three reasons to change: the DB schema changes, the email template changes, the JSON format changes. Every one of those teams will be editing the same file.</p>
+
+    <p><strong>Fix — split responsibilities:</strong></p>
+    <pre><code>class User:
+    def __init__(self, name, email):
+        self.name = name
+        self.email = email
+
+class UserRepository:
+    def save(self, user: User):
+        print(f"INSERT INTO users VALUES ({user.name!r}, {user.email!r})")
+
+class WelcomeMailer:
+    def send(self, user: User):
+        print(f"Sending welcome mail to {user.email}")
+
+class UserSerializer:
+    def to_json(self, user: User):
+        return {"name": user.name, "email": user.email}</code></pre>
+
+    <p><strong>What breaks without SRP:</strong> a DBA renames a column. Your emails start failing in prod because the deploy rolled back after a merge conflict in <code>User.py</code>. Unrelated concerns share a fate.</p>
+
+    <h3>3.2 O — Open/Closed Principle</h3>
+    <p><strong>Definition:</strong> software entities should be open for extension, closed for modification.</p>
+
+    <p><strong>Violation:</strong></p>
+    <pre><code>class DiscountCalculator:
+    def discount(self, customer_type, amount):
+        if customer_type == "regular":
+            return amount * 0.05
+        elif customer_type == "premium":
+            return amount * 0.10
+        elif customer_type == "vip":
+            return amount * 0.20
+        # marketing wants to add "student"? edit this class.
+        # then a new "corporate" tier? edit again.
+        return 0</code></pre>
+
+    <p><strong>Fix — extend via new classes:</strong></p>
+    <pre><code>from abc import ABC, abstractmethod
+
+class DiscountPolicy(ABC):
+    @abstractmethod
+    def discount(self, amount: float) -&gt; float: ...
+
+class RegularDiscount(DiscountPolicy):
+    def discount(self, amount): return amount * 0.05
+
+class PremiumDiscount(DiscountPolicy):
+    def discount(self, amount): return amount * 0.10
+
+class VIPDiscount(DiscountPolicy):
+    def discount(self, amount): return amount * 0.20
+
+class StudentDiscount(DiscountPolicy):    # new tier? new class, no edits.
+    def discount(self, amount): return amount * 0.15
+
+def apply(policy: DiscountPolicy, amount):
+    return amount - policy.discount(amount)</code></pre>
+
+    <p><strong>What breaks without OCP:</strong> every new business rule means re-testing the same central function. Regression risk accumulates. Your "small change" ships a bug in a tier you didn't touch.</p>
+
+    <h3>3.3 L — Liskov Substitution Principle</h3>
+    <p><strong>Definition:</strong> subtypes must be usable wherever their parent type is expected, without surprising the caller.</p>
+
+    <p><strong>Violation — the classic Rectangle/Square trap:</strong></p>
+    <pre><code>class Rectangle:
+    def __init__(self, w, h):
+        self.w = w
+        self.h = h
+    def set_width(self, w):  self.w = w
+    def set_height(self, h): self.h = h
+    def area(self): return self.w * self.h
+
+class Square(Rectangle):   # "a square is a rectangle" — in geometry, sure
+    def set_width(self, w):
+        self.w = w
+        self.h = w         # keeping the square invariant
+    def set_height(self, h):
+        self.w = h
+        self.h = h
+
+def stretch(r: Rectangle):
+    r.set_width(10)
+    r.set_height(5)
+    assert r.area() == 50   # fails if r is a Square — area becomes 25</code></pre>
+
+    <p><strong>Fix — don't force an is-a when behaviour differs:</strong></p>
+    <pre><code>class Shape(ABC):
+    @abstractmethod
+    def area(self) -&gt; float: ...
+
+class Rectangle(Shape):
+    def __init__(self, w, h): self.w, self.h = w, h
+    def area(self): return self.w * self.h
+
+class Square(Shape):         # sibling, not child
+    def __init__(self, side): self.side = side
+    def area(self): return self.side ** 2</code></pre>
+
+    <p><strong>What breaks without LSP:</strong> generic code that expected the parent's contract silently misbehaves on subclasses. Bugs appear far from where the subclass was written.</p>
+
+    <h3>3.4 I — Interface Segregation Principle</h3>
+    <p><strong>Definition:</strong> clients should not be forced to depend on methods they don't use. Prefer many small interfaces over one fat one.</p>
+
+    <p><strong>Violation:</strong></p>
+    <pre><code>class MultiFunctionDevice(ABC):
+    @abstractmethod
+    def print(self, doc): ...
+    @abstractmethod
+    def scan(self, doc): ...
+    @abstractmethod
+    def fax(self, doc): ...
+
+class SimplePrinter(MultiFunctionDevice):
+    def print(self, doc): print("printing", doc)
+    def scan(self, doc): raise NotImplementedError  # forced to implement
+    def fax(self, doc):  raise NotImplementedError  # stuff it doesn't do</code></pre>
+
+    <p><strong>Fix — split:</strong></p>
+    <pre><code>class Printer(ABC):
+    @abstractmethod
+    def print(self, doc): ...
+
+class Scanner(ABC):
+    @abstractmethod
+    def scan(self, doc): ...
+
+class Fax(ABC):
+    @abstractmethod
+    def fax(self, doc): ...
+
+class SimplePrinter(Printer):
+    def print(self, doc): print("printing", doc)
+
+class OfficeMFP(Printer, Scanner, Fax):
+    def print(self, doc): ...
+    def scan(self, doc): ...
+    def fax(self, doc): ...</code></pre>
+
+    <p><strong>What breaks without ISP:</strong> every consumer of <code>MultiFunctionDevice</code> drags in code it will never call. Mocking in tests becomes painful. New implementations have to implement methods that don't make sense for them.</p>
+
+    <h3>3.5 D — Dependency Inversion Principle</h3>
+    <p><strong>Definition:</strong> high-level modules should not depend on low-level modules. Both should depend on abstractions.</p>
+
+    <p><strong>Violation:</strong></p>
+    <pre><code>class MySQLDatabase:
+    def query(self, sql): print("mysql:", sql)
+
+class OrderService:
+    def __init__(self):
+        self.db = MySQLDatabase()   # hard-coded dependency
+
+    def place_order(self, order):
+        self.db.query(f"INSERT INTO orders ...")</code></pre>
+
+    <p>Migrating to Postgres? Every <code>OrderService</code>-like class must change. Want to unit test? You can't — there's a real MySQL inside.</p>
+
+    <p><strong>Fix — depend on an abstraction, inject the concrete:</strong></p>
+    <pre><code>class Database(ABC):
+    @abstractmethod
+    def query(self, sql): ...
+
+class MySQLDatabase(Database):
+    def query(self, sql): print("mysql:", sql)
+
+class PostgresDatabase(Database):
+    def query(self, sql): print("postgres:", sql)
+
+class InMemoryDatabase(Database):
+    def __init__(self): self.log = []
+    def query(self, sql): self.log.append(sql)
+
+class OrderService:
+    def __init__(self, db: Database):
+        self.db = db
+
+    def place_order(self, order):
+        self.db.query(f"INSERT INTO orders ...")
+
+# prod
+OrderService(PostgresDatabase()).place_order({})
+# test
+svc = OrderService(InMemoryDatabase())
+svc.place_order({})
+assert len(svc.db.log) == 1</code></pre>
+
+    <p><strong>What breaks without DIP:</strong> your business logic becomes impossible to test without external infrastructure. Swapping a vendor becomes a three-month project. Local dev is painful.</p>
+
+    <div class="callout">
+      <div class="callout-title">SOLID cheat sheet</div>
+      <ul>
+        <li><strong>S</strong> — one reason to change per class</li>
+        <li><strong>O</strong> — add behaviour by adding classes, not editing existing ones</li>
+        <li><strong>L</strong> — subclasses must keep their parent's promises</li>
+        <li><strong>I</strong> — no class should implement methods it doesn't use</li>
+        <li><strong>D</strong> — depend on interfaces, inject the concretes</li>
+      </ul>
+    </div>
+
+    <h2>4. DRY, KISS, YAGNI — the supporting cast</h2>
+
+    <h3>DRY — Don't Repeat Yourself</h3>
+    <p>Every piece of knowledge should have a single, unambiguous representation in your system. If you change a tax rate in one place, it should change everywhere.</p>
+
+    <p><strong>Bad:</strong></p>
+    <pre><code>def price_with_tax_us(p):   return p * 1.08
+def cart_total(items):      return sum(i.price * 1.08 for i in items)
+def invoice_total(lines):   return sum(l.amount * 1.08 for l in lines)</code></pre>
+
+    <p><strong>Good:</strong></p>
+    <pre><code>TAX_RATE = 0.08
+def with_tax(amount): return amount * (1 + TAX_RATE)</code></pre>
+
+    <div class="callout warn">
+      <div class="callout-title">DRY is not copy-detection</div>
+      Two lines of code that look identical but represent <em>different knowledge</em> (e.g., two unrelated business rules that happen to multiply by 0.08) should stay separate. DRY is about knowledge, not characters.
+    </div>
+
+    <h3>KISS — Keep It Simple, Stupid</h3>
+    <p>The simplest thing that could possibly work is usually the right thing. Clever is the enemy of maintainable.</p>
+
+    <pre><code># "clever"
+def is_even(n): return not bool(n &amp; 1) if isinstance(n, int) else None
+
+# simple
+def is_even(n: int) -&gt; bool:
+    return n % 2 == 0</code></pre>
+
+    <h3>YAGNI — You Aren't Gonna Need It</h3>
+    <p>Don't build the generalised plugin framework until you have the second plugin. Every speculative abstraction is a bet against reality — and reality wins.</p>
+
+    <pre><code># YAGNI violation: we only have one report type, but we built for infinity
+class ReportEngine:
+    def __init__(self):
+        self.formatters = {}
+        self.middlewares = []
+        self.plugins = []
+    def register_formatter(self, name, fn): ...
+    def add_middleware(self, fn): ...
+    # 300 more lines to print a PDF
+
+# YAGNI respected:
+def generate_pdf(report): ...
+# when you need HTML next year, refactor then.</code></pre>
+
+    <h2>5. Cohesion vs Coupling</h2>
+    <p>These two words are the compass of class design. Every other principle in this chapter is secretly a statement about them.</p>
+
+    <div class="diagram">
+  High cohesion, low coupling (the goal):
+
+     [Order]  --uses--&gt;  [PaymentGateway interface]
+        |                       ^
+        |                       |
+     [Cart]                 [StripeImpl]  [PayPalImpl]
+
+  Each class owns one job. Connections are thin and go through interfaces.
+
+
+  Low cohesion, high coupling (the nightmare):
+
+     [OrderCartUserPaymentEmail]  ---directly calls---&gt;  [MySQL rows]
+                    \                                        |
+                     ---also calls---&gt; [Stripe HTTP API] ----+
+
+  One mega-class touches everything; changing any detail ripples everywhere.
+    </div>
+
+    <h3>Cohesion — how focused is this class?</h3>
+    <p>A class is <strong>cohesive</strong> when its members all work toward the same purpose. Low cohesion looks like a class called <code>Utils</code> or <code>Manager</code> that does fifteen unrelated things.</p>
+
+    <h3>Coupling — how entangled are these two classes?</h3>
+    <p>Two classes are <strong>tightly coupled</strong> when a change in one forces a change in the other. Low coupling means they communicate through narrow, stable interfaces.</p>
+
+    <table>
+      <thead>
+        <tr><th>Smell</th><th>What it usually means</th><th>Fix</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Class is named <code>XxxManager</code> or <code>XxxHelper</code></td><td>Low cohesion — it's a junk drawer</td><td>Split into single-purpose classes</td></tr>
+        <tr><td>Changing class A always requires changing B</td><td>Tight coupling</td><td>Introduce an interface between them</td></tr>
+        <tr><td>A class has 20+ public methods</td><td>Doing too many things</td><td>SRP — split it</td></tr>
+        <tr><td>You <code>import</code> a concrete DB/HTTP client in business logic</td><td>Leaky abstraction, tight coupling</td><td>Inject a port/gateway</td></tr>
+      </tbody>
+    </table>
+
+    <div class="callout success">
+      <div class="callout-title">North star</div>
+      Aim for classes that are <em>deep and narrow</em> — they do one important thing and expose a small surface to the rest of the system.
+    </div>
+
+    <h2>6. How to Approach an LLD Interview (or a real design)</h2>
+    <p>Whether it's a whiteboard interview or a Monday-morning design doc, the process is the same. Follow these seven steps in order. Do not skip ahead.</p>
+
+    <div class="diagram">
+  STEP 1: Clarify requirements
+          |
+          v
+  STEP 2: Identify actors           (who uses this system?)
+          |
+          v
+  STEP 3: Identify entities         (what are the nouns?)
+          |
+          v
+  STEP 4: Identify behaviours       (what are the verbs?)
+          |
+          v
+  STEP 5: Apply SOLID               (are the seams right?)
+          |
+          v
+  STEP 6: Apply patterns            (do named solutions fit?)
+          |
+          v
+  STEP 7: Handle edge cases         (what fails, and how?)
+    </div>
+
+    <h3>Step 1 — Clarify requirements</h3>
+    <p>Never start drawing. Ask dumb-sounding questions first: does the parking lot have multiple floors? Do we bill hourly or per entry? Are there EV spots? Every assumption you skip here is a bug you'll ship.</p>
+
+    <h3>Step 2 — Identify actors</h3>
+    <p>Who interacts with this system? Customer, admin, attendant, third-party payment provider, cron job. Each actor is a source of requirements you might otherwise forget.</p>
+
+    <h3>Step 3 — Identify entities (the nouns)</h3>
+    <p>Read the problem aloud. Every noun is a candidate class. For a parking lot: <em>Vehicle, Ticket, Spot, Floor, Gate, PaymentReceipt</em>. You'll prune this list, but start wide.</p>
+
+    <h3>Step 4 — Identify behaviours (the verbs)</h3>
+    <p>For each entity, list what it does or has done to it. <em>Vehicle enters. Ticket is issued. Spot is reserved. Payment is taken.</em> These verbs become methods; the subject of each verb is where the method belongs.</p>
+
+    <h3>Step 5 — Apply SOLID</h3>
+    <p>Walk each class against S/O/L/I/D:</p>
+    <ul>
+      <li>Does this class have one reason to change? (S)</li>
+      <li>Can I add a new <em>kind</em> without editing it? (O)</li>
+      <li>Do subclasses keep the parent's promises? (L)</li>
+      <li>Is anyone forced to implement unused methods? (I)</li>
+      <li>Am I depending on a concrete class I could hide behind an interface? (D)</li>
+    </ul>
+
+    <h3>Step 6 — Apply patterns (next chapter!)</h3>
+    <p>Most LLD problems are combinations of 5-10 well-known patterns. Strategy for interchangeable algorithms, Observer for event fan-out, Factory for object creation, State for lifecycles. We'll build the vocabulary in Chapter 2.</p>
+
+    <h3>Step 7 — Handle edge cases</h3>
+    <p>What happens when the parking lot is full? When the payment gateway times out mid-transaction? When two cars try to book the last spot simultaneously? Edge cases are where your design is actually tested.</p>
+
+    <div class="callout">
+      <div class="callout-title">The 80/20 of LLD interviews</div>
+      Interviewers don't expect flawless code. They want to see that you <em>think in entities and interfaces</em>, not in if-else ladders and dictionaries. Name your classes well, make your contracts explicit, and explain your trade-offs aloud.
+    </div>
+
+    <h2>Recap</h2>
+    <ul>
+      <li>LLD is the discipline of making code <em>survive change</em>, not just work on day one.</li>
+      <li>Encapsulation, Inheritance, Polymorphism, Abstraction — four tools; each has a job and a failure mode.</li>
+      <li>SOLID gives you a checklist for "is this class well-designed?" Use it as a lens, not a religion.</li>
+      <li>DRY, KISS, YAGNI keep you honest about complexity.</li>
+      <li>High cohesion + low coupling is the north star; every other rule is a path to it.</li>
+      <li>In interviews: clarify → actors → entities → behaviours → SOLID → patterns → edges.</li>
+    </ul>
+
+    <p>Now that you have the vocabulary, the next chapter hands you the phrases: design patterns — named solutions to problems you'll see over and over.</p>
+
+    <div class="chapter-nav">
+      <a href="index.html"><div class="label">← Previous</div><div class="title">LLD Index</div></a>
+      <a class="next" href="02-patterns.html"><div class="label">Next →</div><div class="title">2. Design Patterns Primer</div></a>
+    </div>
+  </main>
+</div>
+<script src="../assets/js/nav.js"></script>
+</body>
+</html>

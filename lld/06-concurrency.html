@@ -1,0 +1,716 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Concurrency in LLD — Book I · LLD</title>
+<link rel="stylesheet" href="../assets/css/style.css">
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">System Design Books</div>
+    <div class="brand-sub">by Sanheen · Progressive Learning</div>
+    <div class="nav-section">
+      <h3>Home</h3>
+      <a href="../index.html">Overview</a>
+    </div>
+    <div class="nav-section">
+      <h3>Book I — Low Level Design</h3>
+      <a href="index.html">LLD Index</a>
+      <a href="01-foundations.html">1. Foundations (OOP, SOLID)</a>
+      <a href="02-patterns.html">2. Design Patterns Primer</a>
+      <a href="03-basic-problems.html">3. Basic Problems</a>
+      <a href="04-intermediate.html">4. Intermediate Problems</a>
+      <a href="05-advanced.html">5. Advanced Problems</a>
+      <a href="06-concurrency.html">6. Concurrency in LLD</a>
+      <a href="07-war-room.html">7. War Room Scenarios</a>
+      <a href="08-real-code.html">8. Real Company Code</a>
+    </div>
+    <div class="nav-section">
+      <h3>Book II — High Level Design</h3>
+      <a href="../hld/index.html">HLD Index</a>
+    </div>
+  </aside>
+  <main class="main">
+    <div class="breadcrumb"><a href="../index.html">Home</a> / <a href="index.html">Book I · LLD</a> / Chapter 6</div>
+    <h1>Chapter 6: Concurrency in LLD</h1>
+
+    <p>Concurrency is where the clean class diagrams of the last five chapters meet the actual hardware. Two threads calling the same method at the same time can turn a well-designed system into a random number generator. This chapter builds the vocabulary and reflexes you need to spot, prevent, and reason about concurrent bugs in Python and beyond.</p>
+
+    <div class="callout">
+      <div class="callout-title">On Python's GIL</div>
+      Yes, CPython has a Global Interpreter Lock, and yes, it serializes bytecode execution. No, that does <em>not</em> make your code thread-safe. The GIL guarantees <em>individual bytecodes</em> are atomic, but <code>x += 1</code> compiles to four bytecodes (LOAD, LOAD, ADD, STORE) and a thread switch can happen between any of them. Every pattern below applies.
+    </div>
+
+    <h2>1. Why concurrency is hard</h2>
+
+    <p>Start with the most famous race condition in programming education: a shared counter.</p>
+
+    <pre><code>import threading
+
+counter = 0
+
+def increment():
+    global counter
+    for _ in range(100_000):
+        counter += 1   # NOT atomic
+
+threads = [threading.Thread(target=increment) for _ in range(10)]
+for t in threads: t.start()
+for t in threads: t.join()
+
+print(counter)  # Expected: 1_000_000. Actual: 742_381. Or 893_004. Never stable.
+</code></pre>
+
+    <p>The line <code>counter += 1</code> decomposes to:</p>
+    <pre><code>  tmp = counter    # read
+  tmp = tmp + 1    # add
+  counter = tmp    # write
+</code></pre>
+
+    <p>Two threads can each read the same old value, both add 1, and both write back the same new value. One increment is lost.</p>
+
+    <div class="diagram">
+Thread A              Thread B
+--------              --------
+read counter  (=5)
+                       read counter  (=5)
+write counter (=6)
+                       write counter (=6)   &lt;- should be 7!
+</div>
+
+    <h3>Bank transfer — same bug, scarier consequences</h3>
+    <pre><code>class Account:
+    def __init__(self, balance): self.balance = balance
+
+def transfer(src, dst, amount):
+    if src.balance &gt;= amount:
+        src.balance -= amount       # check
+        dst.balance += amount       # act
+</code></pre>
+
+    <p>Two threads see <code>balance == 100</code>, both approve a $100 withdrawal, both subtract. The account ends at <code>-100</code>. This is a <strong>TOCTOU</strong> (time-of-check to time-of-use) bug, and it's how banks got robbed in the 2010s before they all hired concurrency specialists.</p>
+
+    <h2>2. Synchronization primitives</h2>
+
+    <h3>Lock / Mutex</h3>
+    <p>A mutex enforces mutual exclusion: at most one thread holds it at a time.</p>
+
+    <pre><code>import threading
+
+counter = 0
+lock = threading.Lock()
+
+def increment():
+    global counter
+    for _ in range(100_000):
+        with lock:            # acquire on enter, release on exit
+            counter += 1
+
+threads = [threading.Thread(target=increment) for _ in range(10)]
+for t in threads: t.start()
+for t in threads: t.join()
+
+print(counter)  # 1_000_000. Every time.
+</code></pre>
+
+    <div class="callout warn">
+      <div class="callout-title">Cost of correctness</div>
+      The locked version is ~5–10x slower than the racy one. Locks serialize threads through the critical section. Keep critical sections small.
+    </div>
+
+    <h3>RLock — reentrant lock</h3>
+    <p>A plain <code>Lock</code> deadlocks if the same thread tries to acquire it twice:</p>
+    <pre><code>lock = threading.Lock()
+
+def outer():
+    with lock:
+        inner()          # hangs forever if inner() also needs the lock
+
+def inner():
+    with lock:
+        do_work()
+</code></pre>
+
+    <p><code>RLock</code> tracks the owner and a count. The same thread can acquire N times and must release N times.</p>
+
+    <pre><code>import threading
+
+class BankAccount:
+    def __init__(self, balance):
+        self._balance = balance
+        self._lock = threading.RLock()
+
+    def deposit(self, amount):
+        with self._lock:
+            self._balance += amount
+
+    def transfer_to(self, other, amount):
+        with self._lock:           # acquire 1
+            self.withdraw(amount)  # this will acquire again
+            other.deposit(amount)
+
+    def withdraw(self, amount):
+        with self._lock:           # acquire 2 — RLock allows this
+            if self._balance &lt; amount:
+                raise ValueError("insufficient funds")
+            self._balance -= amount
+</code></pre>
+
+    <p>Use <code>RLock</code> when public methods call each other and both need the lock. Use plain <code>Lock</code> when you want the discipline of no recursive acquisition.</p>
+
+    <h3>Semaphore</h3>
+    <p>A semaphore is a lock that allows up to N holders. Perfect for bounded resource pools.</p>
+
+    <pre><code>import threading, time, random
+
+# At most 3 concurrent API calls
+api_semaphore = threading.Semaphore(3)
+
+def call_api(name):
+    with api_semaphore:
+        print(f"{name} entering")
+        time.sleep(random.uniform(0.1, 0.3))
+        print(f"{name} leaving")
+
+threads = [threading.Thread(target=call_api, args=(f"t{i}",)) for i in range(10)]
+for t in threads: t.start()
+for t in threads: t.join()
+</code></pre>
+
+    <p>Semaphores are how you implement connection pools, rate-limiters, and producer-consumer capacity bounds.</p>
+
+    <h3>Event — one-shot signaling</h3>
+    <pre><code>import threading, time
+
+ready = threading.Event()
+
+def worker():
+    print("waiting for start signal...")
+    ready.wait()             # blocks until .set() is called
+    print("go!")
+
+def launcher():
+    time.sleep(2)
+    print("firing start signal")
+    ready.set()
+
+threading.Thread(target=worker).start()
+threading.Thread(target=worker).start()
+threading.Thread(target=launcher).start()
+</code></pre>
+
+    <p><code>Event</code> is a boolean flag with wait-until-true semantics. Once <code>set()</code>, it stays set. Use <code>clear()</code> to reset, but remember: any late waiter after <code>set()</code> returns immediately — that's the point.</p>
+
+    <h3>Condition variable — producer/consumer</h3>
+    <pre><code>import threading
+from collections import deque
+
+class BoundedBuffer:
+    def __init__(self, capacity):
+        self._buf = deque()
+        self._capacity = capacity
+        self._cond = threading.Condition()
+
+    def put(self, item):
+        with self._cond:
+            while len(self._buf) == self._capacity:
+                self._cond.wait()            # releases lock, waits, reacquires
+            self._buf.append(item)
+            self._cond.notify_all()          # wake any waiting consumers
+
+    def get(self):
+        with self._cond:
+            while not self._buf:
+                self._cond.wait()
+            item = self._buf.popleft()
+            self._cond.notify_all()          # wake any waiting producers
+            return item
+</code></pre>
+
+    <div class="callout danger">
+      <div class="callout-title">Always wait in a while loop</div>
+      Spurious wakeups are real, and <code>notify_all</code> may wake multiple waiters when only one can proceed. Re-check the condition after <code>wait()</code> returns. <code>if</code> is a bug; <code>while</code> is correct.
+    </div>
+
+    <h3>Atomic operations / CAS</h3>
+    <p>Python stdlib doesn't expose CAS directly — everything goes through the GIL — but the concept matters because it underlies lock-free data structures. Compare-and-Swap is a CPU instruction:</p>
+
+    <pre><code># Pseudocode for CAS
+atomic {
+    if memory[addr] == expected:
+        memory[addr] = new
+        return True
+    else:
+        return False
+}
+</code></pre>
+
+    <p>The Python stdlib's <code>threading</code> doesn't provide CAS, but libraries like <code>atomics</code> do, and in Java/C++ you'd use <code>AtomicInteger</code>/<code>std::atomic</code>. Pattern:</p>
+
+    <pre><code># Pseudo-Python, illustrating the lock-free counter idiom
+def atomic_increment(atom):
+    while True:
+        current = atom.load()
+        if atom.compare_and_swap(current, current + 1):
+            return current + 1
+        # else: someone beat us, retry
+</code></pre>
+
+    <h2>3. Thread-safe data structures</h2>
+
+    <h3>Thread-safe counter</h3>
+    <pre><code>class ThreadSafeCounter:
+    def __init__(self):
+        self._value = 0
+        self._lock = threading.Lock()
+
+    def increment(self):
+        with self._lock:
+            self._value += 1
+
+    def value(self):
+        with self._lock:
+            return self._value
+</code></pre>
+
+    <p>Note that <em>reads</em> also need the lock on architectures where a 64-bit read isn't atomic. On CPython this is less of an issue thanks to the GIL, but porting this idea to Java/C++ without synchronizing the read would hand back torn values.</p>
+
+    <h3>queue.Queue — thread-safe by design</h3>
+    <pre><code>import queue, threading
+
+q = queue.Queue(maxsize=100)
+
+def producer():
+    for i in range(1000):
+        q.put(i)           # blocks if full
+    q.put(None)            # sentinel
+
+def consumer():
+    while True:
+        item = q.get()     # blocks if empty
+        if item is None: break
+        process(item)
+        q.task_done()
+
+threading.Thread(target=producer).start()
+threading.Thread(target=consumer).start()
+</code></pre>
+
+    <p><code>queue.Queue</code> handles all the locking and condition variables for you. When the stdlib gives you a thread-safe tool, use it.</p>
+
+    <h3>Copy-on-write collections</h3>
+    <pre><code>class COWList:
+    """Reads are lock-free; writes copy the whole list."""
+    def __init__(self):
+        self._data = ()
+        self._lock = threading.Lock()
+
+    def __iter__(self):
+        return iter(self._data)   # snapshot; old readers unaffected by writes
+
+    def append(self, item):
+        with self._lock:
+            self._data = self._data + (item,)
+</code></pre>
+
+    <p>Great when reads vastly outnumber writes (config, listener lists, routing tables). Terrible when writes are frequent — every write is O(N).</p>
+
+    <h2>4. Classic concurrency patterns</h2>
+
+    <h3>Producer–Consumer with a bounded queue</h3>
+    <pre><code>import threading, queue, time, random
+
+def producer(q, name):
+    for i in range(20):
+        item = f"{name}-{i}"
+        q.put(item)                  # blocks if full
+        print(f"produced {item}")
+        time.sleep(random.random() * 0.05)
+    q.put(None)                      # sentinel per producer
+
+def consumer(q, name):
+    while True:
+        item = q.get()
+        if item is None:
+            q.put(None)              # pass the poison pill on
+            break
+        print(f"  {name} consumed {item}")
+        time.sleep(random.random() * 0.1)
+
+q = queue.Queue(maxsize=5)
+
+producers = [threading.Thread(target=producer, args=(q, f"P{i}")) for i in range(2)]
+consumers = [threading.Thread(target=consumer, args=(q, f"C{i}")) for i in range(3)]
+
+for t in producers + consumers: t.start()
+for t in producers + consumers: t.join()
+</code></pre>
+
+    <h3>Reader-Writer lock</h3>
+    <p>Many readers can proceed in parallel; writers need exclusive access. The stdlib doesn't ship one but it's instructive to write it.</p>
+
+    <pre><code>class RWLock:
+    def __init__(self):
+        self._readers = 0
+        self._lock = threading.Lock()
+        self._read_ok = threading.Condition(self._lock)
+        self._write_ok = threading.Condition(self._lock)
+        self._writer = False
+        self._waiting_writers = 0
+
+    def acquire_read(self):
+        with self._lock:
+            while self._writer or self._waiting_writers &gt; 0:
+                self._read_ok.wait()
+            self._readers += 1
+
+    def release_read(self):
+        with self._lock:
+            self._readers -= 1
+            if self._readers == 0:
+                self._write_ok.notify()
+
+    def acquire_write(self):
+        with self._lock:
+            self._waiting_writers += 1
+            while self._writer or self._readers &gt; 0:
+                self._write_ok.wait()
+            self._waiting_writers -= 1
+            self._writer = True
+
+    def release_write(self):
+        with self._lock:
+            self._writer = False
+            self._read_ok.notify_all()
+            self._write_ok.notify()
+</code></pre>
+
+    <div class="callout warn">
+      <div class="callout-title">Starvation</div>
+      A naive reader-preferring RWLock lets writers starve under constant read load. The <code>_waiting_writers</code> counter above gives writers priority — new readers wait if a writer is queued. Pick your fairness policy consciously.
+    </div>
+
+    <h3>Thread pool (executor)</h3>
+    <pre><code>from concurrent.futures import ThreadPoolExecutor
+
+def fetch(url):
+    # ... network call
+    return len(url)
+
+urls = [f"https://example.com/{i}" for i in range(100)]
+
+with ThreadPoolExecutor(max_workers=10) as pool:
+    results = list(pool.map(fetch, urls))
+</code></pre>
+
+    <p>Thread pools bound resource usage, recycle worker threads, and let you use <code>Future</code> objects for async-style composition. If you're spawning raw <code>Thread</code> objects in production code, 90% of the time a pool is what you wanted.</p>
+
+    <h3>Double-checked locking</h3>
+    <pre><code>class LazySingleton:
+    _instance = None
+    _lock = threading.Lock()
+
+    @classmethod
+    def get(cls):
+        if cls._instance is None:            # first check (no lock)
+            with cls._lock:
+                if cls._instance is None:    # second check (under lock)
+                    cls._instance = cls()
+        return cls._instance
+</code></pre>
+
+    <p>In Python this works because the GIL prevents torn writes and assignment is atomic. In Java before 1.5 it was famously <em>broken</em> without <code>volatile</code> because the JVM could publish a partially-constructed object. The lesson: double-checked locking is a pattern whose correctness depends on your language's memory model. Don't port it blindly.</p>
+
+    <h2>5. Deadlock</h2>
+
+    <p>Deadlock requires all four Coffman conditions to hold simultaneously:</p>
+    <table>
+      <thead><tr><th>Condition</th><th>Meaning</th></tr></thead>
+      <tbody>
+        <tr><td>Mutual exclusion</td><td>Resource is held by at most one thread</td></tr>
+        <tr><td>Hold &amp; wait</td><td>Thread holds one resource while waiting for another</td></tr>
+        <tr><td>No preemption</td><td>A resource can only be released voluntarily</td></tr>
+        <tr><td>Circular wait</td><td>A cycle exists in the wait-for graph</td></tr>
+      </tbody>
+    </table>
+
+    <p>Break any one of them and deadlock becomes impossible.</p>
+
+    <h3>Classic 2-thread deadlock</h3>
+    <pre><code>lock_a = threading.Lock()
+lock_b = threading.Lock()
+
+def t1():
+    with lock_a:
+        time.sleep(0.1)
+        with lock_b:
+            print("t1 done")
+
+def t2():
+    with lock_b:
+        time.sleep(0.1)
+        with lock_a:
+            print("t2 done")
+
+threading.Thread(target=t1).start()
+threading.Thread(target=t2).start()
+# Hangs forever. t1 holds A, waits for B. t2 holds B, waits for A.
+</code></pre>
+
+    <h3>Strategy 1: Lock ordering</h3>
+    <pre><code># Both threads always acquire in the same global order.
+
+def t1():
+    with lock_a:
+        with lock_b:
+            print("t1 done")
+
+def t2():
+    with lock_a:           # was lock_b — forced to match global order
+        with lock_b:
+            print("t2 done")
+</code></pre>
+
+    <p>For locks with no natural order (e.g., per-account locks in a transfer), order by <code>id()</code>:</p>
+
+    <pre><code>def transfer(src, dst, amount):
+    first, second = (src, dst) if id(src) &lt; id(dst) else (dst, src)
+    with first._lock:
+        with second._lock:
+            src._balance -= amount
+            dst._balance += amount
+</code></pre>
+
+    <h3>Strategy 2: Timeouts</h3>
+    <pre><code>def try_transfer(src, dst, amount, timeout=1.0):
+    if src._lock.acquire(timeout=timeout):
+        try:
+            if dst._lock.acquire(timeout=timeout):
+                try:
+                    src._balance -= amount
+                    dst._balance += amount
+                    return True
+                finally:
+                    dst._lock.release()
+            else:
+                return False        # back off, caller retries
+        finally:
+            src._lock.release()
+    return False
+</code></pre>
+
+    <p>Timeouts break "no preemption" — threads release locks when they give up. Callers need a retry strategy (with backoff + jitter to avoid livelock).</p>
+
+    <h3>Strategy 3: Hierarchical locking</h3>
+    <p>Assign every lock a level. A thread may only acquire locks in strictly increasing level order.</p>
+
+    <pre><code>class LeveledLock:
+    _thread_locals = threading.local()
+
+    def __init__(self, level):
+        self._lock = threading.Lock()
+        self._level = level
+
+    def __enter__(self):
+        held = getattr(self._thread_locals, "held", [])
+        if held and self._level &lt;= held[-1]._level:
+            raise RuntimeError(
+                f"Lock order violation: acquiring level {self._level} "
+                f"while holding level {held[-1]._level}"
+            )
+        self._lock.acquire()
+        held.append(self)
+        self._thread_locals.held = held
+        return self
+
+    def __exit__(self, *exc):
+        self._thread_locals.held.remove(self)
+        self._lock.release()
+</code></pre>
+
+    <p>This turns a subtle runtime deadlock into a loud exception the first time your code violates the hierarchy — in dev, on your laptop, not in prod at 3am.</p>
+
+    <h2>6. Lock granularity</h2>
+
+    <h3>Coarse-grained: one lock guards everything</h3>
+    <pre><code>class ProductCatalog:
+    def __init__(self):
+        self._items = {}
+        self._lock = threading.Lock()
+
+    def add(self, sku, item):
+        with self._lock:
+            self._items[sku] = item
+
+    def get(self, sku):
+        with self._lock:
+            return self._items.get(sku)
+</code></pre>
+
+    <p>Simple and correct. But every read blocks every other read — you've serialized your whole catalog. Fine for a prototype, painful under 10k qps.</p>
+
+    <h3>Fine-grained: lock per entry</h3>
+    <pre><code>class ProductCatalog:
+    def __init__(self):
+        self._items = {}
+        self._locks = {}
+        self._map_lock = threading.Lock()
+
+    def _lock_for(self, sku):
+        with self._map_lock:
+            if sku not in self._locks:
+                self._locks[sku] = threading.Lock()
+            return self._locks[sku]
+
+    def update_stock(self, sku, delta):
+        with self._lock_for(sku):
+            self._items[sku].stock += delta
+</code></pre>
+
+    <p>Two threads updating different SKUs never contend. But you've added a map lock for the lock-lookup step — if that becomes hot, you just shifted the bottleneck.</p>
+
+    <h3>Lock striping — the sweet spot</h3>
+    <pre><code>class StripedCatalog:
+    STRIPES = 32
+
+    def __init__(self):
+        self._items = {}
+        self._stripes = [threading.Lock() for _ in range(self.STRIPES)]
+
+    def _stripe_for(self, sku):
+        return self._stripes[hash(sku) % self.STRIPES]
+
+    def update_stock(self, sku, delta):
+        with self._stripe_for(sku):
+            self._items[sku].stock += delta
+</code></pre>
+
+    <p>A fixed pool of locks. Collisions are possible (two SKUs share a stripe) but contention drops by a factor of STRIPES. Java's <code>ConcurrentHashMap</code> built its reputation on this trick.</p>
+
+    <h2>7. Common bugs</h2>
+
+    <h3>Lost update</h3>
+    <p>Two threads read, modify, write. The second overwrites the first's change. The counter example. Fix: lock or CAS.</p>
+
+    <h3>Double-read (inconsistent read)</h3>
+    <pre><code># BAD
+def display_balance(account):
+    main = account.get_balance()            # 1000
+    # ... another thread withdraws 500 ...
+    savings = account.get_savings()         # 500
+    print(f"Total: {main + savings}")       # shows stale sum</code></pre>
+    <p>Fix: snapshot under a single lock, or use an immutable view.</p>
+
+    <h3>Double-check (broken DCL)</h3>
+    <p>The double-checked locking idiom is safe in Python (GIL makes reference assignment atomic) but broken in C++ without <code>std::atomic</code>/memory barriers. Moral: your "obviously correct" synchronization code may depend on your language's memory model in ways you didn't consciously choose.</p>
+
+    <h3>ABA problem</h3>
+    <pre><code># Lock-free stack. Thread 1 reads top -&gt; A. Scheduled out.
+# Thread 2 pops A, pops B, pushes A back. Top is A again.
+# Thread 1 resumes, CAS(top, A, new) succeeds — but A is a different incarnation.
+# If A's .next still points to the popped B, the stack is now corrupt.
+</code></pre>
+    <p>Fix: tag each value with a monotonically increasing version counter (double-word CAS), or use hazard pointers/epoch-based reclamation.</p>
+
+    <h3>Memory visibility</h3>
+    <pre><code># Thread A
+config = load_config()
+config_ready = True
+
+# Thread B
+while not config_ready:
+    pass
+use(config)
+</code></pre>
+    <p>In a language without atomic/volatile (C++, Java without proper qualifiers, Rust without <code>Ordering</code>), thread B may see <code>config_ready == True</code> while <code>config</code> is still the old value — the compiler or CPU reordered the writes. Python dodges this via the GIL, but every other system you'll design in your career does not.</p>
+
+    <h2>8. Design for concurrency</h2>
+
+    <h3>Immutable objects</h3>
+    <p>If an object can't be modified after construction, no locking is needed to share it across threads. This is why functional programming (Clojure, Erlang) and Rust-style ownership models feel so natural for concurrent code.</p>
+
+    <pre><code>from dataclasses import dataclass
+
+@dataclass(frozen=True)        # immutable
+class Point:
+    x: float
+    y: float
+
+    def translate(self, dx, dy):
+        return Point(self.x + dx, self.y + dy)   # returns new, doesn't mutate
+</code></pre>
+
+    <h3>Confinement (thread-local)</h3>
+    <p>If only one thread ever touches an object, there's no race.</p>
+
+    <pre><code>thread_local = threading.local()
+
+def get_db_connection():
+    conn = getattr(thread_local, "conn", None)
+    if conn is None:
+        conn = db.connect()
+        thread_local.conn = conn
+    return conn
+</code></pre>
+
+    <p>Every thread has its own connection. No sharing, no locks. This is how most database clients and HTTP client libraries achieve thread safety.</p>
+
+    <h3>Message passing</h3>
+    <p>Instead of sharing state and locking access, pass immutable messages between owned state machines. Each actor owns its data; no one else touches it.</p>
+
+    <pre><code>import queue, threading
+
+class Actor:
+    def __init__(self):
+        self._inbox = queue.Queue()
+        self._state = {}
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
+
+    def send(self, msg):
+        self._inbox.put(msg)
+
+    def _loop(self):
+        while True:
+            msg = self._inbox.get()
+            if msg is None: return
+            self._handle(msg)
+
+    def _handle(self, msg):
+        kind, *args = msg
+        if kind == "set": self._state[args[0]] = args[1]
+        elif kind == "inc": self._state[args[0]] = self._state.get(args[0], 0) + 1
+</code></pre>
+
+    <p>This is how Erlang, Akka, and Go's goroutines+channels approach concurrency at scale. No locks, no shared memory — only messages. Race conditions become impossible by construction.</p>
+
+    <div class="callout success">
+      <div class="callout-title">The shift in mindset</div>
+      Early-career engineers learn to use locks. Mid-career engineers learn when not to. Senior engineers design systems where the question rarely arises — immutable data, confined state, and message-passing boundaries eliminate entire categories of bugs.
+    </div>
+
+    <h2>Concurrency checklist for LLD interviews</h2>
+    <ul>
+      <li>Identify every piece of mutable shared state. For each, ask: "who can touch this?"</li>
+      <li>If more than one thread can touch it, pick your protection: lock, atomic, immutable, thread-local, or message-passed.</li>
+      <li>For multi-object operations, define a global lock order or use timeouts with retry.</li>
+      <li>Keep critical sections small. Never do I/O under a lock if you can help it.</li>
+      <li>Prefer standard library primitives (<code>queue.Queue</code>, <code>concurrent.futures</code>, <code>threading.Event</code>) over rolling your own.</li>
+      <li>When in doubt, benchmark. "Obviously faster" fine-grained locking is often slower due to lock-map overhead.</li>
+      <li>If you find yourself reasoning about memory barriers in Python, you're in a portability trap — assume the GIL doesn't exist and re-derive correctness.</li>
+    </ul>
+
+    <h2>Recap</h2>
+    <p>Concurrency bugs are the hardest bugs in software because they're non-deterministic, non-reproducible, and often invisible at low load. Every primitive in this chapter exists because real engineers got burned and codified the fix. The goal isn't to memorize them — it's to recognize the <em>shape</em> of the problem fast enough that the right primitive jumps out. The next chapter puts these tools into war-room scenarios where you design under pressure.</p>
+
+    <div class="chapter-nav">
+      <a href="05-advanced.html"><div class="label">← Previous</div><div class="title">Advanced Problems</div></a>
+      <a class="next" href="07-war-room.html"><div class="label">Next →</div><div class="title">War Room Scenarios</div></a>
+    </div>
+  </main>
+</div>
+<script src="../assets/js/nav.js"></script>
+</body>
+</html>
