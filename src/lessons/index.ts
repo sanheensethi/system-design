@@ -349,7 +349,8 @@ export const BOOKS: Book[] = PATH.map((book) => ({
     id: ch.id,
     number: String(book.id === 'core' ? i : i + 1).padStart(2, '0'),
     title: ch.title,
-    lessons: ch.entries.flatMap(([id]) => byId.get(id) ?? []),
+    // A lesson too long for one sitting is split into `<id>` and `<id>-part-2`; part 2 follows part 1.
+    lessons: ch.entries.flatMap(([id]) => [byId.get(id), byId.get(`${id}-part-2`)].filter((l): l is LessonMeta => !!l)),
     planned: ch.entries.filter(([id]) => !byId.has(id)).map(([, title]) => title),
   })),
 }));
