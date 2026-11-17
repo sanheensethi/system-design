@@ -37,40 +37,16 @@ export const migrationPatternsPart2: Lesson = {
   ],
   steps: [
     {
-      title: 'Expand, contract',
-      tag: 'concept',
-      heading: 'Change schemas in two safe phases',
-      eli5: 'To rename a shelf, first add the new label next to the old one. Wait until everyone reads the new label, then peel off the old one.',
-      body: [
-        'Renaming or splitting a column in one deploy breaks every reader that has not updated yet. **Expand and contract** (also called parallel change) does it in phases.',
-        '**Expand**: add the new column and write both. **Migrate**: backfill old rows and move readers over. **Contract**: drop the old column once nobody reads it.',
-      ],
-      keyIdea: 'Add the new shape beside the old, move readers, then remove the old shape. Every phase can be rolled back.',
-      metrics: { share: '10% of /orders', blast: 'one column', systems: '2 + facade', diff: '-' },
-      scene: {
-        nodes: [{ ...orders, status: 'active' }, { ...newDb, status: 'active', chips: ['status', { text: 'state (new)', tone: 'good' }] }],
-        links: [link('orders', 'newDb')],
-        flows: [{ path: ['orders', 'newDb'], tone: 'request', label: 'write both', duration: 1.4 }],
-        panel: {
-          title: 'Rename status to state',
-          icon: 'Table',
-          code: '-- 1 expand\nALTER TABLE orders ADD state text;\n-- 2 migrate\nUPDATE orders SET state = status;\n-- 3 contract (later)\nALTER TABLE orders DROP status;',
-        },
-        caption: 'Three small deploys, not one risky one',
-      },
-    },
-    {
       title: 'Moving data',
       tag: 'concept',
       heading: 'Moving the data: capture changes, then backfill',
       eli5: 'The new counter needs its own copy of the order book. A helper copies every old page, and every new order written at the old counters gets copied over too.',
       body: [
         'Order history needs 8 years of orders in the new database, and it must stay current while the monolith keeps taking orders. Two jobs run together.',
-        'New changes flow through **change data capture** (CDC): a connector reads the old database\'s change log and applies each insert and update to the new database within seconds. Start CDC before the backfill, so no change slips through the gap.',
+        'New changes flow through **change data capture** (CDC): a connector reads the old database\'s change log and applies each insert and update to the new database within seconds. Start CDC before the backfill, so no change slips through the gap. Customers stay on the old system until this is done.',
       ],
       keyIdea: 'Stream new changes first, then copy history, until both copies agree.',
-      metrics: { share: '10% of /orders', blast: 'order history', systems: '2 + facade', diff: '0.4%' },
-      metricTones: { diff: 'warn' },
+      metrics: { share: '0%', blast: 'none yet', systems: '2 + facade', diff: '-' },
       scene: {
         nodes: [{ ...legacyDb, status: 'active', badge: '8 years of orders' }, { ...newDb, status: 'active', badge: '61% copied' }, { ...backfill, status: 'active' }],
         links: [link('legacyDb', 'backfill'), link('backfill', 'newDb'), link('legacyDb', 'newDb', { style: 'dashed', label: 'CDC' })],
@@ -82,16 +58,48 @@ export const migrationPatternsPart2: Lesson = {
       },
     },
     {
+      title: 'CDC details',
+      tag: 'concept',
+      heading: 'CDC output needs translation, order and a lag alarm',
+      eli5: 'The runner carrying notes to the new book must also rewrite each note in the new handwriting, keep them in order, and shout if the notes pile up. A crossed-out order must be crossed out in the new book too.',
+      body: [
+        'CDC emits rows in the old model, so each event passes through the same ACL translation as the backfill. Apply events in log order per order id, and carry `updated_at` so a late event never overwrites a newer row.',
+        'Watch **lag**, the gap between a commit in the old database and its arrival in the new one, and alert when it grows. Deletes arrive as events too: apply them as a soft delete or tombstone, or the new copy keeps orders the old one removed.',
+      ],
+      keyIdea: 'CDC events go through the ACL, are applied in order per key, and need a lag alarm and a plan for deletes.',
+      metrics: { share: '0%', blast: 'none yet', systems: '2 + facade', diff: '-' },
+      metricTones: { blast: 'good' },
+      scene: {
+        nodes: [{ ...legacyDb, status: 'active' }, { ...acl, at: at(7, 0), status: 'active', chips: [{ text: 'CST_STAT_CD to state', tone: 'good' }] }, { ...newDb, status: 'active', chips: [{ text: 'lag 2 s', tone: 'good' }] }],
+        links: [link('legacyDb', 'acl'), link('acl', 'newDb')],
+        flows: [
+          { path: ['legacyDb', 'acl', 'newDb'], tone: 'event', label: 'update', duration: 1.8 },
+          { path: ['legacyDb', 'acl', 'newDb'], tone: 'event', label: 'delete', duration: 1.8, delay: 1 },
+        ],
+        panel: {
+          title: 'CDC checklist',
+          icon: 'List',
+          rows: [
+            { text: 'Schema translation', value: 'through the ACL', tone: 'good' },
+            { text: 'Ordering', value: 'per order id' },
+            { text: 'Lag alert', value: 'above 30 s', tone: 'warn' },
+            { text: 'Deletes', value: 'tombstone or soft delete', tone: 'warn' },
+          ],
+        },
+        caption: 'Every change is translated, ordered and watched',
+      },
+    },
+    {
       title: 'Backfill',
       tag: 'concept',
       heading: 'The backfill: small, throttled, restartable',
       eli5: 'The helper copies the old book a handful of pages at a time, so the old counters never stop serving. If the helper falls asleep, restarting does no harm.',
       body: [
         'A **backfill** copies the history in small batches, oldest first, through the same translation as the ACL. It is throttled so the old database keeps serving customers.',
-        'It is safe to stop and restart because it writes with upserts keyed on order id. A batch that CDC already wrote is simply overwritten with the same data.',
+        'It is safe to stop and restart because it upserts on order id, guarded by `updated_at`. If CDC already wrote a newer version of a row, CDC wins and the backfill skips it. Both paths carry `updated_at`.',
       ],
       keyIdea: 'Batch by key, throttle, and upsert, so the backfill can stop and restart at any point.',
-      metrics: { share: '10% of /orders', blast: 'order history', systems: '2 + facade', diff: '0.4%' },
+      metrics: { share: '0%', blast: 'none yet', systems: '2 + facade', diff: '-' },
       scene: {
         nodes: [{ ...legacyDb, status: 'active' }, { ...backfill, status: 'active', badge: '5,000 rows/batch' }, { ...newDb, status: 'active' }],
         links: [link('legacyDb', 'backfill'), link('backfill', 'newDb')],
@@ -102,7 +110,7 @@ export const migrationPatternsPart2: Lesson = {
           rows: [
             { text: 'Batch size', value: '5,000 rows' },
             { text: 'Order', value: 'by order id, oldest first' },
-            { text: 'Write mode', value: 'upsert, restartable', tone: 'good' },
+            { text: 'Write mode', value: 'guarded upsert, restartable', tone: 'good' },
           ],
         },
         caption: 'A steady trickle that can be paused',
@@ -111,21 +119,25 @@ export const migrationPatternsPart2: Lesson = {
         language: 'sql',
         title: 'One restartable backfill batch',
         source: `-- run repeatedly; :last_id comes from the previous batch
-INSERT INTO orders (id, customer_id, total_cents, status, placed_at)
+INSERT INTO orders (id, customer_id, total_cents, status, placed_at, updated_at)
 SELECT h.ORD_NO,
        h.CST_NO,
        ROUND(h.ORD_AMT * 100),
        CASE h.ORD_STAT WHEN 'S' THEN 'shipped'
                        WHEN 'C' THEN 'cancelled'
                        ELSE 'open' END,
-       h.ORD_DT
+       h.ORD_DT,
+       h.ORD_UPD_TS
 FROM   legacy.ORD_HDR h
 WHERE  h.ORD_NO > :last_id
 ORDER  BY h.ORD_NO
 LIMIT  5000
-ON CONFLICT (id) DO UPDATE                -- CDC may have written it already
-SET    status = EXCLUDED.status;`,
-        highlight: [11, 13, 14],
+ON CONFLICT (id) DO UPDATE
+SET    total_cents = EXCLUDED.total_cents,
+       status      = EXCLUDED.status,
+       updated_at  = EXCLUDED.updated_at
+WHERE  orders.updated_at < EXCLUDED.updated_at;   -- newer CDC write wins`,
+        highlight: [2, 12, 15, 19],
       },
     },
     {
@@ -138,7 +150,7 @@ SET    status = EXCLUDED.status;`,
         'One night the new database was slow. The first write committed, the second timed out, and the monolith logged the error and moved on. **312 orders** existed only in the old database. No transaction spans two databases owned by two systems.',
       ],
       keyIdea: 'Two independent writes will eventually disagree.',
-      metrics: { share: '10% of /orders', blast: 'order history', systems: '2 + facade', diff: '312 orders' },
+      metrics: { share: '0%', blast: 'order history', systems: '2 + facade', diff: '312 orders' },
       metricTones: { diff: 'bad' },
       scene: {
         nodes: [{ ...legacy, status: 'active', badge: 'write twice' }, { ...legacyDb, status: 'ok', badge: 'committed' }, orders, { ...newDb, status: 'hot', badge: 'timeout' }],
@@ -161,7 +173,7 @@ SET    status = EXCLUDED.status;`,
         'Either way the copy is driven by a durable record, so a slow or failed delivery is retried and not forgotten. The receiver must handle repeats, for example by upserting on order id.',
       ],
       keyIdea: 'Write once in a transaction, then deliver from a durable log with retries and idempotent receivers.',
-      metrics: { share: '10% of /orders', blast: 'order history', systems: '2 + facade', diff: '0 lost' },
+      metrics: { share: '0%', blast: 'order history', systems: '2 + facade', diff: '0 lost' },
       metricTones: { diff: 'good' },
       scene: {
         nodes: [{ ...legacyDb, status: 'ok', chips: ['orders', 'outbox'] }, { id: 'relay', kind: 'worker', at: at(7, 0), label: 'relay', sub: 'retries until acked', status: 'active' }, { ...newDb, status: 'ok' }],
@@ -199,7 +211,7 @@ SET    status = EXCLUDED.status;`,
         'Compare by day and then drill down, so a million rows never need to be diffed one by one. Alert when a day stays different.',
       ],
       keyIdea: 'Reconciliation turns hidden drift into a number you can watch and a repair you can run.',
-      metrics: { share: '10% of /orders', blast: 'order history', systems: '2 + facade', diff: '312 → 0' },
+      metrics: { share: '0%', blast: 'order history', systems: '2 + facade', diff: '312 → 0' },
       metricTones: { diff: 'good' },
       scene: {
         nodes: [legacyDb, { ...compare, status: 'active' }, newDb],
@@ -221,16 +233,39 @@ SET    status = EXCLUDED.status;`,
       },
     },
     {
+      title: 'Expand, contract',
+      tag: 'concept',
+      heading: 'Once it is live, change the new schema in phases',
+      eli5: 'Later the bakery wants to rename a shelf in the new order book. First add the new label beside the old one, wait until everyone reads the new label, then peel off the old one.',
+      body: [
+        'The new schema keeps changing after the data is in. Renaming `status` to `state` in one deploy breaks every reader, the CDC apply and the backfill that still write `status`. **Expand and contract** does it in phases.',
+        '**Expand**: add `state`, and have the app write both columns. **Migrate**: backfill old rows and move readers. **Contract**: drop `status` once nobody reads or writes it.',
+      ],
+      keyIdea: 'Add the new shape beside the old, write both, move readers, then remove the old shape. Every phase can be rolled back.',
+      metrics: { share: '0%', blast: 'one column', systems: '2 + facade', diff: '-' },
+      scene: {
+        nodes: [{ ...orders, status: 'active' }, { ...newDb, status: 'active', chips: ['status', { text: 'state (new)', tone: 'good' }] }],
+        links: [link('orders', 'newDb')],
+        flows: [{ path: ['orders', 'newDb'], tone: 'request', label: 'write both', duration: 1.4 }],
+        panel: {
+          title: 'Rename status to state',
+          icon: 'Table',
+          code: '-- 1 expand\nALTER TABLE orders ADD state text;\n-- 2 app writes both columns\nUPDATE orders SET status = :s, state = :s WHERE id = :id;\n-- 3 backfill old rows, move readers\nUPDATE orders SET state = status WHERE state IS NULL;\n-- 4 contract, once nothing uses status\nALTER TABLE orders DROP status;',
+        },
+        caption: 'Four small deploys, not one risky one',
+      },
+    },
+    {
       title: 'Shadow traffic',
       tag: 'concept',
       heading: 'Shadow traffic: compare before you trust',
       eli5: 'For a week, every cake order is made at both counters. Customers only get the old counter\'s cake, and someone checks that the two cakes match.',
       body: [
-        'Before raising the share past 10%, the facade **mirrors** order-history requests: the old system answers the customer as usual, and a copy of the same request goes to the new service. Its answer is not returned to anyone.',
+        'Before any customer gets an answer from the new service, the facade **mirrors** order-history requests: the old system answers the customer as usual, and a copy of the same request goes to the new service. Its answer is not returned to anyone.',
         'A **comparator** diffs the two answers and records mismatches by type.',
       ],
       keyIdea: 'Shadow traffic tests the new system on real requests with zero customer impact.',
-      metrics: { share: '10% + shadow', blast: 'none (shadow)', systems: '2 + facade', diff: '0.4%' },
+      metrics: { share: '0% + shadow', blast: 'none (shadow)', systems: '2 + facade', diff: '0.4%' },
       metricTones: { blast: 'good', diff: 'warn' },
       scene: {
         nodes: [{ ...facade, status: 'active', badge: 'mirror reads' }, legacy, { ...orders, status: 'active', badge: 'answer discarded' }, { ...compare, status: 'ok', badge: '0.4% differ' }],
@@ -254,7 +289,7 @@ SET    status = EXCLUDED.status;`,
         'After the fix, mismatches drop from 0.4% to 0.01%, and the remaining few are explained one by one.',
       ],
       keyIdea: 'Every mismatch type points at a rule the old code knew and nobody wrote down.',
-      metrics: { share: '10% + shadow', blast: 'none (shadow)', systems: '2 + facade', diff: '0.4% → 0.01%' },
+      metrics: { share: '0% + shadow', blast: 'none (shadow)', systems: '2 + facade', diff: '0.4% → 0.01%' },
       metricTones: { diff: 'good' },
       scene: {
         nodes: [{ ...legacy, status: 'ok', chips: ['total: $19.99'] }, { ...compare, status: 'hot', badge: '1 cent off' }, { ...orders, status: 'active', chips: [{ text: 'total: $19.98', tone: 'warn' }] }],
@@ -285,7 +320,7 @@ SET    status = EXCLUDED.status;`,
         'Mirroring also doubles load on whatever both paths share, so watch the old database. Make new write paths **idempotent** (keyed on an order id), so a retry never doubles anything.',
       ],
       keyIdea: 'Shadow reads freely. Shadow writes only into a sandbox, and make every write idempotent.',
-      metrics: { share: '10% + shadow', blast: 'none (shadow)', systems: '2 + facade', diff: '0.01%' },
+      metrics: { share: '0% + shadow', blast: 'none (shadow)', systems: '2 + facade', diff: '0.01%' },
       scene: {
         nodes: [{ ...facade, status: 'active' }, { ...orders, status: 'ok', chips: [{ text: 'GET /orders', tone: 'good' }, { text: 'POST /checkout', tone: 'bad' }] }, { ...legacyDb, status: 'hot', load: 78 }],
         links: [link('facade', 'orders'), link('facade', 'legacyDb', { style: 'faint', label: 'shared load', labelTone: 'warn' })],
@@ -308,11 +343,11 @@ SET    status = EXCLUDED.status;`,
       heading: 'Cut over gradually, keep the way back open',
       eli5: 'Once the cakes match, the greeter sends more and more cake buyers to the new counter, a few at a time, until every cake comes from there.',
       body: [
-        'Mismatches are below 0.01% and explained. The facade raises the share: 10%, 25%, 50%, 100%, a few days at each step, watching error rate, latency and the reconciliation report.',
+        'Mismatches are below 0.01% and explained. The facade starts at 1% and raises the share: 10%, 25%, 50%, 100%, a few days at each step, watching error rate, latency and the reconciliation report.',
         'Decide the rollback rule before each step, for example "error rate more than 0.5 points above the old path for 10 minutes". Written in advance, rolling back is routine, not a debate during an incident.',
       ],
       keyIdea: 'Move traffic in steps with a written rollback rule.',
-      metrics: { share: '10% → 100%', blast: 'order history', systems: '2 + facade', diff: '< 0.01%' },
+      metrics: { share: '1% → 100%', blast: 'order history', systems: '2 + facade', diff: '< 0.01%' },
       metricTones: { share: 'good', diff: 'good' },
       scene: {
         nodes: [{ ...facade, status: 'active', badge: '/orders: 50% new' }, legacy, { ...orders, status: 'ok' }],
@@ -325,7 +360,7 @@ SET    status = EXCLUDED.status;`,
           title: 'Ramp and rollback rule',
           icon: 'TrendingUp',
           rows: [
-            { text: 'Steps', value: '10, 25, 50, 100%' },
+            { text: 'Steps', value: '1, 10, 25, 50, 100%' },
             { text: 'Hold at each', value: 'a few days' },
             { text: 'Roll back if', value: 'errors +0.5 pts for 10 min', tone: 'warn' },
           ],
@@ -336,23 +371,23 @@ SET    status = EXCLUDED.status;`,
     {
       title: 'Flip the sync',
       tag: 'concept',
-      heading: 'When writes move, flip the direction of sync',
-      eli5: 'Once the new order book is the real one, the runner carries notes the other way, so the old counters can still read it if they must.',
+      heading: 'When a later slice owns writes, flip the sync',
+      eli5: 'The order-history counter only reads the book, so nothing flips yet. When a later counter, like checkout, starts writing orders, the runner must carry notes the other way too.',
       body: [
-        'Reads are the easy part. When the new service starts taking writes for its slice, the new database becomes the source of truth and CDC feeds the old one.',
-        'Any old report or job still reading there keeps working, and moving back stays possible. Flip only after reconciliation is clean.',
+        'Order history only reads, and the monolith still writes `ORD_HDR` at checkout, so there is no write cutover for this slice. The flip belongs to a later slice that owns writes, such as checkout.',
+        'When it takes over, its database becomes the source of truth and CDC feeds the old one, so old reports keep working and a rollback stays possible. Flip only after reconciliation is clean.',
       ],
-      keyIdea: 'Flip the sync so the new database is the source of truth and the old copy stays fed until it is retired.',
-      metrics: { share: '100% of /orders', blast: 'order history', systems: '2 + facade', diff: '< 0.01%' },
+      keyIdea: 'Flip the sync when a slice takes over writes, so the new database is the source of truth and the old copy stays fed until it is retired.',
+      metrics: { share: '100% of /orders', blast: 'checkout (later)', systems: '2 + facade', diff: '< 0.01%' },
       metricTones: { share: 'good' },
       scene: {
-        nodes: [{ ...orders, status: 'ok' }, { ...newDb, status: 'ok', badge: 'source of truth' }, { ...legacyDb, status: 'dim', badge: 'fed by CDC' }],
+        nodes: [{ ...orders, label: 'checkout service', sub: 'a later slice', status: 'ok' }, { ...newDb, status: 'ok', badge: 'source of truth' }, { ...legacyDb, status: 'dim', badge: 'fed by CDC' }],
         links: [link('orders', 'newDb'), link('newDb', 'legacyDb', { style: 'dashed', label: 'sync back' })],
         flows: [
           { path: ['orders', 'newDb'], tone: 'request', duration: 1, delay: 0 },
           { path: ['newDb', 'legacyDb'], tone: 'data', label: 'CDC', duration: 1.4, delay: 1.1 },
         ],
-        caption: 'All order history on the new path, old copy still fed',
+        caption: 'A write-owning slice flips the direction, the old copy stays fed',
       },
     },
     {
@@ -361,23 +396,23 @@ SET    status = EXCLUDED.status;`,
       heading: 'Delete the old path, or pay for two systems forever',
       eli5: 'When nobody has used the old cake counter for a month, the bakery takes it out. If it stays, someone has to keep cleaning a counter nobody needs.',
       body: [
-        'The last step is the one teams skip: remove the old code path, the sync back to the old database, the ACL pieces for this slice and the facade rule. Wait until logs show no traffic and no job reads the old tables.',
-        'Until then you pay to run, patch and understand two systems.',
+        'The last step is the one teams skip: remove the slice\'s own old code path, the backfill and comparator jobs, and simplify the facade rule. Wait until logs show no traffic to the old handler.',
+        'The shared tables and the CDC feed stay, because checkout still writes `ORD_HDR`. Archive them when checkout moves. Until then you pay to run two systems.',
       ],
-      keyIdea: 'A migration is done when the old path is deleted.',
+      keyIdea: 'A slice is done when its old path is deleted. The shared tables go when the last slice that writes them moves.',
       metrics: { share: '100% of /orders', blast: 'order history', systems: '1 + facade (this slice)', diff: '0' },
       metricTones: { systems: 'good', diff: 'good' },
       scene: {
-        nodes: [{ ...facade, status: 'ok' }, { ...legacy, sub: 'orders code removed', status: 'dim' }, { ...orders, status: 'ok' }, { ...newDb, status: 'ok' }],
-        links: [link('facade', 'legacy', { style: 'faint' }), link('facade', 'orders'), link('orders', 'newDb')],
+        nodes: [{ ...facade, status: 'ok' }, { ...legacy, sub: 'order-history code removed', status: 'dim' }, { ...orders, status: 'ok' }, { ...newDb, status: 'ok' }, { ...legacyDb, status: 'dim', badge: 'checkout still writes' }],
+        links: [link('facade', 'legacy', { style: 'faint' }), link('facade', 'orders'), link('orders', 'newDb'), link('legacyDb', 'newDb', { style: 'dashed', label: 'CDC stays' })],
         flows: [{ path: ['facade', 'orders', 'newDb'], tone: 'request', count: 3, duration: 2 }],
         panel: {
           title: 'Delete checklist',
           icon: 'List',
           rows: [
-            { text: 'Old code path', value: 'removed' },
-            { text: 'Sync to old DB', value: 'stopped' },
-            { text: 'Old tables', value: 'archived' },
+            { text: 'Old order-history code', value: 'removed' },
+            { text: 'Backfill, comparator', value: 'deleted' },
+            { text: 'Shared tables, CDC feed', value: 'stay until checkout moves', tone: 'warn' },
             { text: 'Facade rule', value: 'simplified' },
           ],
         },

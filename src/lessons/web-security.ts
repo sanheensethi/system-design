@@ -1,45 +1,35 @@
-import type { Lesson, SceneNode } from '../engine/types';
+import type { Lesson, SceneLink, SceneNode } from '../engine/types';
 
-const users: SceneNode = { id: 'users', kind: 'client', at: [-6, 0], label: 'shoppers', sub: 'browsers' };
-const bots: SceneNode = { id: 'bots', kind: 'internet', at: [-3, 4], label: 'botnet', sub: 'hostile traffic' };
-const edge: SceneNode = { id: 'edge', kind: 'cdn', at: [-3.5, 0], label: 'edge network', sub: 'CDN, many PoPs' };
-const waf: SceneNode = { id: 'waf', kind: 'limiter', at: [-1, 0], label: 'WAF', sub: 'rules + rate limits' };
-const app: SceneNode = { id: 'app', kind: 'server', at: [1.5, -1], label: 'app servers', sub: 'shop API' };
-const db: SceneNode = { id: 'db', kind: 'db', at: [4.5, -1.5], label: 'database', sub: '2M customers' };
-const evil: SceneNode = { id: 'evil', kind: 'internet', at: [-3, 4], label: 'other site', sub: 'attacker-controlled' };
+/** Place by screen column d (right is positive) and depth s (down is positive). */
+const at = (d: number, s: number): [number, number] => [(s + d) / 2, (s - d) / 2];
+const link = (from: string, to: string, extra: Partial<SceneLink> = {}): SceneLink => ({ from, to, ...extra });
 
-const pathLinks = [
-  { from: 'users', to: 'edge' },
-  { from: 'edge', to: 'waf' },
-  { from: 'waf', to: 'app' },
-  { from: 'app', to: 'db' },
-];
-
-const tiers = [
-  { id: 'public', from: [-4.6, -1.3] as [number, number], to: [0.2, 1.3] as [number, number], label: 'public edge', tone: 'blue' as const },
-  { id: 'apptier', from: [0.6, -2.3] as [number, number], to: [2.6, 0.3] as [number, number], label: 'app subnet', tone: 'green' as const },
-  { id: 'datatier', from: [3.5, -2.8] as [number, number], to: [5.6, -0.3] as [number, number], label: 'data subnet', tone: 'amber' as const },
-];
+const shopper: SceneNode = { id: 'shopper', kind: 'client', at: at(-5.4, 0), label: 'shopper', sub: 'browser' };
+const attacker: SceneNode = { id: 'attacker', kind: 'internet', at: at(-5.4, 3.8), label: 'attacker', sub: 'hostile input', tint: 'red' };
+const waf: SceneNode = { id: 'waf', kind: 'block', size: 0.8, at: at(-1.8, 0), label: 'WAF', sub: 'known patterns', icon: 'Shield', tint: 'amber' };
+const app: SceneNode = { id: 'app', kind: 'server', at: at(1.8, 0), label: 'app servers', sub: 'shop API' };
+const db: SceneNode = { id: 'db', kind: 'db', at: at(5.4, 0), label: 'database', sub: '2M customers' };
+const evil: SceneNode = { id: 'evil', kind: 'internet', at: at(-5.4, 3.8), label: 'other site', sub: 'attacker page', tint: 'red' };
 
 export const webSecurity: Lesson = {
   id: 'web-security',
-  title: 'Web security: OWASP, DDoS, firewalls',
-  tagline: 'Stack independent layers of defense so one mistake does not become a breach, from the edge to the database grant.',
+  title: 'Web security (part 1): layers and app flaws',
+  tagline: 'Stack independent layers of defense, then close the classic holes in the app itself: injection, XSS, CSRF, broken access and weak logins.',
   minutes: 15,
   level: 'Intermediate',
   learn: [
     'Defense in depth: independent layers, each assuming the others failed',
+    'The OWASP Top 10 as a checklist of common risks',
     'How injection works and why parameterized queries stop it',
-    'Cross-site scripting and output encoding',
+    'Cross-site scripting, output encoding, CSP and HttpOnly cookies',
     'CSRF and the SameSite cookie and token defenses',
-    'Absorbing DDoS at the edge and filtering with a web application firewall',
-    'Network segmentation and least privilege to shrink the blast radius',
+    'Broken access control, safe password storage and login protection',
+    'Browser security headers: HSTS, frame-ancestors and CORS',
   ],
   metrics: [
-    { key: 'layers', label: 'Defense layers' },
-    { key: 'origin', label: 'Bad traffic at origin' },
-    { key: 'exposed', label: 'Public endpoints' },
-    { key: 'blast', label: 'Blast radius' },
+    { key: 'layers', label: 'Layers working', icon: 'Layers' },
+    { key: 'flaws', label: 'Open flaw classes', icon: 'Bug' },
+    { key: 'blast', label: 'Blast radius', icon: 'Boxes' },
   ],
   steps: [
     {
@@ -48,25 +38,35 @@ export const webSecurity: Lesson = {
       heading: 'One wall, and everything behind it is open',
       eli5: 'A castle has one gate and nothing else. Inside, every room is unlocked and the treasure sits in the hall. Get past the **gate** once and you can take anything.',
       body: [
-        'The shop runs app servers with public IP addresses. The database also has a public address, protected only by its password. The app connects as the database owner account. The only control is a login form.',
-        'Any single slip now goes all the way. One unsafe query in the search box reads the whole customers table. One flood of traffic takes the app servers down, because they face the internet directly. One leaked database password opens the data from anywhere in the world.',
-        'Security people call this a hard shell with a soft center. The fix is more layers that do not depend on each other, so a failure in one is caught by the next.',
+        'The shop runs app servers with public IP addresses. The database also has a public address, protected only by its password, and the app connects as the database owner. The only control is a login form.',
+        'Any single slip now goes all the way. Security people call this a hard shell with a soft center.',
       ],
       keyIdea: 'If a single bug or a single leaked password can reach the data, the design has one layer, however strong that layer looks.',
-      metrics: { layers: '1', origin: '100%', exposed: 'app + DB', blast: 'everything' },
+      metrics: { layers: '1', flaws: 'all', blast: 'everything' },
+      metricTones: { layers: 'bad', flaws: 'bad', blast: 'bad' },
       scene: {
-        nodes: [users, { ...bots, status: 'hot' }, { ...app, status: 'hot', badge: 'public IP' }, { ...db, status: 'hot', badge: 'public IP, owner login' }],
-        links: [
-          { from: 'users', to: 'app' },
-          { from: 'bots', to: 'app' },
-          { from: 'bots', to: 'db', style: 'dashed' },
-          { from: 'app', to: 'db' },
+        nodes: [
+          shopper,
+          { ...attacker, at: at(-1.8, 3.8), status: 'hot' },
+          { ...app, status: 'hot', badge: 'public IP' },
+          { ...db, status: 'hot', badge: 'public IP, owner login' },
         ],
+        links: [link('shopper', 'app'), link('attacker', 'app'), link('attacker', 'db', { style: 'dashed' }), link('app', 'db')],
         flows: [
-          { path: ['users', 'app'], tone: 'request', duration: 1.4 },
-          { path: ['bots', 'app'], tone: 'error', label: 'flood + probes', count: 4, duration: 1.2, delay: 0.4 },
-          { path: ['bots', 'db'], tone: 'error', label: 'port scan', duration: 1.6, delay: 1.8 },
+          { path: ['shopper', 'app'], tone: 'request', duration: 1.4 },
+          { path: ['attacker', 'app'], tone: 'error', label: 'probes', count: 3, duration: 1.4, delay: 0.5 },
+          { path: ['attacker', 'db'], tone: 'error', label: 'direct login', duration: 1.8, delay: 2 },
         ],
+        panel: {
+          title: 'What one slip reaches',
+          icon: 'Bug',
+          rows: [
+            { text: 'Unsafe search query', value: 'whole customers table', tone: 'bad' },
+            { text: 'Traffic flood', value: 'app servers down', tone: 'bad' },
+            { text: 'Leaked DB password', value: 'data, from anywhere', tone: 'bad' },
+          ],
+          footer: { text: 'Every failure goes all the way in', tone: 'bad' },
+        },
         caption: 'Everything is reachable from the internet',
       },
     },
@@ -76,45 +76,166 @@ export const webSecurity: Lesson = {
       heading: 'Defense in depth: layers that fail independently',
       eli5: 'A real castle has a moat, an outer wall, guards at the gate, locked doors inside and a vault for the gold. A thief must beat every **layer**, and each one is run by different people.',
       body: [
-        '**Defense in depth** stacks controls so that each layer assumes the one in front of it has already failed. The request path becomes: an edge network that soaks up floods, a **web application firewall** that filters known attack patterns, app code that treats all input as untrusted, a private network the database lives in, and a database account that can do only what the app needs.',
-        'The layers should fail for different reasons. A WAF rule and a parameterized query both stop injection, but the WAF fails on a clever encoding and the query fails only if a developer skips it. Two different failure causes are far less likely to line up.',
-        'The **OWASP Top 10** is a widely used list of the most common web application risks, maintained by the Open Worldwide Application Security Project. It is a good checklist for which layers you need. The next few steps walk through three classic entries.',
+        '**Defense in depth** stacks controls so each layer assumes the one in front has already failed: an edge network, a **web application firewall**, app code that treats all input as untrusted, a private network, and a database account that can do only what the app needs.',
       ],
-      keyIdea: 'Each layer should assume the layer in front of it failed, and layers should fail for different reasons.',
-      metrics: { layers: '5', origin: 'filtered', exposed: 'edge only', blast: 'contained' },
+      keyIdea: 'Each layer should assume the layer in front of it failed.',
+      metrics: { layers: '5', flaws: 'some', blast: 'contained' },
+      metricTones: { layers: 'good', blast: 'good' },
       scene: {
-        zones: tiers,
-        nodes: [users, edge, waf, app, db],
-        links: pathLinks,
-        flows: [
-          { path: ['users', 'edge', 'waf', 'app', 'db'], tone: 'request', label: 'checked at each hop', duration: 3 },
-          { path: ['db', 'app', 'waf', 'edge', 'users'], tone: 'response', duration: 3, delay: 3.1 },
+        nodes: [
+          shopper,
+          { ...waf, status: 'ok', badge: 'layer 2' },
+          { ...app, status: 'active', badge: 'layer 3: code' },
+          { ...db, status: 'ok', badge: 'layers 4 and 5' },
         ],
+        links: [link('shopper', 'waf'), link('waf', 'app'), link('app', 'db')],
+        flows: [
+          { path: ['shopper', 'waf', 'app', 'db'], tone: 'request', label: 'checked at each hop', duration: 3 },
+          { path: ['db', 'app', 'waf', 'shopper'], tone: 'response', duration: 3, delay: 3.1 },
+        ],
+        panel: {
+          title: 'Five independent layers',
+          icon: 'Layers',
+          rows: [
+            { text: '1 Edge network', value: 'soaks up floods' },
+            { text: '2 WAF', value: 'filters known patterns' },
+            { text: '3 App code', value: 'input is untrusted' },
+            { text: '4 Private network', value: 'DB not reachable' },
+            { text: '5 DB account', value: 'least privilege' },
+          ],
+        },
         caption: 'Edge, filter, code, network, permissions',
+      },
+    },
+    {
+      title: 'Different failures',
+      tag: 'concept',
+      heading: 'Layers should fail for different reasons',
+      eli5: 'The guards and the lock on the door are run by different people. A trick that fools the **guard** will not also fool the lock, so a thief needs two lucky breaks.',
+      body: [
+        'A WAF rule and a parameterized query both stop injection. The WAF fails on a clever encoding. The query fails only if a developer skips it. Two different failure causes are far less likely to line up than two copies of the same control.',
+      ],
+      keyIdea: 'Two layers with the same weakness count as one.',
+      metrics: { layers: '5', flaws: 'some', blast: 'contained' },
+      scene: {
+        nodes: [
+          { ...attacker, status: 'hot', chips: [{ text: "' OR 1=1 --", tone: 'bad' }] },
+          { ...waf, status: 'hot', badge: 'fooled by encoding' },
+          { ...app, status: 'ok', badge: 'query: bound value' },
+        ],
+        links: [link('attacker', 'waf'), link('waf', 'app')],
+        flows: [
+          { path: ['attacker', 'waf', 'app'], tone: 'error', label: 'encoded payload', duration: 2.2 },
+          { path: ['app', 'waf', 'attacker'], tone: 'response', label: '0 rows', duration: 2.2, delay: 2.4 },
+        ],
+        panel: {
+          title: 'Why two layers help',
+          icon: 'Scale',
+          rows: [
+            { text: 'WAF fails when', value: 'new encoding', tone: 'warn' },
+            { text: 'Parameterized query fails when', value: 'developer skips it', tone: 'warn' },
+            { text: 'Both fail together', value: 'rarely', tone: 'good' },
+          ],
+        },
+        caption: 'The second layer catches what the first missed',
+      },
+    },
+    {
+      title: 'OWASP',
+      tag: 'concept',
+      heading: 'The OWASP Top 10: a checklist of common risks',
+      eli5: 'Castle builders keep a famous list of the ten ways thieves most often get in. Before you build, you walk the list and check that each **door** has a lock.',
+      body: [
+        'The **OWASP Top 10** is a widely used list of the most common web application risks, kept by the Open Worldwide Application Security Project. Broken access control and injection sit near the top, alongside security misconfiguration, weak authentication and vulnerable components.',
+        'Use it to decide which layers you still lack.',
+      ],
+      keyIdea: 'The OWASP Top 10 is a checklist for which layers you still lack, not a standard you pass once.',
+      metrics: { layers: '5', flaws: 'listed', blast: '-' },
+      scene: {
+        nodes: [
+          { id: 'owasp', kind: 'block', at: at(-2.7, 0), label: 'OWASP Top 10', sub: 'risk checklist', icon: 'List', tint: 'violet' },
+          { ...app, status: 'active', badge: 'audit against list' },
+        ],
+        links: [link('owasp', 'app', { label: 'check each risk' })],
+        flows: [{ path: ['owasp', 'app'], tone: 'request', label: 'which holes?', duration: 1.8 }],
+        panel: {
+          title: 'Entries on the list',
+          icon: 'List',
+          rows: [
+            { text: 'Broken access control', value: 'this part' },
+            { text: 'Injection, including XSS', value: 'this part' },
+            { text: 'Authentication failures', value: 'this part' },
+            { text: 'Security misconfiguration', value: 'this part' },
+            { text: 'Vulnerable components, SSRF', value: 'part 2' },
+            { text: 'Logging and monitoring gaps', value: 'part 2' },
+          ],
+        },
+        caption: 'A map of where the common holes are',
       },
     },
     {
       title: 'Injection',
       tag: 'concept',
       heading: 'Injection: when data gets read as code',
-      eli5: 'A visitor writes a note for the **cook**: "one soup, and also open the vault". A careless cook reads the whole note as orders. A careful cook only ever fills the note into the "dish name" box.',
+      eli5: 'A visitor writes a note for the **cook**: "one soup, and also open the vault". A careless cook reads the whole note as orders.',
       body: [
-        '**Injection** happens when untrusted input is pasted into text that another system parses as instructions: a SQL query, a shell command, an LDAP filter. If the search box value is glued into `SELECT ... WHERE name = \'` + input + `\'`, a quote character in the input ends the string early and whatever follows becomes part of the query.',
-        'The defense is a **parameterized query** (a prepared statement). The query text, with placeholders, goes to the database separately from the values. The database parses the structure first, then binds the values as pure data. No value can change the shape of the query, whatever characters it holds.',
-        'Use the driver\'s placeholders or an ORM everywhere, including in admin tools and reports. Validate input against what you expect (an ID is digits) as a second layer, and never build shell commands from user input.',
+        '**Injection** happens when untrusted input is pasted into text that another system parses as instructions. If the search box value is glued into `WHERE name = \'` + input + `\'`, a quote in the input ends the string early and whatever follows becomes part of the query.',
+      ],
+      keyIdea: 'When data and code share one string, the data can rewrite the code.',
+      metrics: { layers: '3', flaws: 'injection', blast: 'whole table' },
+      metricTones: { flaws: 'bad', blast: 'bad' },
+      scene: {
+        nodes: [
+          { ...attacker, status: 'hot', chips: [{ text: "x' OR '1'='1", tone: 'bad' }] },
+          { ...app, status: 'hot', badge: 'glues text together' },
+          { ...db, status: 'hot', badge: 'runs the whole string' },
+        ],
+        links: [link('attacker', 'app'), link('app', 'db')],
+        flows: [
+          { path: ['attacker', 'app'], tone: 'error', label: "search: x' OR ...", duration: 1.6 },
+          { path: ['app', 'db'], tone: 'error', label: 'query now matches all', duration: 1.4, delay: 1.7 },
+          { path: ['db', 'app', 'attacker'], tone: 'error', label: '2M rows', duration: 2.4, delay: 3.2 },
+        ],
+        panel: {
+          title: 'The query the database sees',
+          icon: 'Code',
+          code: "SELECT id, email FROM customers\nWHERE name = 'x' OR '1'='1'",
+          footer: { text: 'The quote ended the string early', tone: 'bad' },
+        },
+        caption: 'The input became part of the query',
+      },
+    },
+    {
+      title: 'Parameterized',
+      tag: 'concept',
+      heading: 'Parameterized queries keep code and data apart',
+      eli5: 'A careful cook only ever copies the note into the "dish name" box on the order form. Whatever the note says, it stays a dish name, never an order.',
+      body: [
+        'A **parameterized query** keeps the query text and the values apart, so the driver or database treats values as data. Server-side prepared statements do the split on the server. Some drivers, such as psycopg2, escape and substitute on the client. Either way, no value can change the query.',
+        'Use placeholders or an ORM everywhere, including admin tools and reports. Also validate input against what you expect (an ID is digits) as a second layer.',
       ],
       keyIdea: 'Keep code and data in separate channels. Parameterized queries make it impossible for a value to rewrite the query.',
-      metrics: { layers: '5', origin: 'filtered', exposed: 'edge only', blast: 'contained' },
+      metrics: { layers: '3', flaws: 'closed', blast: 'contained' },
+      metricTones: { flaws: 'good', blast: 'good' },
       scene: {
-        zones: tiers,
-        nodes: [users, edge, waf, { ...app, status: 'active', badge: 'placeholders only' }, { ...db, status: 'ok', badge: 'value bound as data' }],
-        links: pathLinks,
-        flows: [
-          { path: ['users', 'edge', 'waf', 'app'], tone: 'request', label: 'search: odd input', duration: 2.2 },
-          { path: ['app', 'db'], tone: 'request', label: 'query + params', duration: 1, delay: 2.3 },
-          { path: ['db', 'app'], tone: 'response', label: '0 rows', duration: 1, delay: 3.4 },
+        nodes: [
+          { ...attacker, chips: [{ text: "x' OR '1'='1", tone: 'warn' }] },
+          { ...app, status: 'active', badge: 'placeholders only' },
+          { ...db, status: 'ok', badge: 'value bound as data' },
         ],
-        caption: 'The input is searched for, never executed',
+        links: [link('attacker', 'app'), link('app', 'db')],
+        flows: [
+          { path: ['attacker', 'app'], tone: 'request', label: 'search: odd input', duration: 1.6 },
+          { path: ['app', 'db'], tone: 'request', label: 'query + params', duration: 1.2, delay: 1.7 },
+          { path: ['db', 'app', 'attacker'], tone: 'response', label: '0 rows', duration: 2.2, delay: 3.1 },
+        ],
+        panel: {
+          title: 'Two separate messages',
+          icon: 'Code',
+          code: "Postgres protocol\ntext:   WHERE name = $1\nvalue:  x' OR '1'='1",
+          footer: { text: 'The input is searched for, never executed', tone: 'good' },
+        },
+        caption: 'The structure is fixed before the value arrives',
       },
       code: {
         language: 'python',
@@ -138,32 +259,137 @@ def list_products(sort):
     return db.execute(f"SELECT id, name FROM products ORDER BY {col} LIMIT 50")`,
         highlight: [3, 9, 10, 16],
       },
+      quiz: {
+        question: 'Why does a parameterized query stop SQL injection?',
+        options: [
+          'It removes quote characters from every input',
+          'Values are kept as data by the driver or database, so a value cannot change the query',
+          'It encrypts the query on the way to the database',
+          'It limits how long an input can be',
+        ],
+        answer: 1,
+        explain: 'Stripping characters misses cases and breaks valid input. Keeping values as data keeps code and data in separate channels, whatever characters a value holds.',
+      },
+    },
+    {
+      title: 'Beyond SQL',
+      tag: 'concept',
+      heading: 'Every interpreter can be injected',
+      eli5: 'Notes can trick the cook, the baker and the cellar keeper too. Each one needs their own order form.',
+      body: [
+        'The same flaw hits shell commands, LDAP filters, NoSQL queries and template engines. Never build shell commands from user input. Where placeholders cannot reach, such as a column name in `ORDER BY`, allow only values from a fixed list. If you must run a program, pass an argument list with no shell.',
+      ],
+      keyIdea: 'Treat every system that parses text as an injection target, and give each one its own safe channel.',
+      metrics: { layers: '3', flaws: 'injection', blast: 'contained' },
+      scene: {
+        nodes: [
+          { ...attacker, chips: [{ text: 'id=42; rm -rf /', tone: 'bad' }] },
+          { ...app, status: 'active', badge: 'fixed args only' },
+          { id: 'shell', kind: 'block', size: 0.8, at: at(5.4, 0), label: 'OS shell', sub: 'never from input', icon: 'Cpu', tint: 'gray', status: 'ok' },
+        ],
+        links: [link('attacker', 'app'), link('app', 'shell', { style: 'faint' })],
+        flows: [
+          { path: ['attacker', 'app'], tone: 'error', label: 'id=42; rm -rf /', duration: 1.8 },
+          { path: ['app', 'attacker'], tone: 'response', label: '400 rejected', duration: 1.8, delay: 2 },
+        ],
+        panel: {
+          title: 'Where injection hides',
+          icon: 'List',
+          rows: [
+            { text: 'SQL query', value: 'placeholders' },
+            { text: 'Shell command', value: 'arg list, shell=False' },
+            { text: 'NoSQL / LDAP filter', value: 'driver binding' },
+            { text: 'ORDER BY column', value: 'allowlist', tone: 'good' },
+          ],
+        },
+        caption: 'Rejected before it reaches any interpreter',
+      },
+      code: {
+        language: 'python',
+        title: 'A shell call built from input versus an argument list',
+        source: `import subprocess
+
+# Unsafe: the shell parses the string, so ";" starts a new command.
+subprocess.run(f"convert {name} out.png", shell=True)
+
+# Safe: a list of arguments, and no shell to interpret them.
+subprocess.run(["convert", "--", name, "out.png"], shell=False, check=True)`,
+        highlight: [4, 7],
+      },
     },
     {
       title: 'XSS',
       tag: 'concept',
-      heading: 'Cross-site scripting: encode output for where it lands',
-      eli5: 'A visitor pins a note on the castle notice board, and the note secretly contains instructions that other readers end up following. The **scribe** copies every note in plain ink so it can only ever be read, never obeyed.',
+      heading: 'Cross-site scripting: injection into a web page',
+      eli5: 'A visitor pins a note on the castle notice board, and the note secretly contains instructions that other readers end up following.',
       body: [
-        '**Cross-site scripting** (XSS) is injection into a web page. A product review containing markup is saved, then rendered into other shoppers\' pages. If the browser treats it as HTML, a script runs inside your site, with access to the page, the user\'s actions and any token stored where scripts can read it.',
-        'The core defense is **output encoding**: when you place data into HTML, convert special characters such as `<` and `"` into their escaped forms, using the rules for that context (HTML body, attribute, URL, JavaScript). Modern templating engines and frameworks such as React do this by default. Danger appears when code switches it off, for example with `innerHTML` or `dangerouslySetInnerHTML`.',
-        'Add layers behind it. A **Content Security Policy** header tells the browser which script sources are allowed, so injected inline script does not run. `HttpOnly` cookies keep session IDs out of reach of scripts. If you must accept rich text, run it through a well-maintained HTML sanitizer.',
+        '**Cross-site scripting** (XSS) is injection into a web page. In **stored** XSS, a product review containing markup is saved, then rendered into other shoppers\' pages. If the browser treats it as HTML, a script runs inside your site, with the victim\'s access.',
+        '**Reflected** XSS puts the payload in a URL that the page echoes back. **DOM-based** XSS happens when client JavaScript writes data into `innerHTML`.',
       ],
-      keyIdea: 'Treat stored user content as text. Encode it for the exact place it is written, and let CSP catch what slips through.',
-      metrics: { layers: '5', origin: 'filtered', exposed: 'edge only', blast: 'contained' },
+      keyIdea: 'XSS runs attacker code inside your own origin, with the victim\'s access.',
+      metrics: { layers: '3', flaws: 'XSS', blast: 'every viewer' },
+      metricTones: { flaws: 'bad', blast: 'bad' },
       scene: {
-        zones: tiers,
-        nodes: [{ ...users, status: 'ok', badge: 'shows text, runs nothing' }, edge, waf, { ...app, status: 'active', badge: 'escape on render' }, db],
-        links: pathLinks,
-        flows: [
-          { path: ['db', 'app'], tone: 'response', label: 'review text', duration: 1 },
-          { path: ['app', 'waf', 'edge', 'users'], tone: 'response', label: '&lt;b&gt; as text + CSP', duration: 2.4, delay: 1.1 },
+        nodes: [
+          { ...attacker, chips: [{ text: '<script>steal()</script>', tone: 'bad' }] },
+          { ...app, at: at(-1.8, 0), status: 'hot', badge: 'stores review as is' },
+          { ...db, at: at(1.8, 3.8), status: 'hot' },
+          { ...shopper, at: at(5.4, 0), status: 'hot', badge: 'script runs' },
         ],
+        links: [link('attacker', 'app', { label: 'review via the app' }), link('app', 'db'), link('app', 'shopper')],
+        flows: [
+          { path: ['attacker', 'app'], tone: 'error', label: 'review with markup', duration: 1.8 },
+          { path: ['app', 'db'], tone: 'error', label: 'saved', duration: 1.2, delay: 2 },
+          { path: ['db', 'app', 'shopper'], tone: 'error', label: 'rendered as HTML', duration: 2.2, delay: 3.4 },
+        ],
+        panel: {
+          title: 'Three kinds of XSS',
+          icon: 'Bug',
+          rows: [
+            { text: 'Stored: saved review', value: 'every viewer', tone: 'bad' },
+            { text: 'Reflected: payload in a URL', value: 'whoever clicks', tone: 'bad' },
+            { text: 'DOM-based: JS writes innerHTML', value: 'client side only', tone: 'bad' },
+          ],
+        },
+        caption: 'Attacker content becomes code in other browsers',
+      },
+    },
+    {
+      title: 'Encoding',
+      tag: 'concept',
+      heading: 'Output encoding: escape for where the data lands',
+      eli5: 'The scribe copies every note onto the notice board in plain ink, so it can only ever be **read**, never obeyed.',
+      body: [
+        '**Output encoding** converts special characters such as `<` and `"` into escaped forms when you place data into HTML, using the rules for that context (body, attribute, URL, JavaScript). Frameworks such as React do this by default. Danger appears when code switches it off, for example with `innerHTML` or `dangerouslySetInnerHTML`. If you must accept rich text, run it through a well-maintained HTML sanitizer.',
+      ],
+      keyIdea: 'Treat stored user content as text and encode it for the exact place it is written.',
+      metrics: { layers: '3', flaws: 'XSS closed', blast: 'contained' },
+      metricTones: { flaws: 'good' },
+      scene: {
+        nodes: [
+          { ...db, at: at(-5.4, 0), badge: '<b>hi</b>' },
+          { ...app, status: 'active', badge: 'escape on render' },
+          { ...shopper, at: at(5.4, 0), status: 'ok', badge: 'shows text, runs nothing' },
+        ],
+        links: [link('db', 'app'), link('app', 'shopper')],
+        flows: [
+          { path: ['db', 'app'], tone: 'response', label: 'review text', duration: 1.6 },
+          { path: ['app', 'shopper'], tone: 'response', label: '&lt;b&gt;hi&lt;/b&gt;', duration: 1.8, delay: 1.7 },
+        ],
+        panel: {
+          title: 'Same text, two outputs',
+          icon: 'Table',
+          rows: [
+            { text: 'Raw into HTML', value: 'tag runs', tone: 'bad' },
+            { text: 'Encoded: &lt;b&gt;', value: 'shown as text', tone: 'good' },
+          ],
+          footer: { text: 'Encode for the context: body, attribute, URL, JS', tone: 'muted' },
+        },
         caption: 'User content is rendered as text, never as code',
       },
       code: {
         language: 'typescript',
-        title: 'Escaping by default, and the header that backs it up',
+        title: 'Escaping by default, and the unsafe escape hatch',
         source: `// Safe: React escapes text placed in JSX.
 function Review({ text }: { text: string }) {
   return <p className="review">{text}</p>;
@@ -172,9 +398,43 @@ function Review({ text }: { text: string }) {
 // Unsafe: raw HTML from a user goes straight into the page.
 function ReviewUnsafe({ text }: { text: string }) {
   return <p dangerouslySetInnerHTML={{ __html: text }} />;
-}
-
-// Server: allow scripts only from our own origin, no inline script.
+}`,
+        highlight: [3, 8],
+      },
+    },
+    {
+      title: 'CSP',
+      tag: 'concept',
+      heading: 'Content Security Policy: a backstop for XSS',
+      eli5: 'Even if one sneaky note gets through, the board has a rule: only instructions written by the castle scribe may be followed.',
+      body: [
+        'A **Content Security Policy** header tells the browser which script sources are allowed, so injected inline script does not run. It catches what encoding missed. It does not replace encoding.',
+      ],
+      keyIdea: 'Encode first, then let CSP catch what slips through.',
+      metrics: { layers: '4', flaws: 'XSS closed', blast: 'contained' },
+      metricTones: { layers: 'good', flaws: 'good' },
+      scene: {
+        nodes: [
+          { ...app, at: at(-5.4, 0), status: 'active', badge: 'sends CSP header' },
+          { ...shopper, at: at(-1.8, 0), status: 'ok', chips: [{ text: 'inline script: blocked', tone: 'good' }] },
+        ],
+        links: [link('app', 'shopper')],
+        flows: [{ path: ['app', 'shopper'], tone: 'response', label: 'page + CSP', duration: 1.8 }],
+        panel: {
+          title: 'What the policy allows',
+          icon: 'Shield',
+          rows: [
+            { text: "script-src 'self'", value: 'no inline script', tone: 'good' },
+            { text: "object-src 'none'", value: 'no plugins', tone: 'good' },
+            { text: "base-uri 'self'", value: 'no base tag tricks', tone: 'good' },
+          ],
+        },
+        caption: 'Injected script is refused by the browser',
+      },
+      code: {
+        language: 'typescript',
+        title: 'A strict policy header',
+        source: `// Server: allow scripts only from our own origin, no inline script.
 app.use((req, res, next) => {
   res.setHeader(
     'Content-Security-Policy',
@@ -182,35 +442,103 @@ app.use((req, res, next) => {
   );
   next();
 });`,
-        highlight: [3, 8, 15],
+        highlight: [5],
+      },
+    },
+    {
+      title: 'Cookie flags',
+      tag: 'concept',
+      heading: 'HttpOnly and Secure: keep the session ID out of reach',
+      eli5: 'The **gold key** is kept in a pocket no note can reach, and it only works on the covered road.',
+      body: [
+        '`HttpOnly` keeps a cookie out of reach of scripts, so XSS cannot read the session ID. `Secure` sends it only over HTTPS. Set both on every session cookie.',
+      ],
+      keyIdea: 'Even when a script runs, it should find no session ID to steal.',
+      metrics: { layers: '4', flaws: 'XSS closed', blast: 'contained' },
+      metricTones: { layers: 'good', flaws: 'good' },
+      scene: {
+        nodes: [
+          { ...shopper, at: at(-2.7, 0), status: 'ok', chips: [{ text: 'script runs anyway', tone: 'warn' }] },
+          { id: 'cookie', kind: 'block', size: 0.8, at: at(2.7, 0), label: 'session cookie', sub: 'HttpOnly, Secure', icon: 'KeyRound', tint: 'green', status: 'ok' },
+        ],
+        links: [link('shopper', 'cookie', { label: 'scripts cannot read', style: 'dashed' })],
+        flows: [{ path: ['shopper', 'cookie'], tone: 'error', label: 'document.cookie: empty', duration: 2 }],
+        panel: {
+          title: 'Cookie flags',
+          icon: 'KeyRound',
+          rows: [
+            { text: 'HttpOnly', value: 'invisible to JS', tone: 'good' },
+            { text: 'Secure', value: 'HTTPS only', tone: 'good' },
+          ],
+          footer: { text: 'Set-Cookie: sid=...; HttpOnly; Secure', tone: 'muted' },
+        },
+        caption: 'Injected script finds no token',
       },
     },
     {
       title: 'CSRF',
       tag: 'concept',
       heading: 'CSRF: a request the user never meant to send',
-      eli5: 'A stranger tricks you into carrying a sealed letter to the castle. The **gatekeeper** sees your face and lets it in. Now the gatekeeper only accepts letters that carry a secret mark given to you inside the castle.',
+      eli5: 'A stranger tricks you into carrying a sealed letter to the castle. The **gatekeeper** sees your face and lets it in, without asking whether you meant to bring it.',
       body: [
         '**Cross-site request forgery** (CSRF) abuses the fact that browsers attach cookies automatically. A shopper is logged in to the shop. They visit another site, which quietly submits a form to `shop.example/account/email`. The browser adds the session cookie, and the shop sees a valid, logged-in request it did not ask for.',
-        'The first defense is the cookie itself. With `SameSite=Lax` (the default in current major browsers when no value is set) or `Strict`, the browser leaves the cookie off cross-site form posts and background requests. Set it explicitly rather than relying on a default.',
-        'The second is a **CSRF token**: a random value tied to the session, put in each form or sent as a header, and checked by the server on every state-changing request. Another site cannot read it, so it cannot forge it. Also keep `GET` free of side effects, and APIs that use an `Authorization` header instead of cookies are not exposed in the same way.',
       ],
-      keyIdea: 'Cookies prove which browser sent a request, not that the user intended it. SameSite cookies and a per-session token close that gap.',
-      metrics: { layers: '5', origin: 'filtered', exposed: 'edge only', blast: 'contained' },
+      keyIdea: 'Cookies prove which browser sent a request, not that the user intended it.',
+      metrics: { layers: '4', flaws: 'CSRF', blast: 'one account' },
+      metricTones: { flaws: 'bad' },
       scene: {
-        zones: tiers,
-        nodes: [{ ...users, sub: 'logged in to shop' }, { ...evil, status: 'hot' }, edge, waf, { ...app, status: 'ok', badge: 'token missing: 403' }],
-        links: [
-          { from: 'users', to: 'edge' },
-          { from: 'evil', to: 'users', style: 'dashed' },
-          { from: 'edge', to: 'waf' },
-          { from: 'waf', to: 'app' },
+        nodes: [
+          { ...evil, status: 'hot' },
+          { ...shopper, at: at(-1.8, 0), sub: 'logged in to shop', badge: 'session cookie' },
+          { ...app, status: 'hot', badge: 'email changed' },
         ],
+        links: [link('evil', 'shopper', { style: 'dashed' }), link('shopper', 'app')],
         flows: [
-          { path: ['evil', 'users'], tone: 'event', label: 'hidden form', duration: 1.2 },
-          { path: ['users', 'edge', 'waf', 'app'], tone: 'request', label: 'POST, no token', duration: 2.2, delay: 1.3 },
-          { path: ['app', 'waf', 'edge', 'users'], tone: 'error', label: '403', duration: 2.2, delay: 3.6 },
+          { path: ['evil', 'shopper'], tone: 'event', label: 'hidden form', duration: 1.4 },
+          { path: ['shopper', 'app'], tone: 'error', label: 'POST /account/email + cookie', duration: 2, delay: 1.5 },
         ],
+        panel: {
+          title: 'The forged request',
+          icon: 'Code',
+          code: 'POST /account/email HTTP/1.1\nHost: shop.example\nCookie: session=abc123\n\nemail=attacker@evil.example',
+          footer: { text: 'Valid cookie, unintended action', tone: 'bad' },
+        },
+        caption: 'The browser attaches the cookie by itself',
+      },
+    },
+    {
+      title: 'CSRF defenses',
+      tag: 'concept',
+      heading: 'SameSite cookies and a per-session token',
+      eli5: 'Now the gatekeeper only accepts letters that carry a secret mark given to you inside the castle. A stranger cannot copy the **mark**, so the forged letter is turned away.',
+      body: [
+        'Set `SameSite=Lax` or `Strict` explicitly, so the browser leaves the cookie off cross-site form posts. Chrome-based browsers default to Lax when it is unset, but others do not. SameSite is site-based, so a hostile subdomain still counts as same-site.',
+        'The primary defense is a **CSRF token**: a random value tied to the session, sent in each form or header and checked on every state-changing request. Another site cannot read it. Keep `GET` free of side effects.',
+      ],
+      keyIdea: 'SameSite cookies and a per-session token close the gap between "this browser" and "this user meant it".',
+      metrics: { layers: '5', flaws: 'CSRF closed', blast: 'contained' },
+      metricTones: { flaws: 'good' },
+      scene: {
+        nodes: [
+          { ...evil, status: 'hot' },
+          { ...shopper, at: at(-1.8, 0), sub: 'logged in to shop' },
+          { ...app, status: 'ok', badge: 'token missing: 403' },
+        ],
+        links: [link('evil', 'shopper', { style: 'dashed' }), link('shopper', 'app')],
+        flows: [
+          { path: ['evil', 'shopper'], tone: 'event', label: 'hidden form', duration: 1.2 },
+          { path: ['shopper', 'app'], tone: 'request', label: 'POST, no token, no cookie', duration: 2, delay: 1.3 },
+          { path: ['app', 'shopper'], tone: 'error', label: '403', duration: 2, delay: 3.4 },
+        ],
+        panel: {
+          title: 'Two checks on state changes',
+          icon: 'Shield',
+          rows: [
+            { text: 'Cookie: SameSite=Lax', value: 'not sent cross-site', tone: 'good' },
+            { text: 'Header: X-CSRF-Token', value: 'must match session', tone: 'good' },
+            { text: 'GET requests', value: 'no side effects' },
+          ],
+        },
         caption: 'The forged request lacks the secret token',
       },
       quiz: {
@@ -226,152 +554,234 @@ app.use((req, res, next) => {
       },
     },
     {
-      title: 'DDoS',
+      title: 'Access control',
       tag: 'case',
-      heading: 'Case: a flood far bigger than the origin',
-      eli5: 'A huge crowd swarms the road to the castle so real visitors cannot reach the gate. The castle hires a ring of **outer gates** across the whole country, each big enough to turn the crowd away near where it starts.',
+      heading: 'Broken access control: user 42 reads order 981',
+      eli5: 'The guard checks that you have a ticket, but never checks whose room the ticket is for. Any guest can walk into any **room** just by changing the number on the door.',
       body: [
-        'On a sale day a botnet sends hundreds of gigabits per second at the shop. The data center link is 10 Gbps. No server tuning helps: the pipe is full before a packet reaches a machine. This is a **volumetric** attack. Others target protocols (floods of half-open connections) or the application (many expensive, valid-looking requests).',
-        'You absorb the volume at the **edge**. A CDN or DDoS protection service announces your address from many points of presence (anycast), so the flood is spread across a network built with far more capacity than one site. Floods of malformed or unwanted packets are dropped there. The origin only accepts connections from the edge provider\'s address ranges, so its real IP is not worth attacking directly.',
-        'Application-layer floods look like real users and need smarter filtering: per-client rate limits from the rate limiting lesson, challenges for suspicious clients, and caching so most requests never reach the origin anyway.',
+        'The top OWASP risk. `GET /orders/981` checks that the caller is logged in, but not that order 981 belongs to them. Changing the ID in the URL (an **IDOR**) reads strangers\' orders. A WAF cannot see this, because the request looks normal.',
+        'Check ownership on the server for every object, on every request. Deny by default, and never trust a role or ID sent by the client.',
       ],
-      keyIdea: 'You cannot out-provision a botnet at one site. Spread the flood across a large edge network and hide the origin behind it.',
-      metrics: { layers: '5', origin: '<1% of flood', exposed: 'edge only', blast: 'edge absorbs' },
+      keyIdea: 'Authentication says who you are. Authorization must be checked again for every object you touch.',
+      metrics: { layers: '4', flaws: 'access control', blast: 'every order' },
+      metricTones: { flaws: 'bad', blast: 'bad' },
       scene: {
-        zones: tiers,
-        nodes: [users, { ...bots, status: 'hot', badge: '100s of Gbps' }, { ...edge, status: 'active', badge: 'absorbs + drops' }, waf, { ...app, status: 'ok', badge: 'edge IPs only' }],
-        links: [{ from: 'users', to: 'edge' }, { from: 'bots', to: 'edge' }, { from: 'edge', to: 'waf' }, { from: 'waf', to: 'app' }],
-        flows: [
-          { path: ['bots', 'edge'], tone: 'error', label: 'flood', count: 7, duration: 1 },
-          { path: ['users', 'edge', 'waf', 'app'], tone: 'request', label: 'real shopper', duration: 2.4, delay: 0.6 },
-          { path: ['app', 'waf', 'edge', 'users'], tone: 'response', duration: 2.4, delay: 3.1 },
+        nodes: [
+          { ...shopper, chips: [{ text: 'GET /orders/981', tone: 'warn' }], sub: 'user 42' },
+          { ...app, status: 'active', badge: 'owner check' },
+          { ...db, status: 'ok', badge: 'order 981: user 77' },
         ],
-        caption: 'The flood dies at the edge, shoppers get through',
+        links: [link('shopper', 'app'), link('app', 'db')],
+        flows: [
+          { path: ['shopper', 'app'], tone: 'request', label: 'GET /orders/981', duration: 1.6 },
+          { path: ['app', 'db'], tone: 'request', label: 'order 981', duration: 1.2, delay: 1.7 },
+          { path: ['app', 'shopper'], tone: 'error', label: '404 not yours', duration: 1.8, delay: 3.1 },
+        ],
+        panel: {
+          title: 'The check that is missing',
+          icon: 'Code',
+          code: 'order = db.get(order_id)\nif order.user_id != session.user_id:\n    return 404   # deny by default\nreturn order',
+          footer: { text: 'Without it, change the ID, read anyone\'s data', tone: 'bad' },
+        },
+        caption: 'Ownership is checked on every object',
       },
     },
     {
-      title: 'WAF',
-      tag: 'tradeoff',
-      heading: 'The web application firewall: a filter with false positives',
-      eli5: 'Guards at the **inner gate** check every visitor against a list of known tricks and turn away anyone carrying a crowbar. Sometimes they stop an honest builder too, so they watch first before they start blocking.',
-      body: [
-        'A network firewall decides by address and port. A **web application firewall** (WAF) reads HTTP: paths, headers, bodies. It blocks requests that match known attack patterns for injection and XSS, enforces rate limits per client, and can block by country or reputation. Managed rule sets are updated by the vendor when a new widespread flaw appears, which buys time to patch.',
-        'The price is **false positives**. A recipe site whose users post text with SQL-like words, or a developer forum full of code, will trip generic rules. Run new rules in count-only mode first, look at what they would have blocked, then switch to block.',
-        'A WAF is a layer, never the fix. Encodings and new tricks get past pattern matching, and a WAF knows nothing of your business rules. It cannot tell that user 42 should not read order 981. Keep the parameterized queries and authorization checks behind it.',
-      ],
-      keyIdea: 'A WAF filters common attacks at the door and buys patch time. It complements safe code, it does not replace it.',
-      metrics: { layers: '5', origin: 'filtered', exposed: 'edge only', blast: 'contained' },
-      scene: {
-        zones: tiers,
-        nodes: [users, { ...bots, label: 'scanner', sub: 'probing forms' }, edge, { ...waf, status: 'active', badge: 'rule match: block' }, app],
-        links: [{ from: 'users', to: 'edge' }, { from: 'bots', to: 'edge' }, { from: 'edge', to: 'waf' }, { from: 'waf', to: 'app' }],
-        flows: [
-          { path: ['bots', 'edge', 'waf'], tone: 'request', label: 'injection pattern', count: 3, duration: 1.8 },
-          { path: ['waf', 'edge', 'bots'], tone: 'error', label: '403', duration: 1.8, delay: 1.9 },
-          { path: ['users', 'edge', 'waf', 'app'], tone: 'request', label: 'normal POST', duration: 2.4, delay: 1 },
-        ],
-        caption: 'Known patterns stop at the filter',
-      },
-    },
-    {
-      title: 'Segmentation',
+      title: 'Hashes',
       tag: 'concept',
-      heading: 'Network segmentation: only the next layer may talk to you',
-      eli5: 'The castle is split into courtyards with their own doors. Visitors reach only the outer yard, cooks reach only the kitchen, and only the cooks\' door leads to the **vault room**.',
+      heading: 'Store hashes, never passwords',
+      eli5: 'The castle never keeps the secret words themselves, only a scrambled copy that takes a long time to make. A thief who steals the book still cannot read the **words**.',
       body: [
-        'Put each tier in its own subnet with rules that allow only the traffic it needs. The edge is the only thing with a public address. The app subnet accepts connections only from the WAF or load balancer. The data subnet accepts port 5432 only from the app subnet. Everything else is denied by default.',
-        'Now the leaked database password from step one is much less useful, because nothing on the internet can reach the database at all. A compromised app server can talk to the database, but it cannot reach the payroll system in another segment.',
-        'Admin access goes through one audited path, such as a bastion host or a session manager with single sign-on, never through SSH open to the world. Watch the rules over time: "temporary" allow-all rules are a common way for segments to quietly merge.',
+        'Store only hashes made with a slow, salted algorithm such as argon2 or bcrypt. A stolen database then gives the attacker one hash per user, and each guess costs real time.',
+        'To check a login, hash the attempt and compare. Nothing is ever decrypted.',
       ],
-      keyIdea: 'Segmentation turns "reachable from anywhere" into "reachable only from the layer in front", so one breach cannot walk sideways.',
-      metrics: { layers: '5', origin: 'filtered', exposed: 'edge only', blast: 'one segment' },
+      keyIdea: 'A stolen database should give attackers slow hashes, and no passwords.',
+      metrics: { layers: '5', flaws: 'weak auth', blast: 'contained' },
+      metricTones: { blast: 'good' },
       scene: {
-        zones: tiers,
-        nodes: [{ ...bots, label: 'internet' }, { ...edge, status: 'ok', badge: 'only public IP' }, waf, { ...app, badge: 'from WAF only' }, { ...db, status: 'ok', badge: '5432 from app only' }],
-        links: [{ from: 'bots', to: 'edge' }, { from: 'edge', to: 'waf' }, { from: 'waf', to: 'app' }, { from: 'app', to: 'db' }, { from: 'bots', to: 'db', style: 'faint' }],
-        flows: [
-          { path: ['bots', 'db'], tone: 'error', label: 'no route', duration: 1.6 },
-          { path: ['edge', 'waf', 'app', 'db'], tone: 'request', label: 'allowed path', duration: 2.4, delay: 1.7 },
+        nodes: [
+          { ...attacker, chips: [{ text: 'stolen db dump', tone: 'bad' }] },
+          { ...db, at: at(-1.8, 0), status: 'ok', badge: 'argon2 hash + salt' },
         ],
-        caption: 'Each tier accepts traffic only from the tier before it',
-      },
-    },
-    {
-      title: 'Least privilege',
-      tag: 'concept',
-      heading: 'Least privilege: shrink what a stolen identity can do',
-      eli5: 'The cook\'s key opens the pantry and nothing else. If someone steals it, they get flour and eggs. The **vault** needs a different key that the cook never carries.',
-      body: [
-        'Assume an attacker eventually runs code as your app. What they can do next equals what the app\'s identity is allowed to do. As database owner they can drop tables, read every schema and create new logins. As a narrow role they get much less.',
-        '**Least privilege** means each identity gets the smallest set of permissions its job needs. The shop API reads and writes orders and products and reads, never writes, the pricing table. Migrations run with a separate account, only during deploys. Reporting uses a read-only replica account. The same applies to cloud roles: the image resizer may read one bucket, not every bucket.',
-        'Review grants regularly and remove the ones no longer used. Combine this with the secrets manager from the encryption lesson, so each service fetches only its own credentials.',
-      ],
-      keyIdea: 'Give every identity the minimum it needs, so a compromise in one place stays a small incident.',
-      metrics: { layers: '5', origin: 'filtered', exposed: 'edge only', blast: 'one role' },
-      scene: {
-        zones: tiers,
-        nodes: [waf, { ...app, status: 'active', badge: 'role: shop_api' }, { ...db, status: 'ok', badge: 'DROP denied' }],
-        links: [{ from: 'waf', to: 'app' }, { from: 'app', to: 'db' }],
-        flows: [
-          { path: ['app', 'db'], tone: 'request', label: 'INSERT order', duration: 1 },
-          { path: ['db', 'app'], tone: 'response', label: 'ok', duration: 1, delay: 1.1 },
-          { path: ['app', 'db'], tone: 'request', label: 'DROP TABLE', duration: 1, delay: 2.3 },
-          { path: ['db', 'app'], tone: 'error', label: 'permission denied', duration: 1, delay: 3.4 },
-        ],
-        caption: 'The app can do its job and nothing more',
+        links: [link('attacker', 'db', { label: 'copied out', style: 'dashed' })],
+        flows: [{ path: ['db', 'attacker'], tone: 'error', label: 'hashes, slow to crack', duration: 2 }],
+        panel: {
+          title: 'Password storage',
+          icon: 'KeyRound',
+          rows: [
+            { text: 'Algorithm', value: 'argon2 or bcrypt', tone: 'good' },
+            { text: 'Salt', value: 'unique per password', tone: 'good' },
+            { text: 'Plain text passwords', value: 'never', tone: 'bad' },
+          ],
+        },
+        caption: 'The dump is slow to crack',
       },
       code: {
-        language: 'sql',
-        title: 'A narrow database role for the shop API (Postgres)',
-        source: `-- The app logs in as shop_api, never as the owner.
-CREATE ROLE shop_api LOGIN;
+        language: 'python',
+        title: 'Hash on save, verify on login (argon2)',
+        source: `from argon2 import PasswordHasher
+from argon2.exceptions import VerifyMismatchError
 
-GRANT CONNECT ON DATABASE shop TO shop_api;
-GRANT USAGE ON SCHEMA public TO shop_api;
+ph = PasswordHasher()   # argon2id, random salt per hash
 
-GRANT SELECT, INSERT, UPDATE ON orders, order_items TO shop_api;
-GRANT SELECT ON products, prices TO shop_api;
-GRANT USAGE ON SEQUENCE orders_id_seq TO shop_api;
+def save(password):
+    return ph.hash(password)   # store this, never the password
 
--- No DELETE, no DDL, no access to staff or payroll tables.
-REVOKE ALL ON staff, payroll FROM shop_api;
-
--- Migrations use a different role, only from the deploy pipeline.
-CREATE ROLE shop_migrator LOGIN;`,
-        highlight: [2, 7, 8, 12],
+def check(stored, attempt):
+    try:
+        return ph.verify(stored, attempt)
+    except VerifyMismatchError:
+        return False`,
+        highlight: [4, 7, 11],
+      },
+    },
+    {
+      title: 'Throttle and MFA',
+      tag: 'concept',
+      heading: 'Slow down guessing and credential stuffing',
+      eli5: 'After a few wrong guesses at the **door**, the guard makes you wait longer each time and asks for a second proof.',
+      body: [
+        'Limit attempts per account with growing delays rather than a hard lock, because a lockout lets an attacker block real users. Offer multi-factor authentication.',
+        'Credential stuffing tries leaked passwords from other sites, from many IPs, so per-IP limits miss a botnet. Add breached-password checks and device or bot signals.',
+      ],
+      keyIdea: 'Guessing should get slower with every miss, and passwords leaked elsewhere should not work here.',
+      metrics: { layers: '5', flaws: 'weak auth closed', blast: 'contained' },
+      metricTones: { flaws: 'good' },
+      scene: {
+        nodes: [
+          { ...attacker, chips: [{ text: 'POST /login x 5000', tone: 'bad' }] },
+          { ...app, status: 'active', badge: 'backoff per account' },
+          { ...db, status: 'ok' },
+        ],
+        links: [link('attacker', 'app', { label: 'credential stuffing', labelTone: 'warn' }), link('app', 'db')],
+        flows: [
+          { path: ['attacker', 'app'], tone: 'error', label: 'guesses', count: 4, duration: 1.4 },
+          { path: ['app', 'attacker'], tone: 'error', label: '429, retry later', duration: 1.6, delay: 1.6 },
+        ],
+        panel: {
+          title: 'Login protections',
+          icon: 'KeyRound',
+          rows: [
+            { text: 'Attempts per account', value: 'backoff', tone: 'good' },
+            { text: 'Second factor', value: 'MFA offered', tone: 'good' },
+            { text: 'Breached passwords', value: 'rejected', tone: 'good' },
+            { text: 'Device and bot signals', value: 'challenge', tone: 'good' },
+          ],
+        },
+        caption: 'Each miss costs the attacker more time',
+      },
+    },
+    {
+      title: 'Browser headers',
+      tag: 'concept',
+      heading: 'Security headers: HSTS and frame-ancestors',
+      eli5: 'The castle sends every visitor a few house rules to carry: always use the covered road, and never let another house put our **door** inside a picture frame.',
+      body: [
+        '`Strict-Transport-Security` (**HSTS**) tells the browser to use HTTPS only for your domain, so a downgrade to plain HTTP is refused. `frame-ancestors \'none\'` (or `X-Frame-Options: DENY`) stops other sites from loading yours in a hidden frame, which blocks **clickjacking**.',
+        '`X-Content-Type-Options: nosniff` stops the browser guessing a file is a script.',
+      ],
+      keyIdea: 'A few response headers switch on protections the browser already has.',
+      metrics: { layers: '5', flaws: 'misconfig closed', blast: 'contained' },
+      metricTones: { flaws: 'good' },
+      scene: {
+        nodes: [
+          { ...app, at: at(-5.4, 0), status: 'active', badge: 'adds headers' },
+          { ...shopper, at: at(-1.8, 0), status: 'ok', badge: 'HTTPS only' },
+          { ...evil, at: at(2.7, 0), status: 'dim', chips: [{ text: 'iframe: refused', tone: 'good' }] },
+        ],
+        links: [link('app', 'shopper'), link('evil', 'shopper', { style: 'dashed' })],
+        flows: [{ path: ['app', 'shopper'], tone: 'response', label: 'page + headers', duration: 1.8 }],
+        panel: {
+          title: 'Response headers',
+          icon: 'Code',
+          code: 'Strict-Transport-Security: max-age=31536000\nContent-Security-Policy: frame-ancestors \'none\'\nX-Content-Type-Options: nosniff\nSet-Cookie: sid=...; Secure; HttpOnly; SameSite=Lax',
+          footer: { text: 'Cheap to add, easy to forget', tone: 'muted' },
+        },
+        caption: 'The browser enforces the house rules',
+      },
+    },
+    {
+      title: 'CORS',
+      tag: 'tradeoff',
+      heading: 'CORS: loosen the same-origin rule on purpose',
+      eli5: 'By default each house only talks to its own family. A **guest list** at the door names which other houses may read our messages, and the shorter the list, the safer.',
+      body: [
+        'Browsers stop a page on one origin from reading responses from another. **CORS** headers let the server opt in with `Access-Control-Allow-Origin`. Name exact origins. Echoing the request Origin with `Allow-Credentials: true` lets any site read logged-in data. `*` is fine only for public, cookie-free data and is refused with credentials.',
+        'CORS only hides the response. The request is still sent and acted on, so CSRF protection is still needed. Non-simple requests get a preflight first.',
+      ],
+      keyIdea: 'CORS is an allowlist of readers. Keep it exact.',
+      metrics: { layers: '5', flaws: 'misconfig closed', blast: 'contained' },
+      scene: {
+        nodes: [
+          { id: 'partner', kind: 'client', at: at(-5.4, 0), label: 'app.shop.example', sub: 'allowed origin' },
+          { ...app, status: 'active', badge: 'allowlist' },
+          { ...evil, at: at(-1.8, 3.8), status: 'hot' },
+        ],
+        links: [link('partner', 'app'), link('evil', 'app', { style: 'dashed' })],
+        flows: [
+          { path: ['partner', 'app'], tone: 'request', label: 'Origin: app.shop.example', duration: 1.8 },
+          { path: ['app', 'partner'], tone: 'response', label: 'Allow-Origin: app', duration: 1.8, delay: 1.9 },
+          { path: ['evil', 'app'], tone: 'error', label: 'Origin: evil.example', duration: 1.8, delay: 4 },
+          { path: ['app', 'evil'], tone: 'error', label: 'no Allow-Origin header', duration: 1.8, delay: 6 },
+        ],
+        panel: {
+          title: 'Origin allowlist',
+          icon: 'List',
+          rows: [
+            { text: 'https://app.shop.example', value: 'allowed', tone: 'good' },
+            { text: 'https://evil.example', value: 'no header sent', tone: 'good' },
+            { text: 'Reflect any Origin + Allow-Credentials: true', value: 'never', tone: 'bad' },
+          ],
+        },
+        caption: 'Only listed origins may read the response',
       },
     },
     {
       title: 'Recap',
       tag: 'recap',
-      heading: 'Layers that each assume the others failed',
-      eli5: 'The castle now has outer gates spread across the land, guards who know the tricks, cooks who read notes carefully, separate courtyards, and keys that open only one room. Beating one **layer** gets a thief almost nothing.',
+      heading: 'App-level defenses, each assuming the others failed',
+      eli5: 'The castle now has notes read carefully, a notice board in plain ink, sealed letters with marks, a room check at every door, scrambled secret words and house rules for visitors. Beating one **layer** gets a thief almost nothing.',
       body: [
-        '**Defense in depth** stacks independent controls. In the code: **parameterized queries** stop injection, **output encoding** and CSP stop XSS, and **SameSite cookies** plus CSRF tokens stop forged requests. At the edge: a large edge network absorbs **DDoS** floods and hides the origin, and a **WAF** filters known patterns, with care for false positives.',
-        'Behind it all, **network segmentation** limits who can reach each tier, and **least privilege** limits what each identity can do once it is in. The OWASP Top 10 is a useful checklist for which of these you still lack.',
+        '**Parameterized queries** stop injection. **Output encoding**, CSP and HttpOnly stop XSS. **SameSite** and CSRF tokens stop forged requests. Ownership checks stop IDOR, slow hashes and limits protect logins, and headers and exact CORS lists tighten the browser. Part 2 covers the edge and the network.',
       ],
-      keyIdea: 'No single control is perfect. Security comes from layers that fail for different reasons and from keeping each breach small.',
-      metrics: { layers: '5', origin: '<1% of flood', exposed: 'edge only', blast: 'one role' },
+      keyIdea: 'No single control is perfect. Layers that fail for different reasons keep each mistake small.',
+      metrics: { layers: '5', flaws: 'app flaws closed', blast: 'contained' },
+      metricTones: { layers: 'good', flaws: 'good', blast: 'good' },
       scene: {
-        zones: tiers,
-        nodes: [users, { ...bots, status: 'dim' }, { ...edge, status: 'ok' }, { ...waf, status: 'ok' }, app, { ...db, status: 'ok' }],
-        links: [...pathLinks, { from: 'bots', to: 'edge' }],
-        flows: [
-          { path: ['bots', 'edge'], tone: 'error', count: 3, duration: 1 },
-          { path: ['users', 'edge', 'waf', 'app', 'db'], tone: 'request', duration: 3, delay: 0.5 },
-          { path: ['db', 'app', 'waf', 'edge', 'users'], tone: 'response', duration: 3, delay: 3.6 },
+        nodes: [
+          { ...shopper, status: 'ok' },
+          { ...waf, status: 'ok' },
+          { ...app, status: 'ok', badge: 'input, output, owner checked' },
+          { ...db, status: 'ok' },
         ],
+        links: [link('shopper', 'waf'), link('waf', 'app'), link('app', 'db')],
+        flows: [
+          { path: ['shopper', 'waf', 'app', 'db'], tone: 'request', duration: 3 },
+          { path: ['db', 'app', 'waf', 'shopper'], tone: 'response', duration: 3, delay: 3.1 },
+        ],
+        panel: {
+          title: 'Flaw and defense',
+          icon: 'Shield',
+          rows: [
+            { text: 'Injection', value: 'parameterized queries' },
+            { text: 'XSS', value: 'encoding + CSP' },
+            { text: 'CSRF', value: 'SameSite + token' },
+            { text: 'IDOR', value: 'owner check' },
+            { text: 'Weak logins', value: 'hashes + limits' },
+          ],
+        },
+        caption: 'Part 2: the edge, the network and permissions',
       },
       quiz: {
-        question: 'Your WAF blocks common injection patterns. A teammate says the team can stop using parameterized queries. What is the best response?',
+        question: 'A user changes /orders/981 to /orders/982 and sees another customer\'s order. The WAF logged nothing. Why, and what fixes it?',
         options: [
-          'Agree, the WAF already filters injection',
-          'Disagree: a WAF matches patterns and can be bypassed, while parameterized queries remove the flaw in the code itself',
-          'Agree, as long as the database uses TLS',
-          'Disagree, because a WAF only works against DDoS',
+          'The WAF is misconfigured, so add more rules',
+          'The request looks normal. The server must check that the order belongs to the caller',
+          'Output encoding is missing on the order page',
+          'A CSRF token is missing from the URL',
         ],
         answer: 1,
-        explain: 'Defense in depth needs layers that fail for different reasons. Pattern matching misses new encodings. Parameterized queries make the query structure fixed regardless of input, so they stay as the primary defense and the WAF is a backstop.',
+        explain: 'Broken access control is a logic flaw with valid-looking requests. Only the server, which knows who owns each order, can fix it with an ownership check on every request.',
       },
     },
   ],

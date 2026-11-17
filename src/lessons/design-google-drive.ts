@@ -1,100 +1,178 @@
-import type { Lesson, SceneNode } from '../engine/types';
+import type { Lesson, SceneLink, SceneNode } from '../engine/types';
 
-// Main layout. Top row (x + y = -4) carries file bytes, bottom row (x + y = 2.5) carries metadata and notifications.
-const laptop: SceneNode = { id: 'laptop', kind: 'client', at: [-5.25, 1.25], label: 'laptop', sub: 'desktop client' };
-const blocks: SceneNode = { id: 'blocks', kind: 'service', at: [-3.7, -0.3], label: 'block servers', sub: 'compress, encrypt' };
-const store: SceneNode = { id: 'store', kind: 'storage', at: [-2.3, -1.7], label: 'block store', sub: 'object storage' };
-const vault: SceneNode = { id: 'vault', kind: 'vault', at: [-0.9, -3.1], label: 'KMS', sub: 'data keys' };
-const api: SceneNode = { id: 'api', kind: 'server', at: [-0.75, 3.25], label: 'API servers', sub: 'metadata calls' };
-const cache: SceneNode = { id: 'cache', kind: 'cache', at: [0.55, 1.95], label: 'meta cache', sub: 'versioned keys' };
-const db: SceneNode = { id: 'db', kind: 'db', at: [1.85, 0.65], label: 'metadata DB', sub: 'SQL, sharded' };
-const notify: SceneNode = { id: 'notify', kind: 'service', at: [3.15, -0.65], label: 'notification', sub: 'long poll' };
-const phone: SceneNode = { id: 'phone', kind: 'phone', at: [4.45, -1.95], label: 'phone', sub: 'same account' };
+/** Place by screen column d (right is positive) and depth s (down is positive). */
+const at = (d: number, s: number): [number, number] => [(s + d) / 2, (s - d) / 2];
+const link = (from: string, to: string, extra: Partial<SceneLink> = {}): SceneLink => ({ from, to, ...extra });
 
-// Extra nodes that appear in one or two steps, placed on free spots of the same grid.
-const single: SceneNode = { id: 'single', kind: 'server', at: [-0.375, -0.375], label: 'one server', sub: 'disk + MySQL' };
-const bus: SceneNode = { id: 'bus', kind: 'queue', at: [-0.9, -3.1], label: 'change bus', sub: 'pub/sub' };
-const standby: SceneNode = { id: 'standby', kind: 'replica', at: [-0.9, -3.1], label: 'sync standby', sub: 'same commits' };
-const cold: SceneNode = { id: 'cold', kind: 'storage', at: [-0.9, -3.1], label: 'cold tier', sub: 'idle 90+ days' };
-const gc: SceneNode = { id: 'gc', kind: 'worker', at: [-3.7, -0.3], label: 'GC sweeper', sub: 'refs = 0' };
-const notify2: SceneNode = { id: 'notify2', kind: 'service', at: [-0.1, -3.9], label: 'notification 2', sub: 'takes reconnects' };
+// Layout: the byte path runs along the top (s = -3.5), the metadata path along the bottom (s = 3.5).
+const laptop: SceneNode = { id: 'laptop', kind: 'client', at: at(-5.4, 0), label: 'laptop', sub: 'desktop client' };
+const phone: SceneNode = { id: 'phone', kind: 'phone', at: at(5.4, 0), label: 'phone', sub: 'same account' };
+const single: SceneNode = { id: 'single', kind: 'server', at: at(0, 0), label: 'one server', sub: 'disk + MySQL' };
+const blocks: SceneNode = { id: 'blocks', kind: 'block', at: at(-1.8, -3.5), label: 'block servers', sub: 'verify, pack', icon: 'Layers', tint: 'teal' };
+const store: SceneNode = { id: 'store', kind: 'storage', at: at(1.8, -3.5), label: 'block store', sub: 'object storage' };
+const vault: SceneNode = { id: 'vault', kind: 'vault', at: at(5.4, -3.5), label: 'KMS', sub: 'data keys' };
+const api: SceneNode = { id: 'api', kind: 'block', at: at(-1.8, 3.5), label: 'API servers', sub: 'metadata calls', icon: 'Server', tint: 'violet' };
+const db: SceneNode = { id: 'db', kind: 'db', at: at(1.8, 3.5), label: 'metadata DB', sub: 'SQL, sharded' };
+
+const same = { changes: '3,500/s peak', upload: '600 TB/day', stored: '500 PB', sync: 'target < 5 s' };
 
 export const designGoogleDrive: Lesson = {
   id: 'design-google-drive',
-  title: 'Design Google Drive',
+  title: 'Design Google Drive (part 1)',
   tagline: 'Keep every device in sync with a 500 PB store, while sending only the bytes that changed.',
-  minutes: 24,
+  minutes: 14,
   level: 'Advanced',
   learn: [
-    'Scale numbers, the sync API and a metadata model built from versions and blocks',
-    'Splitting files into blocks, dedup by block hash, and delta sync',
-    'Compression and encryption on block servers, with blocks in object storage',
-    'Why file metadata needs strong consistency, and how a transaction gives it',
-    'Telling other devices about changes with long polling and a change cursor',
-    'Conflict handling, version history, garbage collection and storage cost',
+    'Scope, scale numbers, the sync API and a metadata model built from versions and blocks',
+    'Why whole-file upload and polling break, and what a single server cannot do',
+    'Splitting files into hashed blocks, dedup per namespace, and delta sync',
+    'Content-defined chunking, compression and encryption on block servers',
+    'Resumable uploads for 10 GB files',
   ],
   metrics: [
-    { key: 'changes', label: 'File changes' },
-    { key: 'upload', label: 'Bytes uploaded' },
-    { key: 'stored', label: 'Stored' },
-    { key: 'sync', label: 'Sync delay' },
-    { key: 'notify', label: 'Notify load' },
+    { key: 'changes', label: 'File changes', icon: 'Repeat' },
+    { key: 'upload', label: 'Bytes uploaded', icon: 'Download' },
+    { key: 'stored', label: 'Stored, logical', icon: 'HardDrive' },
+    { key: 'sync', label: 'Sync delay', icon: 'Timer' },
   ],
   steps: [
     {
-      title: 'Requirements',
+      title: 'Goal',
       tag: 'problem',
       heading: 'Every device, the same files, within seconds',
       eli5: 'Your homework notebook has copies at home, at school and at grandma’s, and every copy must match. The **school office** keeps the master copy for millions of kids.',
       body: [
-        'Scope: upload and download files of any type up to 10 GB, sync them across a user’s devices, keep version history, and share folders. Real-time co-editing of documents is out of scope. Nonfunctional needs, in order: **never lose a file**, sync fast, use little bandwidth (many devices are phones on metered data), and stay available.',
-        'Numbers to design against: **100 million** registered users, **25 million** daily actives with about 2.5 devices each, and up to **30 million** devices online at peak. Users store 5 GB on average, so **500 PB** of logical data. Each active user saves about 4 changed files a day averaging 6 MB: 100 million changes a day, roughly 1,200 per second, **3,500 per second at peak**.',
-        'If every change uploaded the whole file, that would be 600 TB a day. The target is that a change saved on the laptop shows up on the phone in **under 5 seconds**.',
+        'Scope: upload and download any file up to 10 GB, sync it across a user’s devices, keep version history, and share folders. Real-time co-editing is out of scope.',
+        'Needs, in order: **never lose a file**, sync fast, use little bandwidth (many devices are phones on metered data), and stay available.',
       ],
-      keyIdea: 'A sync service is judged on three things users feel: no file is ever lost, changes appear everywhere fast, and it does not eat their data plan.',
-      metrics: { changes: '3,500/s peak', upload: '600 TB/day', stored: '500 PB', sync: 'target < 5 s', notify: '30M devices' },
+      keyIdea: 'A sync service is judged on what users feel: no file is ever lost, changes appear everywhere fast, and it does not eat their data plan.',
+      metrics: { ...same, upload: '?', stored: '?' },
       scene: {
         nodes: [
-          { ...laptop, status: 'active', badge: 'saves report.docx' },
+          { ...laptop, status: 'active', chips: ['saves report.docx'] },
           { ...single, kind: 'internet', label: 'sync service', sub: 'to be designed', badge: '?' },
-          { ...phone, badge: 'must match' },
+          { ...phone, chips: [{ text: 'must match', tone: 'warn' }] },
         ],
-        links: [
-          { from: 'laptop', to: 'single' },
-          { from: 'single', to: 'phone' },
-        ],
+        links: [link('laptop', 'single'), link('single', 'phone', { label: 'within 5 s', labelTone: 'warn' })],
         flows: [
           { path: ['laptop', 'single'], tone: 'request', label: 'changed file', duration: 1.4 },
-          { path: ['single', 'phone'], tone: 'event', label: 'within 5 s', duration: 1.4, delay: 1.5 },
+          { path: ['single', 'phone'], tone: 'event', label: 'new version', duration: 1.4, delay: 1.5 },
         ],
-        caption: '30M devices online, each expecting the latest files',
+        panel: {
+          title: 'Requirements, in priority order',
+          icon: 'List',
+          rows: [
+            { text: 'Never lose a file', value: '1', tone: 'good' },
+            { text: 'Sync across devices fast', value: '2' },
+            { text: 'Spend little bandwidth', value: '3' },
+            { text: 'Stay available', value: '4' },
+            { text: 'Real-time co-editing', value: 'out of scope', tone: 'muted' },
+          ],
+        },
+        caption: 'A change on the laptop must reach the phone',
       },
     },
     {
-      title: 'API and data',
+      title: 'Numbers',
+      tag: 'concept',
+      heading: 'Scale: 100 million users, 500 PB, 3,500 changes a second',
+      eli5: 'The school office holds notebooks for a hundred million kids. Each kid fixes a few pages a day, so the **office** sees thousands of fixes every second.',
+      body: [
+        '**100 million** users, **25 million** daily actives with about 2.5 devices each, so up to **30 million** devices online at peak. At 5 GB each that is **500 PB**.',
+        'Each active user saves about 4 changed files a day at 6 MB: 100 million changes a day, 1,200 a second, **3,500 at peak**. Whole-file uploads would be 600 TB a day. A change must reach the phone in **under 5 seconds**.',
+      ],
+      keyIdea: 'The data volume is huge but the request rate is modest, so the design effort goes into bytes and fan-out, not raw QPS.',
+      metrics: same,
+      scene: {
+        nodes: [
+          { ...laptop, chips: ['4 changes/day, 6 MB'] },
+          { ...single, kind: 'internet', label: 'sync service', sub: 'to be designed', badge: '3,500/s peak' },
+          { ...phone, chips: ['30M devices online'] },
+        ],
+        links: [link('laptop', 'single'), link('single', 'phone')],
+        flows: [
+          { path: ['laptop', 'single'], tone: 'request', label: 'change', count: 3, duration: 1.4 },
+          { path: ['single', 'phone'], tone: 'event', label: 'sync', count: 3, duration: 1.4, delay: 1.5 },
+        ],
+        panel: {
+          title: 'Estimates',
+          icon: 'Table',
+          rows: [
+            { text: 'Registered users', value: '100 M' },
+            { text: 'Daily actives', value: '25 M' },
+            { text: 'Devices online at peak', value: '30 M' },
+            { text: 'Logical data (5 GB each)', value: '500 PB' },
+            { text: 'Changes a day', value: '100 M, 1,200/s' },
+            { text: 'Whole-file uploads a day', value: '600 TB', tone: 'warn' },
+          ],
+        },
+        caption: 'Big data, modest request rate',
+      },
+    },
+    {
+      title: 'Sync API',
+      tag: 'concept',
+      heading: 'The API is built around a commit',
+      eli5: 'A kid hands the office the list of pages in the new notebook. The office answers "done" or "send me these pages first". That hand-in is a **commit**.',
+      body: [
+        '`POST /files/{id}/commit` sends the base version, a client commit id and the ordered list of block hashes. The server answers "done, you are version 15" or "first send me these blocks", which the client uploads with `PUT /blocks/{hash}`.',
+        'Other devices call `GET /changes?cursor=1041` to learn what changed, and `GET /blocks/{hash}` to fetch content.',
+      ],
+      keyIdea: 'A commit names the content by hash. The server asks only for what it lacks.',
+      metrics: same,
+      scene: {
+        nodes: [
+          { ...laptop, status: 'active', chips: ['commit base 14'] },
+          { ...api, status: 'active', chips: ['version 15'] },
+          { ...phone, chips: ['changes?cursor=1041'] },
+        ],
+        links: [link('laptop', 'api'), link('phone', 'api', { style: 'dashed' })],
+        flows: [
+          { path: ['laptop', 'api'], tone: 'request', label: 'commit v15', duration: 1.2 },
+          { path: ['api', 'laptop'], tone: 'response', label: 'need 3 blocks', duration: 1.2, delay: 1.3 },
+          { path: ['phone', 'api'], tone: 'request', label: 'changes?cursor=1041', duration: 1.4, delay: 2.6 },
+          { path: ['api', 'phone'], tone: 'response', label: 'file 9001 is v15', duration: 1.4, delay: 4.1 },
+        ],
+        panel: {
+          title: 'Endpoints',
+          icon: 'Code',
+          code: 'POST /files/{id}/commit (commit_id)\nPUT  /blocks/{hash}\nGET  /blocks/{hash}\nGET  /changes?cursor=1041\nGET  /files/{id}/versions',
+          footer: { text: 'Content moves by hash, metadata by commit', tone: 'muted' },
+        },
+        caption: 'Commit names the blocks, devices read the journal',
+      },
+    },
+    {
+      title: 'Data model',
       tag: 'concept',
       heading: 'Files are versions, versions are lists of blocks',
       eli5: 'The office keeps an index card for each notebook listing its pages in order. That card box is the **metadata database**. The pages themselves sit in a filing cabinet.',
       body: [
-        'The API is built around a **commit**. `POST /files/{id}/commit` sends the base version and the ordered list of block hashes for the new content. The server answers either "done, you are version 15" or "first send me these blocks", which the client uploads with `PUT /blocks/{hash}`. Other devices call `GET /changes?cursor=1041` to learn what changed and `GET /blocks/{hash}` to fetch content. `GET /files/{id}/versions` lists history.',
-        'In the data model a **namespace** is the root of one user’s tree, or of one shared folder. A file has a pointer to its latest version. A **version** is an ordered list of block hashes, and its rows never change once written. A **block** row records that this namespace owns those bytes and how many versions point at them. The **changes** table is a journal per namespace: every commit appends one row with the next sequence number, and each device remembers the last number it has seen.',
+        'A **namespace** is the root of one user’s tree, or of one shared folder. A file points at its latest **version**, an ordered list of block hashes that never changes once written. A **block** row says how many versions use those bytes. A small **namespaces** row holds the next journal number.',
+        'The **changes** table is a journal per namespace: each commit appends the next sequence number, and each device remembers the last one it has seen.',
       ],
       keyIdea: 'Model a file as a pointer to an immutable version, and a version as an ordered list of content hashes. The bytes live elsewhere.',
-      metrics: { changes: '3,500/s peak', upload: '600 TB/day', stored: '500 PB', sync: 'target < 5 s', notify: '30M devices' },
+      metrics: same,
       scene: {
-        nodes: [laptop, { ...api, status: 'active' }, { ...db, status: 'active', badge: 'files, versions, blocks' }, phone],
-        links: [
-          { from: 'laptop', to: 'api' },
-          { from: 'api', to: 'db' },
-          { from: 'phone', to: 'api', style: 'dashed' },
-        ],
+        nodes: [{ ...laptop, chips: ['commit v15'] }, { ...api, status: 'active' }, { ...db, status: 'active', badge: 'files, versions, blocks' }],
+        links: [link('laptop', 'api'), link('api', 'db')],
         flows: [
           { path: ['laptop', 'api'], tone: 'request', label: 'commit v15', duration: 1.2 },
-          { path: ['api', 'db'], tone: 'request', label: 'INSERT version', duration: 1, delay: 1.3 },
-          { path: ['phone', 'api'], tone: 'request', label: 'changes?cursor=1041', duration: 1.4, delay: 2.4 },
-          { path: ['api', 'phone'], tone: 'response', label: 'file 9001 is v15', duration: 1.4, delay: 3.9 },
+          { path: ['api', 'db'], tone: 'request', label: 'INSERT version', duration: 1.2, delay: 1.3 },
         ],
-        caption: 'Commits write versions, devices read the change journal',
+        panel: {
+          title: 'Five tables',
+          icon: 'Table',
+          rows: [
+            { text: 'files', value: 'path, latest_ver' },
+            { text: 'version_blocks', value: 'version, seq, hash' },
+            { text: 'blocks', value: 'hash, size, refs' },
+            { text: 'changes', value: 'seq, file, version, commit id' },
+            { text: 'namespaces', value: 'id, next_seq' },
+          ],
+          footer: { text: 'Block bytes live in object storage', tone: 'muted' },
+        },
+        caption: 'Metadata is small, the bytes are somewhere else',
       },
       code: {
         language: 'sql',
@@ -120,7 +198,12 @@ CREATE TABLE blocks (
 CREATE TABLE changes (                  -- journal that devices read by cursor
   namespace_id BIGINT, seq BIGINT,
   file_id      BIGINT, version INT,
+  commit_id    UUID,                    -- client commit id, makes retries idempotent
   PRIMARY KEY (namespace_id, seq)
+);
+CREATE TABLE namespaces (
+  namespace_id BIGINT PRIMARY KEY,
+  next_seq     BIGINT NOT NULL          -- next journal number
 );`,
         highlight: [4, 7, 10, 15, 18],
       },
@@ -131,88 +214,210 @@ CREATE TABLE changes (                  -- journal that devices read by cursor
       heading: 'Version one: one server, whole files, polling',
       eli5: 'At first one clerk with one cupboard keeps every notebook, and every kid phones each minute to ask if anything is new. That clerk is the **single server**.',
       body: [
-        'The first version is one server with a big disk and MySQL. The client uploads the whole file on every save. The server writes it under `/data/{user}/{path}`, records a row, and keeps the old file as the previous version.',
-        'Other devices find out by **polling**: every 60 seconds each one asks "anything new since my last check?" If yes, it downloads the whole new file.',
-        'For a team of a hundred people this is fine and easy to reason about. Nothing here is wrong yet. The problems are all about size.',
+        'One server with a big disk and MySQL. The client uploads the whole file on every save. The server writes it under `/data/{user}/{path}`, records a row, and keeps the old file as the previous version.',
+        'Other devices **poll**: every 60 seconds each asks "anything new?" and downloads the whole file if so. For a team of a hundred this is fine. The problems are all about size.',
       ],
       keyIdea: 'Whole-file upload plus polling is correct and simple, which makes it the right baseline to measure against.',
-      metrics: { changes: '3,500/s peak', upload: '600 TB/day', stored: '500 PB', sync: '30 s avg', notify: '500K polls/s' },
+      metrics: { ...same, sync: '30 s avg' },
       scene: {
-        nodes: [laptop, { ...single, status: 'active', badge: 'whole files' }, phone],
-        links: [
-          { from: 'laptop', to: 'single' },
-          { from: 'phone', to: 'single' },
-        ],
+        nodes: [laptop, { ...single, status: 'active', chips: ['/data/{user}/{path}'] }, phone],
+        links: [link('laptop', 'single', { label: 'whole file' }), link('phone', 'single', { label: 'poll every 60 s' })],
         flows: [
           { path: ['laptop', 'single'], tone: 'request', label: 'PUT whole file', duration: 1.6 },
           { path: ['phone', 'single'], tone: 'request', label: 'anything new?', duration: 1.2, delay: 0.6 },
           { path: ['single', 'phone'], tone: 'response', label: 'whole file', duration: 1.4, delay: 2.2 },
         ],
+        panel: {
+          title: 'Version one',
+          icon: 'Server',
+          rows: [
+            { text: 'Upload', value: 'whole file' },
+            { text: 'Notify', value: 'poll every 60 s' },
+            { text: 'Storage', value: 'one disk' },
+            { text: 'Metadata', value: 'MySQL' },
+          ],
+        },
         caption: 'Upload the whole file, poll once a minute',
       },
     },
     {
-      title: 'Where it breaks',
+      title: 'Bandwidth',
       tag: 'case',
-      heading: 'Bytes, polls and one disk',
-      eli5: 'Kids recopy the whole notebook to fix one word, the cupboard is full, and the phone never stops ringing with "anything new?" The **single server** cannot keep up.',
+      heading: 'Breaks first: a typo costs 200 MB',
+      eli5: 'A kid fixes one word and recopies the whole notebook, then every other kid recopies it too. That is a lot of paper for one word.',
       body: [
-        '**Bandwidth.** Fix a typo in a 200 MB slide deck and the laptop uploads 200 MB, then every other device downloads 200 MB. Across the fleet that is 600 TB a day in and more going out, most of it bytes the server already had.',
-        '**Polling.** 30 million online devices asking every 60 seconds is **500,000 requests a second**, and almost every answer is "nothing new". Even so, a change takes 30 seconds on average to show up, six times the target.',
-        '**Storage and safety.** 500 PB is tens of thousands of disks, and one dead server must never lose a file. A single box fails on all three counts.',
+        'Fix a typo in a 200 MB slide deck and the laptop uploads 200 MB, then every other device downloads 200 MB.',
+        'Across the fleet that is 600 TB a day in and more going out, almost all of it bytes the server already had.',
       ],
-      keyIdea: 'Sending whole files and polling wastes most of the work, and one machine can neither hold the data nor survive losing it.',
-      metrics: { changes: '3,500/s peak', upload: '600 TB/day', stored: '500 PB', sync: '30 s avg', notify: '500K polls/s' },
+      keyIdea: 'Whole-file transfer pays for the entire file on every tiny edit, in both directions.',
+      metrics: { ...same, sync: '30 s avg' },
+      metricTones: { upload: 'bad' },
       scene: {
         nodes: [
-          { ...laptop, status: 'hot', badge: '200 MB for a typo' },
-          { ...single, status: 'hot', badge: 'disk full, 500K polls/s' },
-          { ...phone, status: 'hot', badge: '30 s behind' },
+          { ...laptop, status: 'hot', chips: [{ text: 'fix 1 typo', tone: 'warn' }] },
+          { ...single, status: 'hot', load: 92 },
+          { ...phone, chips: [{ text: 'download 200 MB', tone: 'bad' }] },
         ],
         links: [
-          { from: 'laptop', to: 'single' },
-          { from: 'phone', to: 'single' },
+          link('laptop', 'single', { label: '200 MB upload', labelTone: 'warn' }),
+          link('single', 'phone', { label: '200 MB download', labelTone: 'warn' }),
         ],
         flows: [
           { path: ['laptop', 'single'], tone: 'error', label: '200 MB again', duration: 2 },
+          { path: ['single', 'phone'], tone: 'error', label: '200 MB', duration: 2, delay: 2.1 },
+        ],
+        panel: {
+          title: 'One typo',
+          icon: 'Download',
+          rows: [
+            { text: 'Bytes that changed', value: '12 B', tone: 'good' },
+            { text: 'Bytes uploaded', value: '200 MB', tone: 'bad' },
+            { text: 'Per extra device', value: '200 MB', tone: 'bad' },
+            { text: 'Whole fleet, a day', value: '600 TB', tone: 'bad' },
+          ],
+        },
+        caption: 'Most bytes already exist on the server',
+      },
+    },
+    {
+      title: 'Polling',
+      tag: 'case',
+      heading: 'Breaks second: 500,000 polls a second',
+      eli5: 'Thirty million kids phone the office every minute to ask "anything new?". Nearly every answer is "no", and a real change still waits half a minute.',
+      body: [
+        '30 million online devices asking every 60 seconds is **500,000 requests a second**. Almost every answer is "nothing new".',
+        'A change also waits for the next poll: 30 seconds on average, six times the 5 second target.',
+      ],
+      keyIdea: 'Polling burns most of its requests on empty answers and still reacts slowly.',
+      metrics: { ...same, sync: '30 s avg' },
+      metricTones: { sync: 'bad' },
+      scene: {
+        nodes: [
+          { ...single, status: 'hot', load: 95, chips: [{ text: '500K polls/s', tone: 'bad' }] },
+          { ...phone, status: 'hot', badge: '30 s behind' },
+          { ...laptop, chips: ['saved 2 s ago'] },
+        ],
+        links: [link('phone', 'single', { label: 'every 60 s', labelTone: 'warn' }), link('laptop', 'single')],
+        flows: [
           { path: ['phone', 'single'], tone: 'request', label: 'anything new?', count: 5, duration: 0.9 },
           { path: ['single', 'phone'], tone: 'response', label: 'no', count: 5, duration: 0.9, delay: 1 },
         ],
-        caption: 'Most bytes and most polls carry nothing new',
+        panel: {
+          title: 'Polling math',
+          icon: 'Timer',
+          rows: [
+            { text: 'Devices online', value: '30 M' },
+            { text: 'Poll interval', value: '60 s' },
+            { text: 'Requests a second', value: '500,000', tone: 'bad' },
+            { text: 'Answers with news', value: 'almost none', tone: 'warn' },
+            { text: 'Average delay', value: '30 s vs 5 s', tone: 'bad' },
+          ],
+        },
+        caption: 'Most polls carry nothing new',
+      },
+    },
+    {
+      title: 'Storage',
+      tag: 'case',
+      heading: 'Breaks third: one box cannot hold 500 PB safely',
+      eli5: 'One cupboard cannot hold every notebook, and if it burns down every kid loses their homework. The office needs many cupboards and spare copies.',
+      body: [
+        '500 PB is about 30,000 disks of 16 TB, far past one machine. And one dead server must never lose a file.',
+        'A single box fails on capacity and on safety. Data needs a distributed store with copies, and metadata needs its own careful home.',
+      ],
+      keyIdea: 'Capacity and durability both need many machines, with copies of every block.',
+      metrics: { ...same, sync: '30 s avg' },
+      metricTones: { stored: 'bad' },
+      scene: {
+        nodes: [
+          { ...laptop, chips: ['report.docx'] },
+          { ...single, status: 'down', badge: 'disk full or dead' },
+          { ...store, at: at(5.4, 0), status: 'dim', badge: 'needed: 500 PB' },
+        ],
+        links: [link('laptop', 'single'), link('single', 'store', { style: 'faint' })],
+        flows: [{ path: ['laptop', 'single'], tone: 'error', label: 'no space left', duration: 1.6 }],
+        panel: {
+          title: 'What one box means',
+          icon: 'HardDrive',
+          rows: [
+            { text: 'Data to hold', value: '500 PB' },
+            { text: 'Disks of 16 TB', value: '~30,000', tone: 'bad' },
+            { text: 'Copies of each file', value: '1', tone: 'bad' },
+            { text: 'If the box dies', value: 'files lost', tone: 'bad' },
+          ],
+          footer: { text: 'Fails the "never lose a file" rule', tone: 'bad' },
+        },
+        caption: 'One machine, one copy, no safety',
       },
     },
     {
       title: 'Blocks',
       tag: 'concept',
       heading: 'Fix 1: split files into hashed blocks',
-      eli5: 'Notebooks are cut into numbered pages, and each page gets a fingerprint stamp. Two identical pages share one stamp, so the office files that page once. The stamp is a **hash**.',
+      eli5: 'Notebooks are cut into numbered pages, and each page gets a fingerprint stamp. The stamp is a **hash**, and the office files each page under its stamp.',
       body: [
-        'The client splits each file into **4 MB blocks** and computes a SHA-256 **hash** of each. A 200 MB deck becomes 50 blocks and 50 hashes. Blocks are stored in object storage under their hash, as in the object storage lesson, and the metadata only lists hashes in order.',
-        'Before uploading, the client commits the hash list. The server checks which hashes the namespace already owns and asks only for the rest. This gives **dedup** for free: a copied file, a file moved between folders, or the same photo saved twice uploads zero blocks.',
-        'Dedup is scoped to the namespace on purpose. Global dedup across users saves more disk, but it leaks information: by uploading a file and seeing whether it was skipped, an attacker learns that someone already stores it. In our model namespace dedup cuts uploads to about 450 TB a day.',
+        'The client splits each file into **4 MB blocks** and computes a SHA-256 **hash** of each. A 200 MB deck becomes 50 blocks and 50 hashes.',
+        'Blocks are stored in object storage under their namespace and hash, as in the object storage lesson. The metadata only lists hashes in order.',
       ],
-      keyIdea: 'Address blocks by their content hash, so the server can say "I already have that" before any bytes move.',
-      metrics: { changes: '3,500/s peak', upload: '450 TB/day', stored: '430 PB', sync: '30 s avg', notify: '500K polls/s' },
+      keyIdea: 'Address blocks by their content hash. The same bytes always get the same name.',
+      metrics: { ...same, stored: '500 PB' },
+      scene: {
+        nodes: [
+          { ...laptop, status: 'active', chips: ['report.docx 200 MB'], badge: '50 blocks' },
+          blocks,
+          { ...store, badge: 'key = (namespace, hash)' },
+        ],
+        links: [link('laptop', 'blocks'), link('blocks', 'store')],
+        flows: [{ path: ['laptop', 'blocks', 'store'], tone: 'data', label: '4 MB block', count: 3, duration: 1.8 }],
+        panel: {
+          title: 'The deck as blocks',
+          icon: 'Hash',
+          rows: [
+            { text: 'block 0', value: '9f1c…' },
+            { text: 'block 1', value: '03ab…' },
+            { text: 'block 2', value: 'e77d…' },
+            { text: '… 47 more', value: '4 MB each', tone: 'muted' },
+          ],
+        },
+        caption: 'Bytes get named by their hash',
+      },
+    },
+    {
+      title: 'Dedup',
+      tag: 'concept',
+      heading: 'Commit hashes first, upload only what is missing',
+      eli5: 'Before carrying pages in, the kid reads out the stamps. The office says "I have 47 of those, bring me the other 3". Skipping pages the office has is **dedup**.',
+      body: [
+        'Before uploading, the client commits the hash list. The server checks which hashes the namespace already owns and asks only for the rest.',
+        'This gives **dedup** for free: a copied file, a file moved between folders, or the same photo saved twice uploads zero blocks.',
+      ],
+      keyIdea: 'Say "I already have that" before any bytes move.',
+      metrics: { ...same, upload: '450 TB/day', stored: '430 PB' },
+      metricTones: { upload: 'good' },
       scene: {
         nodes: [
           { ...laptop, status: 'active', badge: '50 hashes' },
-          blocks,
-          { ...store, badge: 'key = hash' },
           { ...api, status: 'active' },
-          { ...db, badge: '47 already owned' },
+          { ...db, at: at(5.4, 3.5), badge: '47 already owned' },
+          blocks,
+          { ...store, badge: '+3 blocks' },
         ],
-        links: [
-          { from: 'laptop', to: 'api' },
-          { from: 'api', to: 'db' },
-          { from: 'laptop', to: 'blocks' },
-          { from: 'blocks', to: 'store' },
-        ],
+        links: [link('laptop', 'api'), link('api', 'db'), link('laptop', 'blocks'), link('blocks', 'store')],
         flows: [
           { path: ['laptop', 'api'], tone: 'request', label: 'commit 50 hashes', duration: 1 },
           { path: ['api', 'db'], tone: 'request', label: 'which are new?', duration: 0.9, delay: 1.1 },
           { path: ['api', 'laptop'], tone: 'response', label: 'send 3', duration: 1, delay: 2.1 },
           { path: ['laptop', 'blocks', 'store'], tone: 'data', label: '3 blocks', count: 3, duration: 1.6, delay: 3.2 },
         ],
+        panel: {
+          title: 'The commit answer',
+          icon: 'Copy',
+          rows: [
+            { text: 'Hashes sent', value: '50' },
+            { text: 'Already owned', value: '47', tone: 'good' },
+            { text: 'Missing, upload these', value: '3', tone: 'warn' },
+          ],
+        },
         caption: 'Only blocks the server lacks are uploaded',
       },
       code: {
@@ -242,36 +447,73 @@ def sync_file(path, file_id, base_version):
       },
     },
     {
-      title: 'Delta sync',
-      tag: 'concept',
-      heading: 'Fix 2: delta sync, compression and encryption',
-      eli5: 'Change one page and you only bring that page, folded small and sealed in an envelope. Sending only changed pages is **delta sync**.',
+      title: 'Dedup scope',
+      tag: 'tradeoff',
+      heading: 'Dedup per namespace, not across users',
+      eli5: 'If the office said "someone already has that page" to anyone, a nosy kid could learn who owns which pages. So each kid’s pages are only matched against their own.',
       body: [
-        'Blocks give **delta sync** on edits. Fix a typo on slide 30 and only the block holding slide 30 gets a new hash, so the laptop uploads 4 MB instead of 200 MB, and the phone downloads the same 4 MB. Fixed-size blocks have one weakness: inserting bytes near the start shifts every later boundary. **Content-defined chunking**, which cuts blocks where a rolling hash of the data hits a pattern, keeps most boundaries stable after an insert.',
-        'The **block servers** handle bytes on the way into storage. They check each block’s hash, **compress** it when it helps (text and office files shrink a lot, JPEG and MP4 do not, so skip those), then **encrypt** it. Compress first: encrypted data looks random and will not compress. Each namespace has a data key, wrapped by a key in the **KMS**, as in the encryption lesson.',
-        'Why not upload straight to storage with pre-signed URLs? It saves a hop, but then every client (Windows, macOS, iOS, Android, web) must implement compression and encryption identically, and the server cannot verify a block matches its hash before it lands. Block servers keep that logic in one place. Uploads fall to about **180 TB a day**.',
+        'Global dedup across users saves more disk, but it leaks information: upload a file, see whether it was skipped, and you learn that someone already stores it.',
+        'So dedup is scoped to the **namespace**. In our model that still cuts uploads to about 450 TB a day.',
       ],
-      keyIdea: 'Upload only blocks whose hash changed, compress what compresses, then encrypt, all in one server tier you control.',
-      metrics: { changes: '3,500/s peak', upload: '180 TB/day', stored: '380 PB', sync: '30 s avg', notify: '500K polls/s' },
+      keyIdea: 'Cross-user dedup trades a privacy leak for disk. This design keeps dedup inside one namespace.',
+      metrics: { ...same, upload: '450 TB/day', stored: '430 PB' },
       scene: {
         nodes: [
-          { ...laptop, status: 'active', badge: '1 of 50 changed' },
-          { ...blocks, status: 'active', badge: 'verify, gzip, AES' },
-          { ...store, status: 'ok' },
-          { ...vault, badge: 'wrap data key' },
+          { id: 'ns77', kind: 'block', at: at(-5.4, -3.5), label: 'namespace 77', sub: 'Ana', icon: 'Users', tint: 'blue', status: 'active' },
+          { id: 'ns78', kind: 'block', at: at(-5.4, 3.5), label: 'namespace 78', sub: 'Ben', icon: 'Users', tint: 'amber' },
+          { ...store, at: at(0, 0), badge: 'key = (namespace, hash)' },
         ],
         links: [
-          { from: 'laptop', to: 'blocks' },
-          { from: 'blocks', to: 'store' },
-          { from: 'blocks', to: 'vault', style: 'dashed' },
+          link('ns77', 'store', { label: 'skip: Ana has it' }),
+          link('ns78', 'store', { label: 'upload: Ben never sent it', labelTone: 'warn' }),
         ],
         flows: [
-          { path: ['laptop', 'blocks'], tone: 'data', label: 'block 30 (4 MB)', duration: 1.3 },
-          { path: ['blocks', 'vault'], tone: 'handshake', label: 'data key', duration: 0.9, delay: 1.4 },
-          { path: ['vault', 'blocks'], tone: 'handshake', duration: 0.9, delay: 2.3 },
-          { path: ['blocks', 'store'], tone: 'data', label: '1.4 MB sealed', duration: 1.1, delay: 3.3 },
+          { path: ['ns77', 'store'], tone: 'response', label: 'already stored', duration: 1.4 },
+          { path: ['ns78', 'store'], tone: 'data', label: 'same photo, uploads', duration: 1.4, delay: 1.5 },
         ],
-        caption: 'One changed block, compressed then encrypted',
+        panel: {
+          title: 'Scope of dedup',
+          icon: 'Shield',
+          rows: [
+            { text: 'Per namespace', value: 'safe, 450 TB/day', tone: 'good' },
+            { text: 'Across all users', value: 'less disk', tone: 'warn' },
+            { text: 'But upload speed leaks', value: '"someone has it"', tone: 'bad' },
+          ],
+        },
+        caption: 'Skipping an upload tells you something',
+      },
+    },
+    {
+      title: 'Delta sync',
+      tag: 'concept',
+      heading: 'Fix 2: delta sync uploads only changed blocks',
+      eli5: 'Change one page and you only bring that page. Sending only changed pages is **delta sync**, and the other kids only fetch that one page too.',
+      body: [
+        'Fix a typo on slide 30 and only the block holding slide 30 gets a new hash. The laptop uploads 4 MB instead of 200 MB, and the phone downloads the same 4 MB.',
+        'Version 15 simply lists 49 old hashes and 1 new one.',
+      ],
+      keyIdea: 'A changed block is a new hash. Every untouched block keeps its old name and never travels again.',
+      metrics: { ...same, upload: '180 TB/day', stored: '380 PB' },
+      metricTones: { upload: 'good' },
+      scene: {
+        nodes: [
+          { ...laptop, status: 'active', chips: [{ text: '1 of 50 changed', tone: 'good' }] },
+          { ...blocks, status: 'active' },
+          { ...store, status: 'ok' },
+        ],
+        links: [link('laptop', 'blocks', { label: '4 MB, not 200 MB' }), link('blocks', 'store')],
+        flows: [{ path: ['laptop', 'blocks', 'store'], tone: 'data', label: 'block 30', duration: 2 }],
+        panel: {
+          title: 'Version 14 to 15',
+          icon: 'Layers',
+          rows: [
+            { text: 'blocks 0 to 29', value: 'same hashes', tone: 'muted' },
+            { text: 'block 30', value: 'new hash', tone: 'warn' },
+            { text: 'blocks 31 to 49', value: 'same hashes', tone: 'muted' },
+            { text: 'Uploaded', value: '4 MB of 200 MB', tone: 'good' },
+          ],
+        },
+        caption: 'One changed block, one small upload',
       },
       quiz: {
         question: 'A user changes a few words in the middle of a 200 MB file without changing its length. Blocks are 4 MB. Roughly how much does the laptop upload?',
@@ -281,250 +523,175 @@ def sync_file(path, file_id, base_version):
       },
     },
     {
-      title: 'Metadata',
-      tag: 'concept',
-      heading: 'Fix 3: a strongly consistent metadata database',
-      eli5: 'The card box is updated in one careful move, so nobody ever sees a card that points at a missing page. That all-or-nothing move is a **transaction**.',
-      body: [
-        'Blocks can be eventually consistent, metadata cannot. If the phone sees version 15 before all its blocks exist, it downloads a broken file. If two devices disagree on the latest version, one of them overwrites the other. So a commit is one **ACID transaction** (the transactions lesson): check every block exists, insert the version rows, move the file pointer, append to the change journal. All of it or none of it.',
-        'A relational database gives this directly. Shard by **namespace id** (the sharding lesson), so a whole tree, or a whole shared folder, lives on one shard and every commit is a single-shard transaction. 3,500 commits a second spread over a few dozen shards is a light load per shard. Each shard has a **synchronous standby**, so a failover never loses a committed version.',
-        'The cache must not undo this. Cache entries are keyed with the version (`file:9001:v15`), commits delete the pointer key, and a device that was just told "version 15 exists" reads from the primary if the cache or a replica still says 14.',
-      ],
-      keyIdea: 'A version becomes visible in one transaction, only after all its blocks exist, and caches or replicas never get to show an older answer as current.',
-      metrics: { changes: '3,500/s peak', upload: '180 TB/day', stored: '380 PB', sync: '30 s avg', notify: '500K polls/s' },
-      scene: {
-        nodes: [
-          laptop,
-          { ...api, status: 'active' },
-          { ...cache, badge: 'DEL file:9001' },
-          { ...db, status: 'active', badge: 'one transaction' },
-          { ...standby, status: 'ok' },
-          phone,
-        ],
-        links: [
-          { from: 'laptop', to: 'api' },
-          { from: 'api', to: 'db' },
-          { from: 'api', to: 'cache' },
-          { from: 'db', to: 'standby', style: 'dashed', label: 'sync' },
-          { from: 'phone', to: 'api', style: 'dashed' },
-        ],
-        flows: [
-          { path: ['laptop', 'api'], tone: 'request', label: 'commit v15', duration: 1 },
-          { path: ['api', 'db'], tone: 'request', label: 'BEGIN ... COMMIT', duration: 1, delay: 1.1 },
-          { path: ['db', 'standby'], tone: 'data', label: 'ack before commit', duration: 1, delay: 2.2 },
-          { path: ['api', 'cache'], tone: 'event', label: 'invalidate', duration: 0.8, delay: 3.3 },
-          { path: ['phone', 'api'], tone: 'request', label: 'read v15', duration: 1.2, delay: 4.2 },
-        ],
-        caption: 'All of a commit becomes visible at once, or none of it',
-      },
-    },
-    {
-      title: 'Notify devices',
-      tag: 'concept',
-      heading: 'Fix 4: long polling and a change cursor',
-      eli5: 'Each kid leaves a call open with the office, and the office says "new pages!" the moment something changes. That waiting call is a **long poll**.',
-      body: [
-        'Replace the 60-second poll with a **long poll**, as in the real-time lesson. Each device sends `GET /notify?ns=77&cursor=1041` and the notification server holds it open for up to 60 seconds. When a commit lands, the API publishes "namespace 77 changed" on a **pub/sub** bus (the pub/sub lesson). The server holding that namespace’s devices answers their open calls at once.',
-        'The answer carries no file data, only "something changed". The device then asks the API for `changes?cursor=1041`, gets the list, downloads the blocks it lacks, and opens a new long poll. A laptop that was asleep for a week does the same thing when it wakes: it asks for everything after its cursor. No per-device inbox is needed, because the journal is the inbox.',
-        'Why not WebSocket? It would work, but traffic here is one-way and rare, a few events per device per day, and plain HTTP requests pass every proxy and firewall. 30 million held connections at about 500,000 per server is around 60 notification servers, and changes now show up in about **2 seconds**.',
-      ],
-      keyIdea: 'A notification is only a nudge. The change journal and each device’s cursor are the source of truth, which also covers devices that were offline.',
-      metrics: { changes: '3,500/s peak', upload: '180 TB/day', stored: '380 PB', sync: '2 s', notify: '30M held conns' },
-      scene: {
-        nodes: [
-          laptop,
-          { ...api, status: 'active' },
-          db,
-          { ...bus, status: 'active' },
-          { ...notify, status: 'active', badge: '500K open per box' },
-          { ...phone, status: 'ok', badge: 'cursor 1041 to 1042' },
-        ],
-        links: [
-          { from: 'laptop', to: 'api' },
-          { from: 'api', to: 'db' },
-          { from: 'api', to: 'bus' },
-          { from: 'bus', to: 'notify' },
-          { from: 'notify', to: 'phone' },
-          { from: 'phone', to: 'api', style: 'dashed' },
-        ],
-        flows: [
-          { path: ['phone', 'notify'], tone: 'request', label: 'wait for ns 77', duration: 1 },
-          { path: ['laptop', 'api', 'db'], tone: 'request', label: 'commit', duration: 1.6, delay: 0.8 },
-          { path: ['api', 'bus', 'notify'], tone: 'event', label: 'ns 77 changed', duration: 1.6, delay: 2.4 },
-          { path: ['notify', 'phone'], tone: 'event', label: 'changed', duration: 0.9, delay: 4 },
-          { path: ['phone', 'api'], tone: 'request', label: 'changes?cursor=1041', duration: 1.4, delay: 5 },
-        ],
-        caption: 'Held request returns the moment the namespace changes',
-      },
-    },
-    {
-      title: 'Conflicts',
-      tag: 'case',
-      heading: 'Case: two devices edit the same file offline',
-      eli5: 'Two kids fix the same page on a trip. The first one back gets it filed. The second keeps their page as a separate copy to compare. That clash is a **conflict**.',
-      body: [
-        'Ana edits `report.docx` on her laptop on a plane, and her phone edits the same file on version 14 at the same time. The laptop lands first and commits version 15. Then the phone commits with base version 14.',
-        'The commit checks that the file is still on the base version, in the same transaction that moves the pointer. It is not, so the phone’s commit fails with a **conflict**: first committed wins. Nothing is lost: the phone saves its edit as a new file, `report (phone conflicted copy).docx`, then downloads version 15. Ana sees both and merges by hand.',
-        'Automatic merging works for plain text with a three-way merge, but not for a binary Word or Photoshop file. Live co-editing (operational transforms or CRDTs) is a different product. The sync layer’s job is narrower: never silently drop either edit.',
-      ],
-      keyIdea: 'Commit with a base version and compare-and-set the pointer. The loser of a race becomes a conflicted copy, so no edit is silently lost.',
-      metrics: { changes: '3,500/s peak', upload: '180 TB/day', stored: '380 PB', sync: '2 s', notify: '30M held conns' },
-      scene: {
-        nodes: [
-          { ...laptop, status: 'ok', badge: 'base 14, won: v15' },
-          { ...api, status: 'active' },
-          { ...db, status: 'active', badge: 'latest_ver = 15' },
-          { ...phone, status: 'hot', badge: 'base 14: conflict' },
-        ],
-        links: [
-          { from: 'laptop', to: 'api' },
-          { from: 'api', to: 'db' },
-          { from: 'phone', to: 'api' },
-        ],
-        flows: [
-          { path: ['laptop', 'api', 'db'], tone: 'request', label: 'commit base 14', duration: 1.6 },
-          { path: ['phone', 'api'], tone: 'request', label: 'commit base 14', duration: 1.2, delay: 1.8 },
-          { path: ['api', 'phone'], tone: 'error', label: 'conflict: now v15', duration: 1.2, delay: 3.1 },
-          { path: ['phone', 'api'], tone: 'request', label: 'save conflicted copy', duration: 1.2, delay: 4.4 },
-        ],
-        caption: 'First commit wins, the second becomes its own file',
-      },
-      code: {
-        language: 'sql',
-        title: 'Commit with a compare-and-set on the base version',
-        source: `BEGIN;
--- 1. Claim the next version only if nobody committed since our base.
-UPDATE files SET latest_ver = latest_ver + 1
- WHERE namespace_id = 77 AND file_id = 9001
-   AND latest_ver = 14                  -- base_version sent by the device
-RETURNING latest_ver;                   -- 0 rows: conflict, ROLLBACK
-
--- 2. Record the recipe for version 15 (all blocks already verified).
-INSERT INTO version_blocks VALUES
-  (77, 9001, 15, 0, '\\x9f1c...'), (77, 9001, 15, 1, '\\x03ab...');
-UPDATE blocks SET refs = refs + 1
- WHERE namespace_id = 77 AND block_hash IN ('\\x9f1c...', '\\x03ab...');
-
--- 3. Append to the journal; the namespace counter serializes commits.
-UPDATE namespaces SET next_seq = next_seq + 1
- WHERE namespace_id = 77 RETURNING next_seq;  -- 1042
-INSERT INTO changes VALUES (77, 1042, 9001, 15);
-COMMIT;`,
-        highlight: [3, 5, 6, 16, 18],
-      },
-    },
-    {
-      title: 'Versions and cost',
+      title: 'Chunking',
       tag: 'tradeoff',
-      heading: 'Version history, garbage collection and cold storage',
-      eli5: 'The office keeps old copies of each notebook, throws out pages no card points to, and moves dusty notebooks to the basement. The basement is **cold storage**.',
+      heading: 'Fixed blocks have one weakness: inserts',
+      eli5: 'If you add a line at the top of the notebook, every page boundary slides down and every page looks new. Cutting pages at natural breaks keeps most of them the same.',
       body: [
-        'History is cheap with blocks. Version 15 of the deck shares 49 of 50 blocks with version 14, so keeping it costs one 4 MB block. Busy files still pile up versions, so set a **retention policy**: keep every version for 30 days, then one per day, and cap the count. In our model, history adds about 10% on top of current data, bringing storage to **420 PB**.',
-        'When versions expire, their blocks lose a reference. A **garbage collector** deletes blocks whose `refs` reach zero, but only after a grace period, because a block uploaded a second ago may belong to a commit that has not finished yet. Deleting it early would break that commit.',
-        'Most of a drive is rarely opened. A lifecycle rule (the object storage lesson) moves blocks unread for 90 days to a **cold storage** class that costs several times less per GB, with slower first reads and a fee per retrieval. In a typical drive most bytes are cold, so this is the single biggest saving on the storage bill.',
+        'Inserting bytes near the start of a file shifts every later 4 MB boundary, so every block gets a new hash.',
+        '**Content-defined chunking** cuts blocks where a rolling hash of the data hits a pattern. Boundaries follow the content, so most blocks survive an insert.',
       ],
-      keyIdea: 'Versions share blocks, so history is cheap. Retention, reference-counted garbage collection and a cold tier keep 500 PB affordable.',
-      metrics: { changes: '3,500/s peak', upload: '180 TB/day', stored: '420 PB', sync: '2 s', notify: '30M held conns' },
+      keyIdea: 'Fixed boundaries break after an insert. Boundaries chosen from the content stay stable.',
+      metrics: { ...same, upload: '180 TB/day', stored: '380 PB' },
       scene: {
         nodes: [
-          { ...gc, status: 'active' },
-          { ...store, badge: 'hot: 30%' },
-          { ...cold, status: 'ok', badge: 'cold: 70%' },
-          { ...api, status: 'dim' },
-          { ...db, badge: 'v1..v15 share blocks' },
+          { ...laptop, status: 'active', chips: [{ text: 'insert 1 line at top', tone: 'warn' }] },
+          { ...blocks, label: 'chunker', sub: 'rolling hash' },
+          { ...store, status: 'ok' },
         ],
-        links: [
-          { from: 'gc', to: 'store' },
-          { from: 'store', to: 'cold', label: 'lifecycle' },
-          { from: 'gc', to: 'db', style: 'dashed' },
-          { from: 'api', to: 'db' },
-        ],
-        flows: [
-          { path: ['db', 'gc'], tone: 'event', label: 'refs = 0 for 7 days', duration: 1.4 },
-          { path: ['gc', 'store'], tone: 'error', label: 'delete block', duration: 1, delay: 1.5 },
-          { path: ['store', 'cold'], tone: 'data', label: 'idle 90 days', count: 3, duration: 1.4, delay: 2.6 },
-        ],
-        caption: 'Expired blocks are swept, idle ones move to the cold tier',
+        links: [link('laptop', 'blocks'), link('blocks', 'store')],
+        flows: [{ path: ['laptop', 'blocks', 'store'], tone: 'data', label: '2 new blocks', duration: 1.8 }],
+        panel: {
+          title: 'After inserting a line at the top',
+          icon: 'Scale',
+          rows: [
+            { text: 'Fixed 4 MB blocks', value: '50 of 50 change', tone: 'bad' },
+            { text: 'Content-defined chunks', value: '1 to 2 change', tone: 'good' },
+            { text: 'Cost', value: 'more CPU on client', tone: 'warn' },
+          ],
+        },
+        caption: 'Cut where the content says, not where the ruler says',
       },
     },
     {
-      title: 'Failures',
-      tag: 'case',
-      heading: 'Case: a notification server dies with 500,000 connections',
-      eli5: 'One office phone line dies and half a million kids redial at once. If each waits a random few seconds first, the other lines cope. That random wait is **jitter**.',
+      title: 'Block servers',
+      tag: 'concept',
+      heading: 'Block servers verify, compress, then encrypt',
+      eli5: 'A **block server** is the mail room. It checks each page matches its stamp, folds it small when it can, seals it in an envelope, and files it.',
       body: [
-        'A notification server crashes, and 500,000 long polls drop in the same second. If every device reconnects at once, the other servers take a connection storm on top of their own load and the next one falls over. Clients reconnect with exponential backoff and **jitter** (the timeouts and retries lesson), spreading the herd over about 30 seconds. On reconnect each device asks for changes after its cursor, so no change is missed even though notifications were lost. Sync delay spikes to 30 seconds for those devices, then returns to 2.',
-        'Other parts fail more quietly. A **block server** dies mid-upload: the commit never happened, so no device sees a half file, and the client resends missing blocks to another server, which is safe because blocks are keyed by hash. A **metadata primary** dies: its synchronous standby is promoted (the failover lesson), writes pause for seconds and no committed version is lost. A storage **region** goes down: blocks are replicated to a second region and read from there.',
+        'Block servers check each block’s hash, then **compress** it when it helps. Text and office files shrink a lot. JPEG and MP4 do not, so skip those. This runs after the bytes arrive, so it cuts stored bytes only, not upload traffic.',
+        'Then they **encrypt**. Compress first, because encrypted data looks random and will not compress. Each namespace has a data key, wrapped by a key in the **KMS**.',
       ],
-      keyIdea: 'Design each failure so the source of truth is untouched: notifications can be lost, uploads can be retried, and only committed metadata matters.',
-      metrics: { changes: '3,500/s peak', upload: '180 TB/day', stored: '420 PB', sync: '30 s spike', notify: '500K reconnecting' },
+      keyIdea: 'Verify, compress, then encrypt, in that order, in one tier you control.',
+      metrics: { ...same, upload: '180 TB/day', stored: '380 PB' },
       scene: {
         nodes: [
-          laptop,
-          blocks,
-          store,
-          { ...notify2, status: 'hot', badge: 'jittered reconnects' },
-          api,
-          db,
-          { ...notify, status: 'down', badge: 'crashed' },
-          { ...phone, status: 'active', badge: 'resume at cursor' },
+          { ...laptop, chips: ['block 30, 4 MB'] },
+          { ...blocks, status: 'active', chips: ['verify', 'gzip', 'AES'] },
+          { ...store, status: 'ok', badge: '1.4 MB sealed' },
+          { ...vault, badge: 'wraps data key' },
         ],
-        links: [
-          { from: 'laptop', to: 'blocks' },
-          { from: 'blocks', to: 'store' },
-          { from: 'api', to: 'db' },
-          { from: 'phone', to: 'notify', style: 'faint' },
-          { from: 'phone', to: 'notify2' },
-          { from: 'phone', to: 'api', style: 'dashed' },
-        ],
+        links: [link('laptop', 'blocks'), link('blocks', 'store'), link('blocks', 'vault', { style: 'dashed' })],
         flows: [
-          { path: ['notify', 'phone'], tone: 'error', label: 'connection lost', duration: 1 },
-          { path: ['phone', 'notify2'], tone: 'request', label: 'reconnect after 0 to 30 s', duration: 1.6, delay: 1.2 },
-          { path: ['phone', 'api'], tone: 'request', label: 'changes?cursor=1042', duration: 1.6, delay: 3 },
-          { path: ['laptop', 'blocks', 'store'], tone: 'data', duration: 1.6, delay: 0.5 },
+          { path: ['laptop', 'blocks'], tone: 'data', label: 'block 30 (4 MB)', duration: 1.3 },
+          { path: ['blocks', 'vault'], tone: 'handshake', label: 'data key', duration: 0.9, delay: 1.4 },
+          { path: ['vault', 'blocks'], tone: 'handshake', duration: 0.9, delay: 2.3 },
+          { path: ['blocks', 'store'], tone: 'data', label: '1.4 MB sealed', duration: 1.1, delay: 3.3 },
         ],
-        caption: 'Lost nudges are recovered from the change journal',
+        panel: {
+          title: 'On the way in',
+          icon: 'Package',
+          rows: [
+            { text: '1. Verify SHA-256', value: 'matches', tone: 'good' },
+            { text: '2. Compress', value: '4 MB to 1.4 MB' },
+            { text: '3. Encrypt AES', value: 'data key from KMS' },
+            { text: 'JPEG, MP4', value: 'skip compression', tone: 'muted' },
+          ],
+        },
+        caption: 'Compress first, because ciphertext will not shrink',
+      },
+    },
+    {
+      title: 'Presigned URLs',
+      tag: 'tradeoff',
+      heading: 'Why not upload straight to storage?',
+      eli5: 'The kid could walk pages straight into the cabinet room. But then every kid must fold and seal pages the same way, and nobody checks the stamps.',
+      body: [
+        'Pre-signed URLs save a hop, but every client (Windows, macOS, iOS, Android, web) must implement compression and encryption identically. The server cannot verify a block matches its hash before it lands.',
+        'Block servers keep that logic in one place.',
+      ],
+      keyIdea: 'One extra hop buys one implementation of compression and encryption, and a hash check before storage.',
+      metrics: { ...same, upload: '180 TB/day', stored: '380 PB' },
+      metricTones: { upload: 'good' },
+      scene: {
+        nodes: [laptop, { ...blocks, status: 'active' }, store],
+        links: [
+          link('laptop', 'blocks', { label: 'one code path' }),
+          link('blocks', 'store'),
+          link('laptop', 'store', { style: 'dashed', label: 'presigned: 5 client copies', labelTone: 'warn' }),
+        ],
+        flows: [{ path: ['laptop', 'blocks', 'store'], tone: 'data', label: 'block', duration: 1.8 }],
+        panel: {
+          title: 'Two ways to upload',
+          icon: 'Scale',
+          rows: [
+            { text: 'Presigned URL', value: 'saves a hop', tone: 'good' },
+            { text: 'Presigned URL', value: '5 clients must match', tone: 'bad' },
+            { text: 'Presigned URL', value: 'no hash check', tone: 'bad' },
+            { text: 'Block servers', value: 'one place for the logic', tone: 'good' },
+          ],
+        },
+        caption: 'Keep the byte logic on the server',
+      },
+    },
+    {
+      title: 'Big files',
+      tag: 'case',
+      heading: 'Case: a 10 GB upload dies halfway',
+      eli5: 'A kid carries a 2,500-page notebook and trips at page 1,200. Because every page has a stamp, the office remembers what arrived and the kid carries only the rest.',
+      body: [
+        'A 10 GB file is 2,560 blocks. On a phone the connection will drop. Because blocks are keyed by hash, a retry is safe: ask the server which hashes are missing and send only those.',
+        'The client keeps no special upload session. Re-running the commit finds block 1,200 onward missing and resumes there.',
+      ],
+      keyIdea: 'Content-addressed blocks make uploads resumable for free: the missing list is the resume point.',
+      metrics: { ...same, upload: '180 TB/day', stored: '380 PB' },
+      scene: {
+        nodes: [
+          { ...laptop, status: 'hot', chips: [{ text: '10 GB, 2,560 blocks', tone: 'warn' }] },
+          { ...blocks, status: 'active' },
+          { ...store, badge: '1,200 blocks kept', status: 'ok' },
+        ],
+        links: [link('laptop', 'blocks', { label: 'wifi drops at block 1,200', labelTone: 'warn' }), link('blocks', 'store')],
+        flows: [
+          { path: ['laptop', 'blocks', 'store'], tone: 'data', label: 'blocks 1,200 onward', count: 3, duration: 2 },
+        ],
+        panel: {
+          title: 'Resume',
+          icon: 'Repeat',
+          rows: [
+            { text: 'Blocks in the file', value: '2,560' },
+            { text: 'Stored before the drop', value: '1,200', tone: 'good' },
+            { text: 'Commit says missing', value: '1,360', tone: 'warn' },
+            { text: 'Re-sent after resume', value: '1,360 only', tone: 'good' },
+          ],
+        },
+        caption: 'A retry is the same commit again',
       },
     },
     {
       title: 'Recap',
       tag: 'recap',
-      heading: 'Hash the blocks, commit the metadata, nudge the devices',
-      eli5: 'Pages with fingerprints, only changed pages carried in, one careful card box, and a quick call when something changes: together they make a **sync service**.',
+      heading: 'Part 1 recap: name the bytes, send only what changed',
+      eli5: 'Pages with fingerprints, only changed pages carried in, folded and sealed by the mail room. The **block** pipeline keeps the office small and the kids’ bags light.',
       body: [
-        'Bytes: files split into 4 MB blocks named by their hash, deduplicated per namespace, sent only when changed, compressed then encrypted on block servers, stored in object storage with a cold tier. Uploads fell from 600 to 180 TB a day.',
-        'Metadata: files point at immutable versions, versions list block hashes, and a commit is one transaction on a namespace-sharded SQL database with a synchronous standby. A base-version check turns races into conflicted copies. Devices hold long polls, get a nudge in about 2 seconds, and read the change journal from their cursor, which also brings offline devices up to date.',
+        'Files split into 4 MB blocks named by hash. Dedup per namespace, delta sync for edits, content-defined chunking for inserts. Block servers verify, compress, then encrypt into object storage, and uploads resume from a missing list.',
+        'Uploads fell from 600 to 180 TB a day. Part 2 covers metadata, notifications, conflicts, sharing, history and failures.',
       ],
-      keyIdea: 'Separate content from metadata: content is immutable, hash-named and eventually stored anywhere, while metadata is small, transactional and the only thing that defines what a file is.',
-      metrics: { changes: '3,500/s peak', upload: '180 TB/day', stored: '420 PB', sync: '2 s', notify: '30M held conns' },
+      keyIdea: 'Content is immutable and named by hash, so most of the sync problem becomes "which hashes does the server lack?".',
+      metrics: { ...same, upload: '180 TB/day', stored: '380 PB' },
+      metricTones: { upload: 'good', stored: 'good' },
       scene: {
-        nodes: [laptop, blocks, { ...store, status: 'ok' }, vault, api, cache, { ...db, status: 'ok' }, notify, { ...phone, status: 'ok' }],
-        links: [
-          { from: 'laptop', to: 'blocks' },
-          { from: 'blocks', to: 'store' },
-          { from: 'blocks', to: 'vault', style: 'dashed' },
-          { from: 'laptop', to: 'api' },
-          { from: 'api', to: 'cache' },
-          { from: 'api', to: 'db' },
-          { from: 'api', to: 'notify', style: 'dashed' },
-          { from: 'notify', to: 'phone' },
-        ],
-        flows: [
-          { path: ['laptop', 'blocks', 'store'], tone: 'data', duration: 1.6 },
-          { path: ['laptop', 'api', 'db'], tone: 'request', label: 'commit', duration: 1.6, delay: 1.7 },
-          { path: ['api', 'notify', 'phone'], tone: 'event', duration: 1.6, delay: 3.4 },
-        ],
+        nodes: [{ ...laptop, status: 'ok' }, { ...blocks, status: 'ok' }, { ...store, status: 'ok' }, vault],
+        links: [link('laptop', 'blocks'), link('blocks', 'store'), link('blocks', 'vault', { style: 'dashed' })],
+        flows: [{ path: ['laptop', 'blocks', 'store'], tone: 'data', label: 'changed blocks', duration: 1.8 }],
+        panel: {
+          title: 'Bytes pipeline',
+          icon: 'Layers',
+          rows: [
+            { text: 'Split', value: '4 MB, hashed' },
+            { text: 'Dedup', value: 'per namespace' },
+            { text: 'Send', value: 'changed blocks only', tone: 'good' },
+            { text: 'Store', value: 'compressed, encrypted' },
+            { text: 'Uploads', value: '600 to 180 TB/day', tone: 'good' },
+          ],
+        },
+        caption: 'The byte path is done',
       },
       quiz: {
-        question: 'A phone misses a notification because its notification server crashed. How does it still get the new version?',
-        options: [
-          'It does not, the change is lost until the file is edited again',
-          'The server keeps a queue of missed messages per device and replays it',
-          'On reconnect it asks for all changes after its saved cursor in the change journal',
-          'The laptop resends the file directly to the phone',
-        ],
+        question: 'A user copies a 1 GB folder into another folder in the same account. How many bytes of content does the client upload?',
+        options: ['1 GB, a copy is a new file', 'About half, after compression', 'Almost none, the hashes already exist in the namespace', 'Only the file names, but the blocks are re-encrypted and re-sent'],
         answer: 2,
-        explain: 'Notifications are only nudges. The change journal per namespace is the record, and each device keeps the last sequence number it has seen, so asking for changes after that cursor returns everything it missed.',
+        explain: 'The commit lists block hashes the namespace already owns, so the server asks for nothing. Only metadata rows are written.',
       },
     },
   ],

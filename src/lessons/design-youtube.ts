@@ -1,60 +1,40 @@
-import type { Lesson, SceneNode } from '../engine/types';
+import type { Lesson, SceneLink, SceneNode } from '../engine/types';
 
-// Main layout. Top row (x + y = -4) is the upload pipeline, bottom row (x + y = 2.5) is metadata and playback.
-const creator: SceneNode = { id: 'creator', kind: 'phone', at: [-5, 1], label: 'creator', sub: '400 MB upload' };
-const raw: SceneNode = { id: 'raw', kind: 'storage', at: [-3.7, -0.3], label: 'raw bucket', sub: 'originals' };
-const queue: SceneNode = { id: 'queue', kind: 'queue', at: [-2.4, -1.6], label: 'job queue', sub: 'transcode tasks' };
-const workers: SceneNode = { id: 'workers', kind: 'worker', at: [-1.1, -2.9], label: 'encoders', sub: 'autoscaled pool' };
-const rend: SceneNode = { id: 'rend', kind: 'storage', at: [0.2, -4.2], label: 'renditions', sub: 'HLS segments' };
-const rider: SceneNode = { id: 'rider', kind: 'phone', at: [1.5, -5.5], label: 'phone viewer', sub: 'on a train' };
-const api: SceneNode = { id: 'api', kind: 'server', at: [-1.75, 4.25], label: 'API servers', sub: 'stateless' };
-const db: SceneNode = { id: 'db', kind: 'db', at: [-0.45, 2.95], label: 'metadata DB', sub: 'sharded SQL' };
-const cache: SceneNode = { id: 'cache', kind: 'cache', at: [0.85, 1.65], label: 'meta cache', sub: 'Redis' };
-const origin: SceneNode = { id: 'origin', kind: 'server', at: [2.15, 0.35], label: 'origin servers', sub: 'long-tail videos' };
-const cdn: SceneNode = { id: 'cdn', kind: 'cdn', at: [3.45, -0.95], label: 'CDN edge', sub: 'hot segments' };
-const viewer: SceneNode = { id: 'viewer', kind: 'client', at: [4.75, -2.25], label: 'viewer', sub: 'laptop, 8 Mbps' };
+/** Place by screen column d (right is positive) and depth s (down is positive). */
+const at = (d: number, s: number): [number, number] => [(s + d) / 2, (s - d) / 2];
+const link = (from: string, to: string, extra: Partial<SceneLink> = {}): SceneLink => ({ from, to, ...extra });
 
-// The naive single box.
-const mono: SceneNode = { id: 'mono', kind: 'server', at: [-0.125, -0.625], label: 'video server', sub: 'disk + MySQL' };
+const creator: SceneNode = { id: 'creator', kind: 'phone', at: at(-4.5, 0), label: 'creator', sub: '400 MB video' };
+const viewer: SceneNode = { id: 'viewer', kind: 'client', at: at(4.5, -3), label: 'viewer', sub: 'laptop, 8 Mbps' };
+const rider: SceneNode = { id: 'rider', kind: 'phone', at: at(4.5, 3), label: 'phone viewer', sub: 'on a train' };
+const svc: SceneNode = { id: 'svc', kind: 'block', at: at(0, 0), label: 'video service', sub: 'to be designed', icon: 'Globe', tint: 'violet' };
+const api: SceneNode = { id: 'api', kind: 'block', at: at(0, -3.6), label: 'API servers', sub: 'stateless', icon: 'Network', tint: 'violet' };
+const db: SceneNode = { id: 'db', kind: 'db', at: at(4.5, -3.6), label: 'metadata DB', sub: 'SQL + replicas' };
+const raw: SceneNode = { id: 'raw', kind: 'storage', at: at(0, 3.6), label: 'raw bucket', sub: 'object storage' };
+const mono: SceneNode = { id: 'mono', kind: 'server', at: at(0, 0), label: 'video server', sub: 'disk + MySQL' };
 
-// Transcoding DAG layout (its own nodes).
-const dsrc: SceneNode = { id: 'dsrc', kind: 'storage', at: [-3.7, 3.7], label: 'raw video', sub: '5 min, 400 MB' };
-const dsplit: SceneNode = { id: 'dsplit', kind: 'worker', at: [-2.3, 2.3], label: 'inspect + split', sub: '75 segments' };
-const encHd: SceneNode = { id: 'encHd', kind: 'worker', at: [-2.55, -0.75], label: 'encode HD', sub: '1080p, 720p' };
-const encSd: SceneNode = { id: 'encSd', kind: 'worker', at: [0.75, 2.55], label: 'encode SD', sub: '480p, 360p, 240p' };
-const thumbs: SceneNode = { id: 'thumbs', kind: 'worker', at: [-1.15, -2.15], label: 'thumbnails', sub: '3 frames' };
-const audio: SceneNode = { id: 'audio', kind: 'worker', at: [2.15, 1.15], label: 'audio', sub: 'AAC 128 kbps' };
-const pack: SceneNode = { id: 'pack', kind: 'worker', at: [1.9, -1.9], label: 'package', sub: 'HLS playlists' };
-const dout: SceneNode = { id: 'dout', kind: 'storage', at: [3.3, -3.3], label: 'renditions', sub: '5 qualities' };
-
-const uploadLinks = [
-  { from: 'creator', to: 'raw' },
-  { from: 'raw', to: 'queue' },
-  { from: 'queue', to: 'workers' },
-  { from: 'workers', to: 'rend' },
+const metrics = [
+  { key: 'plays', label: 'Peak plays', icon: 'Activity' },
+  { key: 'uploads', label: 'Peak uploads', icon: 'Download' },
+  { key: 'storage', label: 'New storage', icon: 'HardDrive' },
+  { key: 'egress', label: 'Egress', icon: 'Signal' },
+  { key: 'ready', label: 'Upload to ready', icon: 'Timer' },
 ];
 
 export const designYoutube: Lesson = {
   id: 'design-youtube',
-  title: 'Design YouTube',
-  tagline: 'Take a 400 MB phone video, turn it into five streamable qualities in two minutes, and serve 11 PB a day without going broke.',
-  minutes: 24,
+  title: 'Design YouTube (part 1)',
+  tagline: 'Take a 400 MB phone video in, split it into small tasks and turn it into five streamable qualities in two minutes.',
+  minutes: 16,
   level: 'Advanced',
   learn: [
     'Scale numbers, the API and the data model for a video platform',
+    'Why one server cannot take uploads, encode and serve playback',
     'Uploads through pre-signed URLs, in resumable parts, straight to object storage',
-    'The transcoding pipeline as a DAG of small tasks spread over a worker pool',
-    'Renditions, segments and adaptive bitrate streaming',
-    'What the CDN costs, and how to treat the long tail of cold videos',
-    'Pipeline failures, upload surges and keeping uploads and videos safe',
+    'Containers, codecs and why every video must be transcoded',
+    'The transcoding pipeline as a DAG of small tasks spread over a worker pool, and how to size the fleet',
   ],
-  metrics: [
-    { key: 'plays', label: 'Peak plays' },
-    { key: 'uploads', label: 'Peak uploads' },
-    { key: 'storage', label: 'New storage' },
-    { key: 'egress', label: 'Egress' },
-    { key: 'ready', label: 'Upload to ready' },
-  ],
+  metrics,
   steps: [
     {
       title: 'Requirements',
@@ -62,58 +42,123 @@ export const designYoutube: Lesson = {
       heading: 'Two flows, very different sizes',
       eli5: 'A bakery takes giant cakes from bakers and sells slices to a whole city. The **video service** is that bakery: few cakes come in, millions of slices go out.',
       body: [
-        'Scope it to the two flows that matter: a creator **uploads** a video, and viewers **watch** it on phones, laptops and TVs, anywhere in the world. Comments, likes and recommendations are out of scope. Assume **20 million daily viewers** watching 6 videos each, and **100,000 uploads a day** averaging 400 MB (about five minutes of phone video).',
-        'Do the napkin math from the napkin math lesson. Plays: 120 million a day, about 1,400 per second, so **3,000 per second at peak**. Uploads: just over 1 per second, 3 at peak. Raw storage: 100,000 x 400 MB = **40 TB a day** before we make any copies. If an average play streams 90 MB, egress is 120 million x 90 MB, about **11 PB a day**, roughly 1 Tbps around the clock.',
-        'The ratio tells you where the money goes. Writes are tiny in count and huge in bytes, reads are bytes out to the whole planet. Targets: a new video is playable within **5 minutes** of upload, playback starts in under 2 seconds, and nothing a creator uploads is ever lost.',
+        'Scope it to the two flows that matter: a creator **uploads** a video, and viewers **watch** it on phones, laptops and TVs, anywhere in the world. Comments, likes, search and recommendations are out of scope.',
+        'Targets: a new video is playable within **5 minutes** of upload, playback starts in under 2 seconds, and nothing a creator uploads is ever lost.',
       ],
-      keyIdea: 'A video platform is a small write path that makes huge files and a giant read path that ships bytes, and the bytes out dominate the cost.',
-      metrics: { plays: '3,000/s', uploads: '3/s', storage: '40 TB/day raw', egress: '11 PB/day', ready: 'target < 5 min' },
+      keyIdea: 'A video platform is two flows, upload and watch, with very different sizes and very different goals.',
+      metrics: { plays: '?', uploads: '?', storage: '?', egress: '?', ready: 'target < 5 min' },
+      metricTones: { ready: 'good' },
       scene: {
-        nodes: [
-          { ...creator, status: 'active' },
-          { ...mono, kind: 'internet', label: 'video service', sub: 'to be designed', badge: '?' },
-          { ...viewer, badge: '120M plays/day' },
-          rider,
-        ],
-        links: [
-          { from: 'creator', to: 'mono' },
-          { from: 'mono', to: 'viewer' },
-          { from: 'mono', to: 'rider' },
-        ],
+        nodes: [{ ...creator, status: 'active', chips: ['upload 400 MB'] }, { ...svc, badge: '?' }, { ...viewer, chips: ['play'] }, rider],
+        links: [link('creator', 'svc'), link('svc', 'viewer'), link('svc', 'rider')],
         flows: [
-          { path: ['creator', 'mono'], tone: 'request', label: '400 MB', duration: 2.4 },
-          { path: ['mono', 'viewer'], tone: 'response', count: 4, duration: 1.2, delay: 0.6 },
-          { path: ['mono', 'rider'], tone: 'response', count: 4, duration: 1.2, delay: 1 },
+          { path: ['creator', 'svc'], tone: 'request', label: '400 MB', duration: 2.4 },
+          { path: ['svc', 'viewer'], tone: 'response', count: 4, duration: 1.2, delay: 0.6 },
+          { path: ['svc', 'rider'], tone: 'response', count: 4, duration: 1.2, delay: 1 },
         ],
-        caption: '100K uploads in, 120M plays out, every day',
+        panel: {
+          title: 'Targets',
+          icon: 'Gauge',
+          rows: [
+            { text: 'Playable after upload', value: '< 5 min', tone: 'good' },
+            { text: 'Playback start', value: '< 2 s', tone: 'good' },
+            { text: 'Uploaded video lost', value: 'never', tone: 'good' },
+            { text: 'Out of scope', value: 'comments, likes, search', tone: 'muted' },
+          ],
+        },
+        caption: 'One small write path, one giant read path',
       },
     },
     {
-      title: 'API and data',
+      title: 'Napkin math',
       tag: 'concept',
-      heading: 'A small API and a status column',
-      eli5: 'The bakery keeps an order book. Each cake gets a line saying who baked it and whether it is still in the oven, ready to sell, or burnt. That book is the **metadata database**.',
+      heading: 'Writes are small in count and huge in bytes',
+      eli5: 'The bakery gets 100,000 giant cakes a day but sells 120 million slices. Most of the work is carrying slices out the door.',
       body: [
-        'Uploads take three calls. `POST /v1/videos` creates the video row and returns where to send the bytes. The client sends the bytes. `POST /v1/videos/{id}/complete` says it is done. Watching takes one: `GET /v1/videos/{id}` returns the title, the status and a **manifest URL** the player streams from. The video bytes never go through this API, as you will see.',
-        'The data model has two worlds. **Metadata** (title, owner, status, duration, which qualities exist) is small, structured and read constantly, so it lives in a SQL database. **Blobs** (the original file, the encoded segments, thumbnails) are huge and immutable, so they live in object storage and the database only holds their keys.',
-        'The `status` column drives the whole lifecycle: `uploading`, `processing`, `ready`, `failed` or `blocked`. Every part of the system moves a video forward by changing that one field, and the watch page shows the video only when it reads `ready`.',
+        'Assume **20 million daily viewers** watching 6 videos each, and **100,000 uploads a day** averaging 400 MB (about five minutes of phone video). Plays: 120 million a day, about 1,400 per second, so **3,000 per second at peak**. Uploads: just over 1 per second, 3 at peak.',
+        'Raw storage: 100,000 x 400 MB = **40 TB a day** before any copies. If every play sends the whole 190 MB file, egress is 120 million x 190 MB, about **23 PB a day**, roughly 2 Tbps around the clock. Bytes out dominate the cost.',
       ],
-      keyIdea: 'Keep small structured metadata in SQL and big immutable blobs in object storage, joined by a key, and drive the lifecycle with one status field.',
-      metrics: { plays: '3,000/s', uploads: '3/s', storage: '40 TB/day raw', egress: '11 PB/day', ready: 'target < 5 min' },
+      keyIdea: 'Writes are few and large, reads are bytes out to the whole planet, and the bytes out dominate the cost.',
+      metrics: { plays: '3,000/s', uploads: '3/s', storage: '40 TB/day raw', egress: '23 PB/day', ready: 'target < 5 min' },
+      metricTones: { egress: 'bad', storage: 'warn' },
       scene: {
-        nodes: [creator, { ...api, status: 'active' }, { ...db, status: 'active', badge: 'status column' }, viewer],
-        links: [
-          { from: 'creator', to: 'api' },
-          { from: 'api', to: 'db' },
-          { from: 'viewer', to: 'api', style: 'dashed' },
+        nodes: [{ ...creator, badge: '100K uploads/day' }, svc, { ...viewer, badge: '120M plays/day' }],
+        links: [link('creator', 'svc'), link('svc', 'viewer')],
+        flows: [
+          { path: ['creator', 'svc'], tone: 'request', label: '40 TB/day in', duration: 2 },
+          { path: ['svc', 'viewer'], tone: 'response', label: '23 PB/day out', count: 4, duration: 1.2, delay: 1 },
         ],
+        panel: {
+          title: 'Napkin math',
+          icon: 'Table',
+          rows: [
+            { text: 'Plays: 120M / 86,400 s', value: '1,400/s' },
+            { text: 'Peak plays', value: '3,000/s' },
+            { text: 'Uploads: 100K x 400 MB', value: '40 TB/day' },
+            { text: 'Egress: 120M x 190 MB', value: '23 PB/day', tone: 'bad' },
+          ],
+          footer: { text: 'Roughly 2 Tbps out, around the clock', tone: 'warn' },
+        },
+        caption: 'About 575 times more bytes out than in',
+      },
+    },
+    {
+      title: 'The API',
+      tag: 'concept',
+      heading: 'Three upload calls and one watch call',
+      eli5: 'The baker fills out a small order slip at the front desk. The slip says where to drop the cake. The cake itself never goes through the desk.',
+      body: [
+        'Uploads take three calls. `POST /v1/videos` creates the video row and returns where to send the bytes. The client sends the bytes. `POST /v1/videos/{id}/complete` says it is done.',
+        'Watching takes one: `GET /v1/videos/{id}` returns the title, the status and a **manifest URL** the player streams from. The video bytes never go through this API, as you will see.',
+      ],
+      keyIdea: 'The API moves small JSON. Video bytes take another road.',
+      metrics: { plays: '3,000/s', uploads: '3/s', storage: '40 TB/day raw', egress: '23 PB/day', ready: 'target < 5 min' },
+      scene: {
+        nodes: [creator, { ...api, status: 'active', chips: ['POST /v1/videos'] }, { ...db, badge: 'status column' }, { ...viewer, at: at(0, 3.6), chips: ['GET /v1/videos/42'] }],
+        links: [link('creator', 'api'), link('api', 'db'), link('viewer', 'api', { style: 'dashed' })],
         flows: [
           { path: ['creator', 'api'], tone: 'request', label: 'POST /videos', duration: 1.2 },
           { path: ['api', 'db'], tone: 'request', label: 'INSERT uploading', duration: 0.9, delay: 1.3 },
           { path: ['viewer', 'api'], tone: 'request', label: 'GET /videos/42', duration: 1.4, delay: 2.4 },
           { path: ['api', 'viewer'], tone: 'response', label: 'manifest URL', duration: 1.4, delay: 3.9 },
         ],
+        panel: {
+          title: 'The whole API',
+          icon: 'Code',
+          code: 'POST /v1/videos            create row\nPUT  <signed url>          send bytes\nPOST /v1/videos/{id}/complete\nGET  /v1/videos/{id}       status + manifest',
+        },
         caption: 'The API moves metadata, and bytes take another road',
+      },
+    },
+    {
+      title: 'Data model',
+      tag: 'concept',
+      heading: 'Small metadata in SQL, big blobs in object storage',
+      eli5: 'The order book holds short notes about each cake. The cakes themselves sit in the warehouse, and each note says which shelf. The book is the **metadata database**.',
+      body: [
+        '**Metadata** (title, owner, status, duration, which qualities exist) is small, structured and read constantly, so it lives in a SQL database. **Blobs** (the original file, the encoded segments, thumbnails) are huge and immutable, so they live in object storage.',
+        'The database only holds their keys. Video ids are time-ordered unique numbers, so new rows land together and ids sort by age.',
+      ],
+      keyIdea: 'Keep small structured metadata in SQL and big immutable blobs in object storage, joined by a key.',
+      metrics: { plays: '3,000/s', uploads: '3/s', storage: '40 TB/day raw', egress: '23 PB/day', ready: 'target < 5 min' },
+      scene: {
+        nodes: [{ ...api, at: at(-4.5, 0) }, { ...db, at: at(0, -3.6), status: 'active', badge: 'rows: small' }, { ...raw, at: at(0, 3.6), status: 'active', badge: 'blobs: huge' }],
+        links: [link('api', 'db', { label: 'title, status' }), link('api', 'raw', { label: 'key only', style: 'dashed' })],
+        flows: [
+          { path: ['api', 'db'], tone: 'request', label: 'row', duration: 1.2 },
+          { path: ['db', 'raw'], tone: 'data', label: 'raw_key', duration: 1.4, delay: 1.3, count: 1 },
+        ],
+        panel: {
+          title: 'Two worlds',
+          icon: 'Table',
+          rows: [
+            { text: 'Metadata: title, owner, status', value: 'SQL' },
+            { text: 'Original file, segments', value: 'object storage' },
+            { text: 'Thumbnails', value: 'object storage' },
+            { text: 'Link between them', value: 'a key' },
+          ],
+        },
+        caption: 'Rows hold keys, storage holds the bytes',
       },
       code: {
         language: 'sql',
@@ -142,95 +187,190 @@ CREATE INDEX videos_by_owner ON videos (owner_id, created_at DESC);`,
       },
     },
     {
+      title: 'Status column',
+      tag: 'concept',
+      heading: 'One status field drives the whole lifecycle',
+      eli5: 'Each cake has a sticker on its box: in the oven, ready to sell, or burnt. Every helper changes the sticker, and the shop only displays cakes marked ready.',
+      body: [
+        'The `status` column moves through `uploading`, `processing`, `ready`, `failed` or `blocked`. Every part of the system moves a video forward by changing that one field.',
+        'The watch page shows the video only when it reads `ready`. A creator sees the other states on their own channel page.',
+      ],
+      keyIdea: 'One status field is the contract between the API, the pipeline and the watch page.',
+      metrics: { plays: '3,000/s', uploads: '3/s', storage: '40 TB/day raw', egress: '23 PB/day', ready: 'target < 5 min' },
+      scene: {
+        nodes: [{ ...api, at: at(-4.5, 0) }, { ...db, at: at(0, 0), status: 'active', badge: 'status = ?' }, { ...viewer, at: at(4.5, 0), chips: [{ text: 'only ready', tone: 'good' }] }],
+        links: [link('api', 'db'), link('viewer', 'db', { style: 'dashed', arrow: 'none' })],
+        flows: [
+          { path: ['api', 'db'], tone: 'request', label: 'uploading', duration: 1.2 },
+          { path: ['api', 'db'], tone: 'request', label: 'processing', duration: 1.2, delay: 1.6 },
+          { path: ['api', 'db'], tone: 'request', label: 'ready', duration: 1.2, delay: 3.2 },
+        ],
+        panel: {
+          title: 'Status lifecycle',
+          icon: 'Route',
+          rows: [
+            { text: 'uploading', value: 'bytes arriving' },
+            { text: 'processing', value: 'encoders working' },
+            { text: 'ready', value: 'watchable', tone: 'good' },
+            { text: 'failed', value: 'bad file', tone: 'bad' },
+            { text: 'blocked', value: 'policy', tone: 'warn' },
+          ],
+        },
+        caption: 'Every part moves a video forward by editing one field',
+      },
+    },
+    {
       title: 'Simple design',
       tag: 'concept',
       heading: 'Version one: one server does everything',
       eli5: 'At first one baker does it all in a single shop: takes in cakes, re-bakes them, and hands whole cakes to every customer at the door. That one shop is the **video server**.',
       body: [
-        'The first design fits on a whiteboard. The creator POSTs the file to a **video server**. It saves the file to local disk, runs one encode to a standard 1080p MP4, writes a MySQL row, and serves the MP4 back to anyone who asks for it.',
-        'At a few hundred uploads a day this works. Encoding a five-minute video on one machine takes several minutes, so a creator waits, and viewers download one 190 MB file per play.',
-        'Keep the numbers in mind: 40 TB of raw files plus 19 TB of MP4s land every day, and every play pulls the whole file whether the viewer watches ten seconds or five minutes.',
+        'The creator POSTs the file to a **video server**. It saves the file to local disk, runs one encode to a standard 1080p MP4, writes a MySQL row, and serves the MP4 back to anyone who asks.',
+        'At a few hundred uploads a day this works. Keep the numbers in mind: 40 TB of raw files plus 19 TB of MP4s land every day, and every play pulls the whole 190 MB file whether the viewer watches ten seconds or five minutes.',
       ],
       keyIdea: 'Start with the simplest thing that works, then find exactly which numbers break it.',
       metrics: { plays: '3,000/s', uploads: '3/s', storage: '59 TB/day', egress: '23 PB/day', ready: '20 min' },
+      metricTones: { egress: 'bad', ready: 'bad' },
       scene: {
         nodes: [creator, { ...mono, status: 'active', badge: 'upload, encode, serve' }, viewer, rider],
-        links: [
-          { from: 'creator', to: 'mono' },
-          { from: 'mono', to: 'viewer' },
-          { from: 'mono', to: 'rider' },
-        ],
+        links: [link('creator', 'mono'), link('mono', 'viewer'), link('mono', 'rider')],
         flows: [
           { path: ['creator', 'mono'], tone: 'request', label: 'POST 400 MB', duration: 2.2 },
           { path: ['mono', 'viewer'], tone: 'response', label: 'whole MP4', duration: 1.6, delay: 2.4 },
           { path: ['mono', 'rider'], tone: 'response', label: 'whole MP4', duration: 1.6, delay: 2.8 },
         ],
+        panel: {
+          title: 'Per day, one box',
+          icon: 'HardDrive',
+          rows: [
+            { text: 'Raw files', value: '40 TB' },
+            { text: 'One 1080p MP4 each', value: '19 TB' },
+            { text: 'Bytes per play', value: '190 MB', tone: 'warn' },
+          ],
+        },
         caption: 'One box takes uploads, encodes and serves',
       },
     },
     {
-      title: 'Where it breaks',
+      title: 'Upload pain',
       tag: 'case',
-      heading: 'The single server fails four ways at once',
-      eli5: 'Cakes pile up at the door, the one oven is always busy, customers queue around the block, and the train rider cannot carry a whole cake. The **video server** is overwhelmed.',
+      heading: 'Break 1: uploads tie up the server',
+      eli5: 'A baker walks cake to the shop very slowly. While one baker stands at the counter, nobody else gets served. A dropped cake means walking back to the start.',
       body: [
-        '**Uploads tie up the server.** A 400 MB upload over a 10 Mbps home connection takes about five minutes. Hundreds of them in flight hold threads and memory, and a dropped connection at 95% means starting over.',
-        '**Encoding is slow and serial.** One machine encoding one quality at a time falls behind a queue of uploads, so "ready" drifts to 20 minutes and beyond. **Playback is one file for everyone.** The 1080p MP4 needs about 5 Mbps. The rider on a train with 1 Mbps stalls every few seconds, and an old TV may not play the codec at all.',
-        '**Egress is impossible.** 23 PB a day is over 2 Tbps on average from one place. Viewers in Sydney cross an ocean for every byte. No single network link or server comes close.',
+        'A 400 MB upload over a 10 Mbps home connection takes about five minutes. Hundreds of them in flight hold threads and memory on the **video server**.',
+        'A dropped connection at 95% means starting over from zero.',
       ],
-      keyIdea: 'Upload bytes, encode CPU and playback bandwidth are three separate scaling problems, and none of them belong on the app server.',
-      metrics: { plays: '3,000/s', uploads: '3/s', storage: '59 TB/day', egress: '23 PB/day', ready: '20+ min' },
+      keyIdea: 'Slow, huge uploads should not hold an app server, and a failure late in the upload should not cost the whole file.',
+      metrics: { plays: '3,000/s', uploads: '3/s', storage: '59 TB/day', egress: '23 PB/day', ready: '20 min' },
+      metricTones: { ready: 'bad' },
       scene: {
-        nodes: [
-          { ...creator, status: 'hot', badge: 'upload reset at 95%' },
-          { ...mono, status: 'hot', badge: 'CPU 100%, 2 Tbps?' },
-          { ...viewer, status: 'hot', badge: 'from far away' },
-          { ...rider, status: 'down', badge: 'buffering' },
-        ],
-        links: [
-          { from: 'creator', to: 'mono' },
-          { from: 'mono', to: 'viewer' },
-          { from: 'mono', to: 'rider' },
-        ],
+        nodes: [{ ...creator, status: 'hot', badge: 'reset at 95%' }, { ...mono, status: 'hot', load: 92, chips: [{ text: '300 uploads open', tone: 'warn' }] }, viewer],
+        links: [link('creator', 'mono', { label: '10 Mbps · 5 min', labelTone: 'warn' }), link('mono', 'viewer')],
         flows: [
-          { path: ['creator', 'mono'], tone: 'error', label: 'connection lost', duration: 2 },
-          { path: ['mono', 'viewer'], tone: 'response', count: 3, duration: 2.4, delay: 0.5 },
-          { path: ['mono', 'rider'], tone: 'error', label: '5 Mbps file, 1 Mbps link', duration: 2.6, delay: 1 },
+          { path: ['creator', 'mono'], tone: 'error', label: 'connection lost', duration: 2.2 },
+          { path: ['mono', 'viewer'], tone: 'response', duration: 1.4, delay: 1 },
         ],
-        caption: 'Uploads, encoding and playback all choke on one box',
+        panel: {
+          title: 'One upload',
+          icon: 'Timer',
+          rows: [
+            { text: '400 MB at 10 Mbps', value: '~5 min', tone: 'warn' },
+            { text: 'Drop at 95%', value: 'start over', tone: 'bad' },
+          ],
+        },
+        caption: 'Slow clients hold the server hostage',
+      },
+    },
+    {
+      title: 'Encode pain',
+      tag: 'case',
+      heading: 'Break 2: encoding is slow and serial',
+      eli5: 'The one oven bakes one cake at a time. Orders pile up on the counter, and each baker waits longer than the last.',
+      body: [
+        'One machine encoding one quality at a time falls behind a queue of uploads. Encoding is CPU work, and it competes with serving traffic for the same cores.',
+        'One 1080p encode alone takes about 20 minutes, so "ready" drifts there and beyond, far past the 5 minute target.',
+      ],
+      keyIdea: 'Encoding is a CPU problem that has to scale on its own, away from the app server.',
+      metrics: { plays: '3,000/s', uploads: '3/s', storage: '59 TB/day', egress: '23 PB/day', ready: '20+ min' },
+      metricTones: { ready: 'bad' },
+      scene: {
+        nodes: [{ ...creator, chips: ['1080p MP4', 'waiting...'] }, { ...mono, status: 'hot', load: 100, badge: 'one encode at a time' }, { ...viewer, status: 'down', badge: 'not ready yet' }],
+        links: [link('creator', 'mono'), link('mono', 'viewer')],
+        flows: [
+          { path: ['creator', 'mono'], tone: 'request', count: 3, duration: 1.2 },
+          { path: ['mono', 'viewer'], tone: 'error', label: 'ready in 20 min', duration: 2, delay: 1.4 },
+        ],
+        panel: {
+          title: 'Ready time',
+          icon: 'Clock',
+          rows: [
+            { text: 'Target', value: '5 min', tone: 'good' },
+            { text: 'One serial encoder', value: '20+ min', tone: 'bad' },
+          ],
+        },
+        caption: 'Uploads queue behind one busy encoder',
+      },
+    },
+    {
+      title: 'Playback pain',
+      tag: 'case',
+      heading: 'Break 3: one file for everyone, from one place',
+      eli5: 'Every customer gets the same giant cake, even the one on a bicycle with one hand. And everyone must walk to the one shop, however far away.',
+      body: [
+        'The 1080p MP4 needs about 5 Mbps. The rider on a train with 1 Mbps stalls every few seconds, and an old TV may not play the codec at all.',
+        '**Egress is impossible.** 23 PB a day is over 2 Tbps on average from one place, and viewers in Sydney cross an ocean for every byte. No single link or server comes close.',
+      ],
+      keyIdea: 'Upload bytes, encode CPU and playback bandwidth are three separate scaling problems, and none belong on the app server.',
+      metrics: { plays: '3,000/s', uploads: '3/s', storage: '59 TB/day', egress: '23 PB/day', ready: '20+ min' },
+      metricTones: { egress: 'bad', ready: 'bad' },
+      scene: {
+        nodes: [{ ...mono, at: at(-4.5, 0), status: 'hot', badge: '2 Tbps?' }, { ...viewer, status: 'hot', badge: 'far away' }, { ...rider, status: 'down', badge: 'buffering' }],
+        links: [link('mono', 'viewer', { label: 'across an ocean', labelTone: 'warn' }), link('mono', 'rider', { label: '1 Mbps train', labelTone: 'warn' })],
+        flows: [
+          { path: ['mono', 'viewer'], tone: 'response', count: 3, duration: 2.4 },
+          { path: ['mono', 'rider'], tone: 'error', label: '5 Mbps file, 1 Mbps link', duration: 2.6, delay: 0.6 },
+        ],
+        panel: {
+          title: 'One MP4 for all',
+          icon: 'Signal',
+          rows: [
+            { text: '1080p MP4 needs', value: '5 Mbps' },
+            { text: 'Train rider has', value: '1 Mbps', tone: 'bad' },
+            { text: 'Egress from one place', value: '2+ Tbps', tone: 'bad' },
+          ],
+        },
+        caption: 'One file, one place, every device',
       },
     },
     {
       title: 'Direct upload',
       tag: 'concept',
-      heading: 'Fix 1: upload in parts, straight to object storage',
-      eli5: 'Instead of handing the cake to the shopkeeper, the baker gets a signed ticket to drop it at the warehouse door, sliced into boxes so a dropped box can be sent again. That ticket is a **pre-signed URL**.',
+      heading: 'Fix 1: upload straight to object storage',
+      eli5: 'Instead of handing the cake to the shopkeeper, the baker gets a signed ticket to drop it at the warehouse door. That ticket is a **pre-signed URL**.',
       body: [
-        'As in the object storage lesson, the API server stops touching bytes. `POST /videos` writes the row as `uploading`, starts a **multipart upload** in the raw bucket and returns one **pre-signed URL** per 16 MB part. Each URL allows exactly one PUT to one key and expires in an hour, so a leaked URL is worth little.',
-        'The 400 MB file becomes 25 parts. The client sends 4 at a time, which fills a fast link better than one stream. If the train goes into a tunnel, the client asks which parts landed and resends only the missing ones: a **resumable upload**. On `complete`, storage stitches the parts into one object and the API flips the row to `processing`.',
-        'For far-away creators, upload to the nearest region or an edge ingest point and copy to the main region in the background. The API servers now handle three small JSON calls per upload, and scaling them is the load balancing lesson again.',
+        'The API server stops touching bytes. `POST /videos` writes the row as `uploading`, starts a **multipart upload** in the raw bucket and returns **pre-signed URLs**.',
+        'Each URL allows exactly one PUT to one key and expires in an hour, so a leaked URL is worth little. The API now handles three small JSON calls per upload.',
       ],
-      keyIdea: 'Let clients send big bytes straight to object storage with short-lived, single-purpose URLs, in parts that can be retried one at a time.',
+      keyIdea: 'Let clients send big bytes straight to object storage with short-lived, single-purpose URLs.',
       metrics: { plays: '3,000/s', uploads: '3/s', storage: '59 TB/day', egress: '23 PB/day', ready: '20 min' },
       scene: {
-        nodes: [
-          { ...creator, status: 'active', badge: '4 parts in flight' },
-          { ...raw, status: 'active', badge: '25 x 16 MB' },
-          { ...api, status: 'ok', badge: 'no video bytes' },
-          db,
-        ],
-        links: [
-          { from: 'creator', to: 'api' },
-          { from: 'api', to: 'db' },
-          { from: 'creator', to: 'raw', label: 'pre-signed PUT' },
-        ],
+        nodes: [{ ...creator, status: 'active' }, { ...api, at: at(0, -3.6), status: 'ok', badge: 'no video bytes' }, { ...raw, at: at(0, 3.6), status: 'active' }, { ...db, at: at(4.5, -3.6) }],
+        links: [link('creator', 'api'), link('api', 'db'), link('creator', 'raw', { label: 'pre-signed PUT' })],
         flows: [
           { path: ['creator', 'api'], tone: 'request', label: 'POST /videos', duration: 1 },
-          { path: ['api', 'creator'], tone: 'response', label: '25 part URLs', duration: 1, delay: 1.1 },
-          { path: ['creator', 'raw'], tone: 'data', label: 'part n', count: 4, duration: 1.4, delay: 2.2 },
-          { path: ['creator', 'api'], tone: 'request', label: 'complete', duration: 1, delay: 3.8 },
-          { path: ['api', 'db'], tone: 'request', label: 'processing', duration: 0.9, delay: 4.9 },
+          { path: ['api', 'db'], tone: 'request', label: 'uploading', duration: 0.9, delay: 1.1 },
+          { path: ['api', 'creator'], tone: 'response', label: 'signed URLs', duration: 1, delay: 2.1 },
+          { path: ['creator', 'raw'], tone: 'data', label: '400 MB', duration: 1.8, delay: 3.2 },
         ],
+        panel: {
+          title: 'One signed URL',
+          icon: 'KeyRound',
+          rows: [
+            { text: 'Allowed action', value: 'one PUT' },
+            { text: 'Allowed key', value: 'one object' },
+            { text: 'Expires', value: '1 hour', tone: 'good' },
+          ],
+        },
         caption: 'Bytes go to the bucket, the API only signs and records',
       },
       code: {
@@ -263,51 +403,333 @@ def parts_already_uploaded(video_id, upload_id):    # used to resume
       },
     },
     {
+      title: 'Resumable parts',
+      tag: 'concept',
+      heading: 'Send 25 parts, resend only the missing ones',
+      eli5: 'The baker packs the cake into 25 small boxes and carries four at a time. If a box is dropped in a tunnel, only that box is carried again.',
+      body: [
+        'The 400 MB file becomes 25 parts of 16 MB. The client sends 4 at a time, which fills a fast link better than one stream.',
+        'In a tunnel, the client asks the **API** which parts landed (it cannot list them itself, that needs credentials) and gets fresh URLs for the missing ones, since old ones may have expired. That is a **resumable upload**.',
+        'On `complete` the client sends each part number and its **ETag**. The API completes the multipart upload, sets `processing` and enqueues the transcode graph.',
+      ],
+      keyIdea: 'Split big uploads into parts that are sent in parallel and retried one at a time.',
+      metrics: { plays: '3,000/s', uploads: '3/s', storage: '59 TB/day', egress: '23 PB/day', ready: '20 min' },
+      scene: {
+        nodes: [{ ...creator, status: 'active', chips: ['4 parts in flight'] }, { ...raw, status: 'active', badge: '18 of 25 landed' }, { ...api, status: 'ok' }],
+        links: [link('creator', 'raw', { label: 'tunnel: 7 parts lost', labelTone: 'warn' }), link('creator', 'api', { style: 'dashed', arrow: 'both' })],
+        flows: [
+          { path: ['creator', 'raw'], tone: 'data', label: 'part n', count: 4, duration: 1.4 },
+          { path: ['creator', 'api'], tone: 'request', label: 'list parts?', duration: 1, delay: 1.6 },
+          { path: ['api', 'creator'], tone: 'response', label: 'fresh URLs', duration: 1, delay: 2.7 },
+          { path: ['creator', 'raw'], tone: 'data', label: 'resend 7', count: 3, duration: 1.4, delay: 3.8 },
+        ],
+        panel: {
+          title: 'Parts of 400 MB',
+          icon: 'Layers',
+          rows: [
+            { text: 'Part size', value: '16 MB' },
+            { text: 'Parts', value: '25' },
+            { text: 'In flight', value: '4' },
+            { text: 'After a tunnel', value: 'resend 7 only', tone: 'good' },
+          ],
+        },
+        caption: 'Only the missing parts travel again',
+      },
+      code: {
+        language: 'python',
+        title: 'Resume through the API, then complete the upload',
+        source: `def resume_upload(video_id, upload_id, n_parts):    # client calls the API
+    have = parts_already_uploaded(video_id, upload_id)
+    missing = [n for n in range(1, n_parts + 1) if n not in have]
+    return {"urls": sign_parts(video_id, upload_id, missing)}   # fresh 1 h URLs
+
+def complete_upload(video_id, upload_id, parts):    # [{PartNumber, ETag}, ...]
+    key = f"raw/{video_id}/original"
+    s3.complete_multipart_upload(Bucket=BUCKET, Key=key, UploadId=upload_id,
+                                 MultipartUpload={"Parts": parts})
+    db.set_status(video_id, "processing")
+    queue.enqueue_dag(video_id)                     # starts inspect and split`,
+        highlight: [4, 8, 10, 11],
+      },
+      quiz: {
+        question: 'A 400 MB upload loses its connection after 18 of 25 parts landed. What should the client do?',
+        options: [
+          'Start the whole upload again with a new URL',
+          'Ask the API which parts landed, get fresh URLs and resend only the 7 missing parts',
+          'Ask the API server to fetch the file from the phone',
+          'Wait until the user retries from the beginning',
+        ],
+        answer: 1,
+        explain: 'Each part is its own PUT, so storage keeps the parts that arrived. The API lists them and returns fresh URLs, the client resends the rest and then calls complete with every ETag.',
+      },
+    },
+    {
+      title: 'Upload speed',
+      tag: 'tradeoff',
+      heading: 'Uploading from far away',
+      eli5: 'A baker in a faraway town drops cakes at a local pickup box, and a truck carries them to the main warehouse overnight. That is faster for the baker.',
+      body: [
+        'For far-away creators, upload to the nearest region or an edge ingest point and copy to the main region in the background. The creator sees a fast upload, and the copy runs on fast links between data centers.',
+        'The pipeline starts once the object lands in the main bucket, so time to ready still counts from that moment.',
+      ],
+      keyIdea: 'Shorten the slow last mile with a nearby ingest point, and copy to the home region in the background.',
+      metrics: { plays: '3,000/s', uploads: '3/s', storage: '59 TB/day', egress: '23 PB/day', ready: '20 min' },
+      scene: {
+        nodes: [{ ...creator, badge: 'Sydney' }, { id: 'edge', kind: 'cdn', at: at(0, 0), label: 'ingest point', sub: 'nearby', status: 'active' }, { ...raw, at: at(4.5, 0), label: 'main bucket', sub: 'home region' }],
+        links: [link('creator', 'edge', { label: 'fast local hop', labelTone: 'good' }), link('edge', 'raw', { label: 'background copy' })],
+        flows: [
+          { path: ['creator', 'edge'], tone: 'data', label: '400 MB', duration: 1.4 },
+          { path: ['edge', 'raw'], tone: 'data', label: 'copy', duration: 2, delay: 1.6 },
+        ],
+        panel: {
+          title: 'Two hops',
+          icon: 'Route',
+          rows: [
+            { text: 'Creator to ingest point', value: 'short, fast', tone: 'good' },
+            { text: 'Ingest to main bucket', value: 'background copy' },
+            { text: 'Creator waits for', value: 'near hop only', tone: 'good' },
+          ],
+        },
+        caption: 'The creator waits for the near hop only',
+      },
+    },
+    {
+      title: 'Codecs',
+      tag: 'concept',
+      heading: 'Containers and codecs: what a video file really is',
+      eli5: 'A cake box is the **container** and the recipe that squeezes the cake small is the codec. Different shops open different boxes, and some recipes only work in some shops.',
+      body: [
+        'A **container** is the basket that holds video, audio and metadata. You see it in the extension: `.mov`, `.mp4`, `.avi`. A **codec** compresses and decompresses the pictures to shrink size. Common ones are H.264, VP9 and HEVC.',
+        'Phones record in one format, and TVs, browsers and old devices each support another. So the platform must transcode: change codec, resolution and bitrate for every device and every network.',
+      ],
+      keyIdea: 'A video file is a container around a codec stream, and no single format plays everywhere, so every upload gets transcoded.',
+      metrics: { plays: '3,000/s', uploads: '3/s', storage: '59 TB/day', egress: '23 PB/day', ready: '20 min' },
+      scene: {
+        nodes: [{ ...creator, chips: ['.mov, HEVC'] }, { id: 'enc', kind: 'block', at: at(0, 0), label: 'transcoder', sub: 'codec + size', icon: 'Binary', tint: 'amber', status: 'active' }, { ...viewer, chips: ['.mp4, H.264'] }, { ...rider, chips: ['360p, 0.8 Mbps'] }],
+        links: [link('creator', 'enc'), link('enc', 'viewer'), link('enc', 'rider')],
+        flows: [
+          { path: ['creator', 'enc'], tone: 'data', label: 'camera file', duration: 1.4 },
+          { path: ['enc', 'viewer'], tone: 'response', label: 'H.264', duration: 1.4, delay: 1.6 },
+          { path: ['enc', 'rider'], tone: 'response', label: 'small', duration: 1.4, delay: 1.9 },
+        ],
+        panel: {
+          title: 'Video file anatomy',
+          icon: 'Package',
+          rows: [
+            { text: 'Container', value: '.mp4 / .mov' },
+            { text: 'Video codec', value: 'H.264 / VP9' },
+            { text: 'Audio codec', value: 'AAC' },
+            { text: 'Metadata', value: 'duration, tracks' },
+          ],
+        },
+        caption: 'Same video, different boxes and recipes',
+      },
+    },
+    {
       title: 'Transcode DAG',
       tag: 'concept',
       heading: 'Fix 2: transcoding as a graph of small tasks',
-      eli5: 'The kitchen cuts the cake into 75 slices, and many cooks frost slices at the same time: big ones, small ones, plus the box photos. Drawn as arrows, the plan is a **DAG**.',
+      eli5: 'The kitchen cuts the cake into 75 slices, and many cooks frost slices at the same time, plus one takes the box photos. Drawn as arrows, the plan is a **DAG**.',
       body: [
-        'Transcoding turns one camera file into the formats and sizes every device can play. It is CPU heavy, so we split it into a **directed acyclic graph** of tasks. **Inspect** checks the file is a real, decodable video. **Split** cuts it into 4-second segments at keyframes, so each segment can be encoded on its own. Then **encode** tasks run per segment per quality, **audio** and **thumbnails** run beside them, and **package** writes the playlists when every encode is done.',
-        'A five-minute video gives 75 segments x 5 qualities = 375 small encode tasks. A scheduler walks the graph and puts every task whose inputs are ready onto the job queue, and a pool of encoder workers pulls from it (the background jobs lesson). Spread over 100 cores, a job that took 20 minutes serially finishes in about **2 minutes**.',
-        'The graph is data, so different pipelines are just different graphs. A creator who supplies a thumbnail skips that node. A partner channel adds a watermark node. Intermediate segments sit in temporary storage, so a failed task reruns from its inputs instead of from the start.',
+        'Transcoding is CPU heavy, so split it into a **directed acyclic graph** of tasks. **Inspect** checks the file is a real, decodable video. **Split** cuts it into 4-second segments at keyframes, so each segment can be encoded on its own.',
+        'Then **encode** tasks run per segment per quality, **audio** and **thumbnails** run beside them, and **package** writes the playlists when every encode is done.',
       ],
-      keyIdea: 'Cut the video at keyframes into segments and run encodes as independent tasks in a DAG, so time to ready depends on the worker pool size, not the video length.',
+      keyIdea: 'Cut the video at keyframes into segments, and run encodes as independent tasks in a graph.',
+      metrics: { plays: '3,000/s', uploads: '3/s', storage: '77 TB/day', egress: '23 PB/day', ready: '2 min' },
+      metricTones: { ready: 'good' },
+      scene: {
+        nodes: [
+          { ...raw, at: at(-5.4, 0), label: 'raw video', sub: '5 min, 400 MB' },
+          { id: 'split', kind: 'block', at: at(-1.8, 0), label: 'inspect + split', sub: '75 segments', icon: 'Split', tint: 'blue', status: 'active' },
+          { id: 'enc', kind: 'block', at: at(1.8, -3), label: 'encode', sub: 'per segment, per quality', icon: 'Binary', tint: 'amber', status: 'active' },
+          { id: 'side', kind: 'block', at: at(1.8, 3), label: 'audio + thumbs', sub: 'AAC, 3 frames', icon: 'Image', tint: 'teal' },
+          { id: 'pack', kind: 'block', at: at(5.4, 0), label: 'package', sub: 'HLS playlists', icon: 'Package', tint: 'green' },
+        ],
+        links: [link('raw', 'split'), link('split', 'enc'), link('split', 'side'), link('enc', 'pack'), link('side', 'pack', { style: 'dashed' })],
+        flows: [
+          { path: ['raw', 'split'], tone: 'data', duration: 1 },
+          { path: ['split', 'enc'], tone: 'event', count: 3, duration: 1, delay: 1.1 },
+          { path: ['split', 'side'], tone: 'event', duration: 1, delay: 1.1 },
+          { path: ['enc', 'pack'], tone: 'data', count: 2, duration: 1, delay: 2.4 },
+          { path: ['side', 'pack'], tone: 'data', duration: 1, delay: 2.4 },
+        ],
+        panel: {
+          title: 'The graph',
+          icon: 'Workflow',
+          rows: [
+            { text: 'inspect, split', value: 'first' },
+            { text: 'encode, audio, thumbnails', value: 'in parallel' },
+            { text: 'package', value: 'waits for all', tone: 'warn' },
+          ],
+        },
+        caption: 'Independent tasks run in parallel, package waits for all',
+      },
+    },
+    {
+      title: 'GOP split',
+      tag: 'concept',
+      heading: 'Cut at GOP boundaries, on the client or the server',
+      eli5: 'A cake is easiest to cut along the lines already drawn on it. A newer baker pre-cuts at the lines before the trip, and the kitchen cuts any uncut cake itself.',
+      body: [
+        'A **GOP** (group of pictures) is a run of frames that starts at a keyframe and decodes on its own. Cutting only at GOP boundaries is what lets each 4-second segment be encoded alone.',
+        'A newer client can run this cut before upload as a **preprocessor**. Older clients send one file, so the server always keeps its own split step.',
+      ],
+      keyIdea: 'Segments must start at keyframes, and a capable client can do that cut early, but the server always keeps the step.',
+      metrics: { plays: '3,000/s', uploads: '3/s', storage: '77 TB/day', egress: '23 PB/day', ready: '20 min' },
+      scene: {
+        nodes: [{ ...creator, chips: ['newer client: cuts'] }, { ...raw, at: at(0, 0), label: 'raw bucket', sub: 'segments or one file' }, { id: 'split', kind: 'block', at: at(4.5, 0), label: 'server split', sub: 'always kept', icon: 'Split', tint: 'blue', status: 'active' }],
+        links: [link('creator', 'raw'), link('raw', 'split')],
+        flows: [
+          { path: ['creator', 'raw'], tone: 'data', label: 'GOP-aligned', duration: 1.4 },
+          { path: ['raw', 'split'], tone: 'event', label: 'older clients', duration: 1.2, delay: 1.6 },
+        ],
+        panel: {
+          title: 'Who cuts the video',
+          icon: 'Split',
+          rows: [
+            { text: 'Newer client', value: 'cuts at keyframes', tone: 'good' },
+            { text: 'Older client', value: 'sends one file', tone: 'muted' },
+            { text: 'Server split step', value: 'always kept' },
+          ],
+        },
+        caption: 'Cut at keyframes, and let capable clients help',
+      },
+    },
+    {
+      title: 'Parallel math',
+      tag: 'concept',
+      heading: '375 small tasks finish in about 2 minutes',
+      eli5: 'One cook frosting 375 slices takes all afternoon. A hundred cooks each frost a few, and the cake is done before the coffee cools.',
+      body: [
+        'A five-minute video gives 75 segments x 5 qualities = **375 small encode tasks**. At about 30 seconds per 4-second segment encode, that is 11,250 core-seconds, roughly 3 hours on one core.',
+        'On 100 cores the tasks run in 3.75 waves of 30 s, about **2 minutes**. Time to ready depends on pool size, and only weakly on video length once the pool is large.',
+      ],
+      keyIdea: 'Time to ready is set mostly by the size of the worker pool, and only weakly by video length when the pool is large.',
+      metrics: { plays: '3,000/s', uploads: '3/s', storage: '77 TB/day', egress: '23 PB/day', ready: '2 min' },
+      metricTones: { ready: 'good' },
+      scene: {
+        nodes: [
+          { id: 'split', kind: 'block', at: at(-4.5, 0), label: 'split', sub: '75 segments', icon: 'Split', tint: 'blue' },
+          { id: 'pool', kind: 'worker', at: at(0, 0), label: 'encoder pool', sub: '100 cores', status: 'active', load: 70, badge: '375 tasks' },
+          { id: 'pack', kind: 'block', at: at(4.5, 0), label: 'package', sub: 'HLS playlists', icon: 'Package', tint: 'green', status: 'ok' },
+        ],
+        links: [link('split', 'pool'), link('pool', 'pack')],
+        flows: [
+          { path: ['split', 'pool'], tone: 'event', count: 4, duration: 1.2 },
+          { path: ['pool', 'pack'], tone: 'data', count: 4, duration: 1.2, delay: 1.4 },
+        ],
+        panel: {
+          title: 'Serial vs parallel',
+          icon: 'Timer',
+          rows: [
+            { text: '75 segments x 5 qualities', value: '375 tasks' },
+            { text: 'One core, 30 s per task', value: '~3 hours', tone: 'bad' },
+            { text: '100 cores, 3.75 waves', value: '~2 min', tone: 'good' },
+          ],
+        },
+        caption: 'Many small tasks, many workers',
+      },
+    },
+    {
+      title: 'Fleet size',
+      tag: 'concept',
+      heading: 'Size the whole encoder fleet',
+      eli5: 'One cake needs a hundred cooks for two minutes. The bakery gets a cake every second, so the kitchen needs thousands of cooks, plus extra for the rush.',
+      body: [
+        'Fleet size is uploads per second x core-seconds per upload. About 1.2 uploads a second x 11,250 core-seconds is roughly **13,000 cores** around the clock. At the 3 a second peak it is about 34,000.',
+        'The steady figure is the **autoscale floor**, and the peak factor sets the ceiling. The pool shrinks overnight and grows with the day.',
+      ],
+      keyIdea: 'Uploads per second times core-seconds per upload gives the steady fleet, and a peak factor sets how far to scale.',
+      metrics: { plays: '3,000/s', uploads: '3/s', storage: '77 TB/day', egress: '23 PB/day', ready: '2 min' },
+      metricTones: { ready: 'good' },
+      scene: {
+        nodes: [{ ...creator, badge: '1.2 uploads/s' }, { id: 'pool', kind: 'worker', at: at(0, 0), label: 'encoder fleet', sub: '13,000 cores', status: 'active', load: 60 }, { id: 'scaler', kind: 'block', at: at(4.5, 0), label: 'autoscaler', sub: 'floor 13,000', icon: 'Gauge', tint: 'violet' }],
+        links: [link('creator', 'pool'), link('scaler', 'pool', { style: 'dashed' })],
+        flows: [
+          { path: ['creator', 'pool'], tone: 'event', label: '375 tasks each', count: 3, duration: 1.4 },
+          { path: ['scaler', 'pool'], tone: 'request', label: 'set size', duration: 1.2, delay: 1.6 },
+        ],
+        panel: {
+          title: 'Fleet sizing',
+          icon: 'Calculator',
+          rows: [
+            { text: 'Core-seconds per upload', value: '11,250' },
+            { text: 'Uploads per second', value: '1.2' },
+            { text: 'Steady fleet', value: '~13,000 cores', tone: 'good' },
+            { text: 'Peak at 3 uploads/s', value: '~34,000 cores', tone: 'warn' },
+          ],
+        },
+        caption: 'Rate times work per upload gives the fleet',
+      },
+    },
+    {
+      title: 'Workers',
+      tag: 'concept',
+      heading: 'A scheduler, a task queue and a pool of workers',
+      eli5: 'A kitchen manager reads the plan and posts the next jobs on a board. Cooks grab a job, finish it, and the manager posts what that job unlocked.',
+      body: [
+        'A **scheduler** walks the graph and puts every task whose inputs are ready onto the **task queue**. A pool of encoder **workers** pulls from it, and a resource manager decides which worker takes which task.',
+        'Intermediate segments sit in temporary storage, so a failed task reruns from its inputs instead of from the start of the video.',
+      ],
+      keyIdea: 'The scheduler releases ready tasks to a queue, and a pool of workers pulls them, so the pool scales on its own.',
       metrics: { plays: '3,000/s', uploads: '3/s', storage: '77 TB/day', egress: '23 PB/day', ready: '2 min' },
       scene: {
         nodes: [
-          dsrc,
-          { ...dsplit, status: 'active' },
-          { ...encHd, status: 'active', badge: '150 tasks' },
-          { ...encSd, status: 'active', badge: '225 tasks' },
-          thumbs,
-          audio,
-          pack,
-          { ...dout, status: 'ok' },
+          { id: 'sched', kind: 'block', at: at(-5, 0), label: 'DAG scheduler', sub: 'walks the graph', icon: 'Workflow', tint: 'violet', status: 'active' },
+          { id: 'queue', kind: 'queue', at: at(-1.7, 0), label: 'task queue', sub: 'ready tasks', badge: 'depth 375' },
+          { id: 'pool', kind: 'worker', at: at(1.7, 0), label: 'encoder pool', sub: 'autoscaled', status: 'active' },
+          { id: 'tmp', kind: 'storage', at: at(5, 0), label: 'temp storage', sub: 'segments' },
         ],
-        links: [
-          { from: 'dsrc', to: 'dsplit' },
-          { from: 'dsplit', to: 'encHd' },
-          { from: 'dsplit', to: 'encSd' },
-          { from: 'dsplit', to: 'thumbs' },
-          { from: 'dsplit', to: 'audio' },
-          { from: 'encHd', to: 'pack' },
-          { from: 'encSd', to: 'pack' },
-          { from: 'audio', to: 'pack' },
-          { from: 'pack', to: 'dout' },
-          { from: 'thumbs', to: 'dout', style: 'dashed' },
-        ],
+        links: [link('sched', 'queue'), link('queue', 'pool'), link('pool', 'tmp'), link('pool', 'sched', { style: 'dashed', label: 'task done' })],
         flows: [
-          { path: ['dsrc', 'dsplit'], tone: 'data', duration: 1 },
-          { path: ['dsplit', 'encHd'], tone: 'event', count: 3, duration: 1, delay: 1.1 },
-          { path: ['dsplit', 'encSd'], tone: 'event', count: 3, duration: 1, delay: 1.1 },
-          { path: ['dsplit', 'thumbs'], tone: 'event', duration: 1, delay: 1.1 },
-          { path: ['dsplit', 'audio'], tone: 'event', duration: 1, delay: 1.1 },
-          { path: ['encHd', 'pack'], tone: 'data', count: 2, duration: 1, delay: 2.4 },
-          { path: ['encSd', 'pack'], tone: 'data', count: 2, duration: 1, delay: 2.4 },
-          { path: ['pack', 'dout'], tone: 'data', label: 'playlists', duration: 1, delay: 3.6 },
+          { path: ['sched', 'queue'], tone: 'event', count: 3, duration: 1 },
+          { path: ['queue', 'pool'], tone: 'request', count: 3, duration: 1, delay: 1.1 },
+          { path: ['pool', 'tmp'], tone: 'data', duration: 1, delay: 2.2 },
         ],
-        caption: 'Independent tasks run in parallel, package waits for all',
+        panel: {
+          title: 'Who does what',
+          icon: 'List',
+          rows: [
+            { text: 'Scheduler', value: 'what is ready?' },
+            { text: 'Task queue', value: 'buffer' },
+            { text: 'Workers', value: 'run one task' },
+            { text: 'Temp storage', value: 'inputs for retries' },
+          ],
+        },
+        caption: 'Ready tasks flow to whichever worker is free',
+      },
+    },
+    {
+      title: 'DAG as config',
+      tag: 'concept',
+      heading: 'The graph is data, so pipelines are configurable',
+      eli5: 'The kitchen plan is a written recipe card. A birthday cake adds a candle step, and a plain cake skips it. Nobody rebuilds the kitchen.',
+      body: [
+        'Different pipelines are just different graphs. A creator who supplies a thumbnail skips that node. A partner channel adds a watermark node. The scheduler reads the config and builds the graph for each upload.',
+      ],
+      keyIdea: 'Describe the pipeline as a graph in config, so new variants need no new code.',
+      metrics: { plays: '3,000/s', uploads: '3/s', storage: '77 TB/day', egress: '23 PB/day', ready: '2 min' },
+      scene: {
+        nodes: [
+          { id: 'cfg', kind: 'block', at: at(-4.5, 0), label: 'pipeline config', sub: 'yaml', icon: 'FileCode', tint: 'gray' },
+          { id: 'sched', kind: 'block', at: at(0, 0), label: 'DAG scheduler', sub: 'builds graph', icon: 'Workflow', tint: 'violet', status: 'active' },
+          { id: 'pool', kind: 'worker', at: at(4.5, 0), label: 'encoder pool', sub: 'autoscaled' },
+        ],
+        links: [link('cfg', 'sched'), link('sched', 'pool')],
+        flows: [
+          { path: ['cfg', 'sched'], tone: 'data', label: 'graph', duration: 1.2 },
+          { path: ['sched', 'pool'], tone: 'event', count: 3, duration: 1.2, delay: 1.4 },
+        ],
+        panel: {
+          title: 'Variants',
+          icon: 'Table',
+          rows: [
+            { text: 'Standard upload', value: 'full graph' },
+            { text: 'Custom thumbnail', value: 'skip thumbs' },
+            { text: 'Partner channel', value: '+ watermark' },
+          ],
+        },
+        caption: 'Same engine, different graphs',
       },
       code: {
         language: 'yaml',
@@ -328,234 +750,50 @@ tasks:
       },
     },
     {
-      title: 'Adaptive bitrate',
-      tag: 'concept',
-      heading: 'Fix 3: many qualities, chosen every 4 seconds',
-      eli5: 'Each slice comes in big, medium and small. When the road is clear the delivery kid brings big slices. In a traffic jam he brings small ones, so the customer never waits. That switching is **adaptive bitrate**.',
+      title: 'Recap',
+      tag: 'recap',
+      heading: 'Part 1: bytes in, qualities out',
+      eli5: 'Cakes come in the back door with a ticket, get cut into slices and frosted by many cooks at once. Part two is how the slices reach every customer.',
       body: [
-        'The encoders produced a **bitrate ladder**: 1080p at 5 Mbps, 720p at 2.8, 480p at 1.4, 360p at 0.8 and 240p at 0.4, each cut into the same 4-second segments. A **master playlist** (HLS) or manifest (DASH) lists the ladder, and each quality has its own playlist of segment URLs. All of it is plain HTTP files.',
-        'The player measures how fast the last segments arrived and how much video it has buffered, then picks the quality for the **next** segment. The laptop on 8 Mbps climbs to 1080p. The train rider drops to 360p in the tunnel and climbs back after it, with no stall and no restart, because segments of every quality line up on the same timestamps.',
-        'Streaming segment by segment also cuts egress. A viewer who quits after a minute fetched one minute of video, and phones fetch small renditions. The average play falls from a 190 MB file to about 90 MB, which halves egress to **11 PB a day**.',
+        'Upload: three small API calls and pre-signed, resumable multipart uploads straight to the raw bucket. Processing: a graph of per-segment tasks on a queue-fed, autoscaled worker pool, ready in about 2 minutes.',
+        'Part two covers playback: adaptive bitrate streaming, the CDN and its cost, the metadata path, failures and safety.',
       ],
-      keyIdea: 'Encode a ladder of qualities cut into aligned segments, and let the player pick a quality per segment from measured bandwidth and buffer.',
-      metrics: { plays: '3,000/s', uploads: '3/s', storage: '77 TB/day', egress: '11 PB/day', ready: '2 min' },
-      scene: {
-        nodes: [
-          { ...rend, status: 'active', badge: '5 qualities' },
-          { ...cdn, status: 'active' },
-          { ...viewer, status: 'ok', badge: '1080p' },
-          { ...rider, status: 'ok', badge: '360p in tunnel' },
-        ],
-        links: [
-          { from: 'rend', to: 'cdn' },
-          { from: 'cdn', to: 'viewer' },
-          { from: 'cdn', to: 'rider' },
-        ],
-        flows: [
-          { path: ['viewer', 'cdn'], tone: 'request', label: 'master.m3u8', duration: 1 },
-          { path: ['cdn', 'viewer'], tone: 'response', label: 'seg 12 @ 1080p', count: 3, duration: 1, delay: 1.1 },
-          { path: ['rider', 'cdn'], tone: 'request', label: 'seg 12 @ 360p', duration: 1, delay: 0.5 },
-          { path: ['cdn', 'rider'], tone: 'response', count: 3, duration: 1, delay: 1.6 },
-          { path: ['rend', 'cdn'], tone: 'data', duration: 1.2, delay: 2.8 },
-        ],
-        caption: 'Same segment numbers, different qualities per viewer',
-      },
-      quiz: {
-        question: 'Halfway through a video, a viewer’s bandwidth drops from 8 Mbps to 1 Mbps. What does an adaptive bitrate player do?',
-        options: [
-          'Restarts the video at a lower quality',
-          'Keeps fetching 1080p and waits for the buffer to refill',
-          'Requests the next segments from a lower rendition listed in the manifest',
-          'Asks the server to re-encode the video at 1 Mbps',
-        ],
-        answer: 2,
-        explain: 'Every rendition is cut into segments on the same timestamps, so the player switches to a smaller rendition at the next segment boundary. Nothing is re-encoded and playback does not restart.',
-      },
-    },
-    {
-      title: 'CDN and cold',
-      tag: 'tradeoff',
-      heading: 'Fix 4: the CDN for hot videos, cheaper paths for the long tail',
-      eli5: 'Corner shops near every street keep the popular slices. Rare cakes stay in the central kitchen and get sent out only when someone asks. The corner shops are the **CDN**.',
-      body: [
-        'Playback goes through a **CDN**, as in the content delivery networks lesson. Segments are immutable, so they cache perfectly: a long TTL, versioned URLs, no purges. A popular video is fetched from storage once per edge and then served from a few kilometers away to millions of viewers. At an assumed 1 cent per GB, 11 PB a day is still about **$110,000 a day**, which is why the bill gets attention.',
-        'Views are heavily skewed. A small share of videos gets most of the plays, and most videos are watched a handful of times. A cold video is a cache miss at every edge, takes edge space from hot ones, and still pays for five renditions forever. So treat the tail differently: encode new uploads to two or three qualities and add the full ladder once views pass a threshold, serve long-tail segments from your own **origin servers** where bandwidth is cheaper, push regional hits only to that region, and move originals nobody has watched in a year to an archive storage class.',
-        'The catch is that every one of these rules needs view data and has edge cases. A cold video that goes viral needs its missing qualities encoded fast, so the on-demand path must be quick and well tested.',
-      ],
-      keyIdea: 'Popularity decides where a video lives: hot videos at the edge in every quality, cold ones in fewer qualities on cheaper storage and servers.',
-      metrics: { plays: '3,000/s', uploads: '3/s', storage: '55 TB/day', egress: '11 PB/day', ready: '2 min' },
-      scene: {
-        nodes: [
-          { ...rend, status: 'active' },
-          { ...origin, status: 'active', badge: 'tail: 2 qualities' },
-          { ...cdn, status: 'ok', badge: 'hit 97%' },
-          { ...viewer, badge: 'viral video' },
-          { ...rider, badge: 'cold video' },
-        ],
-        links: [
-          { from: 'rend', to: 'cdn' },
-          { from: 'rend', to: 'origin' },
-          { from: 'origin', to: 'rider', style: 'dashed' },
-          { from: 'cdn', to: 'viewer' },
-        ],
-        flows: [
-          { path: ['cdn', 'viewer'], tone: 'response', label: 'edge hit', count: 4, duration: 1 },
-          { path: ['rend', 'origin'], tone: 'data', duration: 1.2, delay: 1 },
-          { path: ['origin', 'rider'], tone: 'response', label: 'from origin', duration: 1.6, delay: 2.3 },
-        ],
-        caption: 'Hot segments at the edge, the long tail from origin',
-      },
-    },
-    {
-      title: 'Metadata',
-      tag: 'concept',
-      heading: 'Fix 5: metadata database, replicas and cache',
-      eli5: 'The order book is copied for the clerks who only read it, and the most asked-about pages are pinned to the wall. The wall is the **cache**.',
-      body: [
-        'Each watch page, feed tile and search result reads metadata, so 3,000 plays a second becomes about **30,000 metadata reads** a second. Writes are rare: new videos, status changes, edits. Put **read replicas** behind the primary and a **cache** in front, keyed by `video_id`, as in the caching lesson. At a 98% hit rate the database sees about 600 reads a second.',
-        'A billion rows outgrow one machine, so shard `videos` by a hash of `video_id` (the sharding lesson). The by-owner index for a channel page is a second table sharded by `owner_id`. View counts are too hot to update row by row, so count them in a stream and write totals every few seconds.',
-        'The pipeline reports back through the queue. When `publish` finishes, a **completion handler** updates the row to `ready`, writes the rendition list and deletes the cache key. The watch page then shows the video, and a notification tells the creator.',
-      ],
-      keyIdea: 'Metadata is small and read-heavy: replicas and a cache for reads, sharding by video id for size, and status changes arriving as events from the pipeline.',
-      metrics: { plays: '3,000/s', uploads: '3/s', storage: '55 TB/day', egress: '11 PB/day', ready: '2 min' },
-      scene: {
-        nodes: [
-          workers,
-          { ...queue, badge: 'done events' },
-          { ...api, status: 'active' },
-          { ...db, badge: '600 reads/s' },
-          { ...cache, status: 'ok', badge: 'hit 98%' },
-          { ...origin, id: 'replica', kind: 'replica', label: 'read replicas', sub: 'x 3' },
-          viewer,
-        ],
-        links: [
-          { from: 'workers', to: 'queue' },
-          { from: 'queue', to: 'api', style: 'dashed' },
-          { from: 'api', to: 'db' },
-          { from: 'api', to: 'cache' },
-          { from: 'db', to: 'replica', style: 'dashed' },
-          { from: 'viewer', to: 'api' },
-        ],
-        flows: [
-          { path: ['viewer', 'api'], tone: 'request', label: 'GET /videos/42', duration: 1.4 },
-          { path: ['api', 'cache'], tone: 'request', duration: 0.8, delay: 1.5 },
-          { path: ['cache', 'api'], tone: 'response', label: 'hit', duration: 0.8, delay: 2.4 },
-          { path: ['workers', 'queue', 'api'], tone: 'event', label: 'video ready', duration: 1.6, delay: 0.6 },
-          { path: ['api', 'db'], tone: 'request', label: 'status=ready', duration: 0.9, delay: 2.4 },
-          { path: ['db', 'replica'], tone: 'data', duration: 0.9, delay: 3.4 },
-        ],
-        caption: 'Reads hit the cache, and the pipeline reports back by event',
-      },
-    },
-    {
-      title: 'Pipeline failures',
-      tag: 'case',
-      heading: 'Case: crashed workers, bad files and a 10x upload surge',
-      eli5: 'Each cook signs out one slice for ten minutes. That sign-out is a **lease**: if the cook faints, the slice goes back on the pile for another cook. A rotten cake goes straight back to its baker.',
-      body: [
-        'Sort errors into two kinds. **Recoverable**: a worker dies or a segment encode times out. Each task is taken with a **lease** (the background jobs lesson). If the worker stops heartbeating, the lease expires and the task goes back on the queue for another worker. Outputs are written to fixed keys like `720p/seg_0042.ts`, so a rerun overwrites instead of duplicating. After three failed tries the task goes to a **dead-letter queue** for a human.',
-        '**Non-recoverable**: the file is corrupt or not a video. Inspect catches it in seconds, stops the graph, sets the status to `failed` and tells the creator why. Retrying a broken file only burns CPU.',
-        'Then the crisis: a big live event ends and uploads jump from 3 to **30 a second**. Queue depth climbs past 40,000 tasks and time to ready reaches 35 minutes. Nothing is lost, since the queue absorbs the burst (the message queues lesson). The pool autoscales on queue depth, and a priority queue runs short videos and big channels first. Within half an hour ready time is back to 3 minutes.',
-      ],
-      keyIdea: 'Retry recoverable failures per task with leases and idempotent outputs, fail fast on bad input, and let the queue absorb surges while workers scale on its depth.',
-      metrics: { plays: '3,000/s', uploads: '30/s', storage: '55 TB/day', egress: '11 PB/day', ready: '35 min' },
-      scene: {
-        nodes: [
-          { ...creator, badge: '10x uploads' },
-          raw,
-          { ...queue, status: 'hot', badge: 'depth 40,000' },
-          { ...workers, status: 'hot', badge: '1 node down' },
-          rend,
-          { ...cache, id: 'dlq', kind: 'queue', label: 'dead letters', sub: 'after 3 tries' },
-          api,
-          { ...db, badge: 'bad file: failed' },
-        ],
-        links: [...uploadLinks, { from: 'queue', to: 'dlq', style: 'dashed' }, { from: 'api', to: 'db' }, { from: 'workers', to: 'api', style: 'dashed' }],
-        flows: [
-          { path: ['creator', 'raw'], tone: 'data', count: 6, duration: 1 },
-          { path: ['raw', 'queue'], tone: 'event', count: 6, duration: 0.9, delay: 0.8 },
-          { path: ['queue', 'workers'], tone: 'request', count: 3, duration: 0.9, delay: 1.7 },
-          { path: ['workers', 'queue'], tone: 'error', label: 'lease expired, requeue', duration: 1, delay: 2.7 },
-          { path: ['queue', 'dlq'], tone: 'error', label: 'poison task', duration: 1, delay: 3.6 },
-          { path: ['workers', 'api', 'db'], tone: 'error', label: 'corrupt file', duration: 1.8, delay: 2 },
-        ],
-        caption: 'The queue absorbs the surge, failed tasks retry or park',
-      },
-    },
-    {
-      title: 'Safety',
-      tag: 'tradeoff',
-      heading: 'Safe uploads, protected videos and takedowns',
-      eli5: 'The bakery checks every cake before selling it, stamps its name on the box, and locks special cakes so only paying customers get the key. That key comes from the **key server**.',
-      body: [
-        '**Uploads are hostile input.** Pre-signed URLs are scoped to one key, expire fast and carry a size limit. Media parsers have a long record of security bugs, so inspect and encode run in sandboxed workers with no network access beyond storage. The same pass checks for known banned content by hash and runs classifiers, and a video can go to `blocked` before it is ever `ready`. User flags trigger the same path later: set `blocked`, and every page stops serving it.',
-        '**Protect paid or premium videos.** Encrypt segments with AES and hand keys only to signed-in, entitled players through a license or **key server**, or use a full DRM system for studio content. Playback URLs can be signed with short expiry so the CDN refuses hot-linked requests. A visible watermark helps prove ownership after a copy leaks.',
-        'Each layer costs something: DRM adds a license round trip before playback starts, and moderation adds minutes to time to ready for borderline videos. Most platforms apply the heavy options per channel or per video.',
-      ],
-      keyIdea: 'Treat every upload as untrusted, sandbox the code that parses it, and protect valuable videos with encryption, signed URLs and keys that only entitled viewers receive.',
-      metrics: { plays: '3,000/s', uploads: '3/s', storage: '55 TB/day', egress: '11 PB/day', ready: '3 min' },
+      keyIdea: 'Separate the paths by what they move: JSON through the API, uploads to object storage, CPU work to a queue of small tasks.',
+      metrics: { plays: '3,000/s', uploads: '3/s', storage: '77 TB/day', egress: '23 PB/day', ready: '2 min' },
+      metricTones: { ready: 'good' },
       scene: {
         nodes: [
           creator,
-          raw,
-          { ...workers, status: 'active', badge: 'sandbox: scan + mark' },
-          rend,
-          { ...api, badge: 'URL expires 1 h' },
-          { ...origin, id: 'keys', kind: 'vault', label: 'key server', sub: 'licenses' },
-          cdn,
-          { ...viewer, status: 'ok', badge: 'entitled' },
+          { ...raw, at: at(-1.5, 3.6), status: 'ok' },
+          { id: 'pool', kind: 'worker', at: at(1.5, 0), label: 'encoder pool', sub: 'autoscaled', status: 'ok' },
+          { id: 'rend', kind: 'storage', at: at(4.5, 3.6), label: 'renditions', sub: '5 qualities', status: 'ok' },
+          { ...api, at: at(-1.5, -3.6), status: 'ok' },
         ],
-        links: [
-          { from: 'creator', to: 'raw' },
-          { from: 'raw', to: 'workers' },
-          { from: 'workers', to: 'rend' },
-          { from: 'rend', to: 'cdn' },
-          { from: 'cdn', to: 'viewer' },
-          { from: 'viewer', to: 'keys', style: 'dashed' },
-          { from: 'creator', to: 'api', style: 'dashed' },
-        ],
+        links: [link('creator', 'api', { style: 'dashed' }), link('creator', 'raw'), link('raw', 'pool'), link('pool', 'rend')],
         flows: [
-          { path: ['creator', 'raw'], tone: 'data', label: 'signed PUT', duration: 1.2 },
-          { path: ['raw', 'workers'], tone: 'request', label: 'scan', duration: 1, delay: 1.3 },
-          { path: ['workers', 'rend'], tone: 'data', label: 'encrypted segs', duration: 1, delay: 2.4 },
-          { path: ['viewer', 'keys'], tone: 'handshake', label: 'license?', duration: 1.2, delay: 1 },
-          { path: ['keys', 'viewer'], tone: 'handshake', label: 'key', duration: 1.2, delay: 2.3 },
-          { path: ['cdn', 'viewer'], tone: 'response', count: 3, duration: 1, delay: 3.6 },
+          { path: ['creator', 'raw', 'pool', 'rend'], tone: 'data', duration: 3.2 },
+          { path: ['creator', 'api'], tone: 'request', duration: 1.2, delay: 0.3 },
         ],
-        caption: 'Scan on the way in, keys on the way out',
-      },
-    },
-    {
-      title: 'Recap',
-      tag: 'recap',
-      heading: 'Two pipelines, sized for their own bottleneck',
-      eli5: 'Cakes come in the back door with a ticket, get cut and baked into many sizes, and corner shops hand out slices sized to each customer’s road. The whole thing is a **video platform**.',
-      body: [
-        'Upload: three small API calls and pre-signed, resumable multipart uploads straight to the raw bucket. Processing: a DAG of per-segment tasks on a queue-fed, autoscaled worker pool, ready in about 2 minutes, with leases, idempotent outputs and a dead-letter queue for failures. Playback: a five-step bitrate ladder in 4-second segments, served by the CDN, chosen per segment by the player.',
-        'Around it: sharded metadata with replicas and a cache, status driven by pipeline events, popularity-based treatment of the long tail to keep storage near 55 TB a day, and sandboxing, encryption and signed URLs for safety. Egress at 11 PB a day stays the biggest bill, which is why every byte saved on the read path matters most.',
-      ],
-      keyIdea: 'Separate the paths by what they move: JSON through the API, uploads to object storage, CPU work to a queue of small tasks, and video bytes through the CDN.',
-      metrics: { plays: '3,000/s', uploads: '3/s', storage: '55 TB/day', egress: '11 PB/day', ready: '2 min' },
-      scene: {
-        nodes: [creator, raw, queue, workers, { ...rend, status: 'ok' }, api, db, { ...cdn, status: 'ok' }, viewer],
-        links: [...uploadLinks, { from: 'creator', to: 'api', style: 'dashed' }, { from: 'api', to: 'db' }, { from: 'rend', to: 'cdn' }, { from: 'cdn', to: 'viewer' }],
-        flows: [
-          { path: ['creator', 'raw', 'queue', 'workers', 'rend'], tone: 'data', duration: 3.2 },
-          { path: ['rend', 'cdn'], tone: 'data', duration: 1, delay: 3.2 },
-          { path: ['cdn', 'viewer'], tone: 'response', count: 3, duration: 1, delay: 1 },
-          { path: ['creator', 'api', 'db'], tone: 'request', duration: 1.6, delay: 0.3 },
-        ],
+        panel: {
+          title: 'Part 1 in numbers',
+          icon: 'Gauge',
+          rows: [
+            { text: 'Parts per upload', value: '25 x 16 MB' },
+            { text: 'Encode tasks', value: '375' },
+            { text: 'Time to ready', value: '~2 min', tone: 'good' },
+          ],
+        },
       },
       quiz: {
-        question: 'An encoder crashes while encoding segment 42 of a video at 720p. What should the pipeline do?',
+        question: 'Why does adding encoder workers shorten time to ready for a long video?',
         options: [
-          'Restart the whole video from the inspect step',
-          'Let the task lease expire and rerun only that segment task on another worker',
-          'Mark the video as failed and ask the creator to upload again',
-          'Skip segment 42 and package the rest',
+          'Each worker encodes the whole video faster',
+          'The video is cut into segments that encode independently, so more workers run more tasks at once',
+          'Workers compress the original upload before it arrives',
+          'The CDN takes over encoding from the workers',
         ],
         answer: 1,
-        explain: 'Tasks are small and independent. The lease returns the one task to the queue, another worker reruns it from the saved segment, and because output keys are fixed the rerun overwrites any partial result.',
+        explain: 'Segments cut at keyframes can be encoded alone, so the 375 tasks spread over the pool. Time depends on pool size, and the graph only waits at the package step.',
       },
     },
   ],

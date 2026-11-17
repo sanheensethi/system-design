@@ -92,7 +92,7 @@ export const scalingLevers: Lesson = {
       heading: 'Four limits of raw capacity',
       eli5: 'One clerk can run out of four things: thinking speed, counter space, storage room, or door width. Whichever runs out first is the **bottleneck**.',
       body: [
-        'A machine has ceilings you can measure. **CPU**: 64 to 128 cores per socket. **RAM**: 1 to 4 TB on large servers. **Disk**: about 30 TB per NVMe drive. **Network**: 10 to 100 Gbps per card.',
+        'A machine has ceilings you can measure. **CPU**: 64 to 128 cores per socket. **RAM**: 1 to 4 TB on the largest servers (a typical server has 64 to 512 GB). **Disk**: about 30 TB per NVMe drive. **Network**: 10 to 100 Gbps per card.',
         'Our shop is hitting the first one. The fix depends on which limit you hit, so find the bottleneck before you buy hardware.',
       ],
       keyIdea: 'Name the limit you are hitting before you pick a fix: CPU, RAM, disk or network.',
@@ -110,7 +110,7 @@ export const scalingLevers: Lesson = {
           icon: 'Cpu',
           rows: [
             { text: 'CPU', value: '64 to 128 cores', tone: 'bad' },
-            { text: 'RAM', value: '1 to 4 TB' },
+            { text: 'RAM (largest; typical 64 to 512 GB)', value: '1 to 4 TB' },
             { text: 'Disk', value: '~30 TB per NVMe' },
             { text: 'Network', value: '10 to 100 Gbps' },
           ],

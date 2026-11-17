@@ -3,58 +3,36 @@ import type { Lesson, SceneNode } from '../engine/types';
 /** Place a node by screen column (u = x - y) and screen row (v = x + y). */
 const p = (u: number, v: number): [number, number] => [(u + v) / 2, (v - u) / 2];
 
-const user: SceneNode = { id: 'user', kind: 'phone', at: p(-9, 3), label: 'searcher', sub: 'types "din"' };
-const edge: SceneNode = { id: 'edge', kind: 'cdn', at: p(-6, 3), label: 'browser + CDN', sub: 'cached prefixes' };
-const svc: SceneNode = { id: 'svc', kind: 'server', at: p(-3, 3), label: 'suggest API', sub: 'stateless' };
-const filter: SceneNode = { id: 'filter', kind: 'limiter', at: p(0, 3), label: 'safety filter', sub: 'blocklist' };
-const cache: SceneNode = { id: 'cache', kind: 'cache', at: p(3, 3), label: 'prefix cache', sub: 'Redis · hot prefixes' };
-const trie: SceneNode = { id: 'trie', kind: 'search', at: p(6, 3), label: 'trie servers', sub: '~45 GB in RAM' };
-const sql: SceneNode = { id: 'sql', kind: 'db', at: p(3, 3), label: 'queries table', sub: 'query, count' };
+const user: SceneNode = { id: 'user', kind: 'phone', at: p(-7.2, 0), label: 'searcher', sub: 'types "din"' };
+const svc: SceneNode = { id: 'svc', kind: 'block', at: p(0, 0), label: 'suggest API', sub: 'stateless', icon: 'Search', tint: 'blue' };
+const cache: SceneNode = { id: 'cache', kind: 'cache', at: p(3.6, 0), label: 'prefix cache', sub: 'Redis · hot prefixes' };
+const trie: SceneNode = { id: 'trie', kind: 'server', at: p(7.2, 0), label: 'trie servers', sub: '~60 GB in RAM', tint: 'green' };
+const sql: SceneNode = { id: 'sql', kind: 'db', at: p(3.6, 0), label: 'queries table', sub: 'query, count' };
 
-const logs: SceneNode = { id: 'logs', kind: 'queue', at: p(-3, -3.5), label: 'query log', sub: '~90 GB/day' };
-const agg: SceneNode = { id: 'agg', kind: 'worker', at: p(0, -3.5), label: 'aggregator', sub: 'daily batch' };
-const builder: SceneNode = { id: 'builder', kind: 'worker', at: p(3, -3.5), label: 'trie builder', sub: 'top 10 per node' };
-const snaps: SceneNode = { id: 'snaps', kind: 'storage', at: p(6, -3.5), label: 'trie snapshots', sub: 'object storage' };
-const trend: SceneNode = { id: 'trend', kind: 'worker', at: p(-6, -3.5), label: 'trend counter', sub: '5 min windows' };
-
-const shardMap: SceneNode = { id: 'shardMap', kind: 'service', at: p(0, -3.5), label: 'shard map', sub: 'prefix ranges' };
-const shardA: SceneNode = { id: 'shardA', kind: 'shard', at: p(1, 3), label: 'shard a to m', sub: '150 GB' };
-const shardS: SceneNode = { id: 'shardS', kind: 'shard', at: p(4.5, 3), label: 'shard n to s', sub: '150 GB' };
-const shardT: SceneNode = { id: 'shardT', kind: 'shard', at: p(8, 3), label: 'shard t to z', sub: '100 GB' };
-
-const servePath = [
-  { from: 'user', to: 'edge' },
-  { from: 'edge', to: 'svc' },
-  { from: 'svc', to: 'cache' },
-  { from: 'cache', to: 'trie' },
-];
-
-const buildPath = [
-  { from: 'logs', to: 'agg' },
-  { from: 'agg', to: 'builder' },
-  { from: 'builder', to: 'snaps' },
-  { from: 'snaps', to: 'trie', style: 'dashed' as const },
-  { from: 'svc', to: 'logs', style: 'faint' as const },
-];
+const logs: SceneNode = { id: 'logs', kind: 'queue', at: p(-3.6, -8.5), label: 'query log', sub: '~90 GB/day' };
+const counts: SceneNode = { id: 'counts', kind: 'db', at: p(0, -8.5), label: 'query counts', sub: 'weighted count' };
+const agg: SceneNode = { id: 'agg', kind: 'block', at: p(0, -8.5), label: 'aggregator', sub: 'daily batch', icon: 'Layers', tint: 'violet' };
+const builder: SceneNode = { id: 'builder', kind: 'block', at: p(3.6, -8.5), label: 'trie builder', sub: 'top 15 per node', icon: 'Package', tint: 'amber' };
+const snaps: SceneNode = { id: 'snaps', kind: 'storage', at: p(7.2, -8.5), label: 'trie snapshots', sub: 'object storage' };
 
 export const designSearchAutocomplete: Lesson = {
   id: 'design-search-autocomplete',
-  title: 'Design search autocomplete',
+  title: 'Design search autocomplete (part 1)',
   tagline: 'Return the ten best completions for every keystroke in well under 100 ms, for hundreds of millions of people.',
-  minutes: 18,
+  minutes: 15,
   level: 'Intermediate',
   learn: [
+    'Sizing the problem: 700K requests per second at peak, and what we can trade away',
     'Why a trie with the top suggestions cached at every node answers in one walk',
     'Building the trie offline from aggregated query logs, then serving it from RAM',
-    'Debouncing and browser caching to cut requests before they leave the device',
-    'Sharding the trie by prefix when some letters are far busier than others',
-    'Filtering harmful suggestions and adding trending queries without a rebuild',
+    'Why the live trie is immutable, and how snapshots are swapped in',
+    'A prefix cache for the hottest prefixes',
   ],
   metrics: [
-    { key: 'qps', label: 'Peak requests' },
-    { key: 'p99', label: 'p99 latency' },
-    { key: 'ram', label: 'Trie in RAM' },
-    { key: 'fresh', label: 'Freshness' },
+    { key: 'qps', label: 'Peak requests', icon: 'Activity' },
+    { key: 'p99', label: 'p99 server side', icon: 'Timer' },
+    { key: 'ram', label: 'Trie in RAM', icon: 'HardDrive' },
+    { key: 'fresh', label: 'Freshness', icon: 'Clock' },
   ],
   steps: [
     {
@@ -63,45 +41,141 @@ export const designSearchAutocomplete: Lesson = {
       heading: 'Ten suggestions per keystroke, faster than the next keystroke',
       eli5: 'A kid at the library desk says "din" and the librarian must name ten likely books before the kid says the next letter. That guessing is **autocomplete**, and thousands of kids are asking at once.',
       body: [
-        'Functional scope: as the user types, show the **top 10** completions for the current prefix, ranked by how often people searched them. English first, lowercase text, no personal history yet. The list should feel instant, so the budget is **under 100 ms** end to end at p99, which leaves about 20 ms inside our servers once the network takes its share.',
-        'Scale: **150M daily users**, about 10 searches each, about 20 characters per search. One request per keystroke is 30 billion requests a day, roughly 350K per second on average and **700K per second** at peak. Reads dominate completely. Writes are the query log, which the system can process later.',
-        'Two answers matter less than they seem. Suggestions can be a day old and nobody notices, and missing a rare query is fine. Those two relaxations shape the whole design.',
+        'As the user types, show the **top 10** completions for the current prefix, ranked by how often people searched them. English first, lowercase text, no personal history yet.',
+        'The list must feel instant: **under 100 ms** end to end at p99, from request sent to list shown. About **50 ms** of that is ours, server side. The 100 ms debounce wait in part 2 sits outside this budget.',
       ],
-      keyIdea: 'Autocomplete is a read-only, latency-bound lookup. Freshness and completeness can be traded away for speed.',
-      metrics: { qps: '700K/s', p99: 'target 100 ms', ram: '-', fresh: 'a day is fine' },
+      keyIdea: 'Autocomplete is a read-only, latency-bound lookup with a very small time budget.',
+      metrics: { qps: '?', p99: 'target 50 ms', ram: '-', fresh: '-' },
+      metricTones: { p99: 'warn' },
       scene: {
-        nodes: [{ ...user, status: 'active', badge: '1 request per key' }, { ...svc, status: 'active', badge: '700K/s peak' }],
-        links: [{ from: 'user', to: 'svc' }],
+        nodes: [
+          { ...user, status: 'active', chips: ['d', 'di', 'din'] },
+          { ...svc, status: 'active', badge: 'top 10 in 50 ms' },
+        ],
+        links: [{ from: 'user', to: 'svc', label: 'one request per key' }],
         flows: [
           { path: ['user', 'svc'], tone: 'request', label: 'd', duration: 0.8 },
           { path: ['user', 'svc'], tone: 'request', label: 'di', duration: 0.8, delay: 0.5 },
           { path: ['user', 'svc'], tone: 'request', label: 'din', duration: 0.8, delay: 1 },
           { path: ['svc', 'user'], tone: 'response', label: '10 suggestions', duration: 0.8, delay: 1.9 },
         ],
+        panel: {
+          title: 'Requirements',
+          icon: 'List',
+          rows: [
+            { text: 'Suggestions per prefix', value: '10' },
+            { text: 'End to end', value: 'p99 < 100 ms', tone: 'warn' },
+            { text: 'Server side', value: 'p99 < 50 ms' },
+            { text: 'Ranking', value: 'by search count' },
+            { text: 'Scope', value: 'English, lowercase' },
+          ],
+        },
         caption: 'Every keystroke is a request with a 100 ms budget',
       },
     },
     {
-      title: 'API and data',
+      title: 'Scale',
       tag: 'concept',
-      heading: 'One GET, and a log of everything people searched',
-      eli5: 'The kid asks one question: "what starts with din?" Every finished request also goes on a slip in a big **log** box, so the librarian can count later which books kids want most.',
+      heading: 'The math: 700K requests per second at peak',
+      eli5: 'Lots of kids each ask about twenty letters a day. If the librarian answers every single letter, she answers a mountain of questions, and nearly all of them are reading, never writing.',
       body: [
-        'The read API is one call: `GET /v1/suggest?q=din&locale=en-US&k=10`, returning a list of strings with optional scores. It is a pure function of the prefix and locale, which makes it cacheable at every layer (the caching lesson and the CDN lesson both apply).',
-        'The write side is separate. When a user submits a search, the search service appends `(query, locale, timestamp)` to a **query log** on a stream (the message queues lesson). At 1.5B searches a day and about 60 bytes per record, that is **~90 GB a day** of raw log.',
-        'From the log we derive one table, `query_counts(locale, query, weighted_count)`, and from that table we build the structure that serves reads. The serving path never writes, and the logging path never blocks a keystroke.',
+        '**150M daily users** run about 10 searches each, and a search is about 20 characters. One request per keystroke is 30 billion requests a day.',
+        'That is roughly 350K per second on average and **700K per second** at peak. Reads dominate. Writes are only the query log, which can be processed later.',
       ],
-      keyIdea: 'Split the system in two: a cheap, cacheable read API and an append-only log that feeds an offline build.',
-      metrics: { qps: '700K/s', p99: 'target 100 ms', ram: '-', fresh: 'a day is fine' },
+      keyIdea: 'Size it first: 700K reads per second at peak, with almost no writes on the hot path.',
+      metrics: { qps: '700K/s', p99: 'target 50 ms', ram: '-', fresh: '-' },
+      metricTones: { qps: 'bad' },
       scene: {
-        nodes: [user, { ...svc, status: 'active' }, { ...logs, status: 'active', badge: 'append only' }],
-        links: [{ from: 'user', to: 'svc' }, { from: 'svc', to: 'logs', style: 'dashed' }],
+        nodes: [
+          { ...user, chips: ['d', 'di', 'din'] },
+          { ...svc, status: 'hot', load: 95, badge: '700K/s peak' },
+          { ...logs, status: 'dim' },
+        ],
+        links: [{ from: 'user', to: 'svc' }, { from: 'svc', to: 'logs', style: 'faint' }],
+        flows: [
+          { path: ['user', 'svc'], tone: 'request', count: 5, duration: 0.9 },
+          { path: ['svc', 'logs'], tone: 'event', label: 'a few writes', duration: 1.2, delay: 1.2 },
+        ],
+        panel: {
+          title: 'Back of the envelope',
+          icon: 'Table',
+          rows: [
+            { text: 'Daily users', value: '150M' },
+            { text: 'Searches per day', value: '1.5B' },
+            { text: 'Keystroke requests per day', value: '30B', tone: 'warn' },
+            { text: 'Average rate', value: '350K/s' },
+            { text: 'Peak rate (2x)', value: '700K/s', tone: 'bad' },
+          ],
+          footer: { text: 'Reads dominate. Writes can wait.', tone: 'muted' },
+        },
+        caption: 'Reads dominate completely',
+      },
+    },
+    {
+      title: 'What to trade',
+      tag: 'tradeoff',
+      heading: 'Two answers matter less than they seem',
+      eli5: 'The librarian may use yesterday\'s book counts and may skip a book hardly anyone asks for. Giving up a little news and a few rare books buys a very fast desk.',
+      body: [
+        'Suggestions can be a day old and nobody notices. Missing a rare query is fine too, since nobody misses a suggestion they never wanted.',
+        'Those two relaxations shape the whole design. We can work out the answers ahead of time, offline, and keep only the popular queries.',
+      ],
+      keyIdea: 'Freshness and completeness can be traded away for speed. Latency cannot.',
+      metrics: { qps: '700K/s', p99: 'target 50 ms', ram: '-', fresh: 'a day is fine' },
+      metricTones: { fresh: 'good' },
+      scene: {
+        nodes: [
+          { ...logs, status: 'active' },
+          { ...agg, status: 'active', badge: 'works offline' },
+          { ...svc, badge: 'answers fast' },
+        ],
+        links: [{ from: 'logs', to: 'agg' }, { from: 'agg', to: 'svc', style: 'dashed', label: 'ready-made answers' }],
+        flows: [
+          { path: ['logs', 'agg'], tone: 'data', duration: 1.2 },
+          { path: ['agg', 'svc'], tone: 'data', duration: 1.4, delay: 1.3 },
+        ],
+        panel: {
+          title: 'What we trade',
+          icon: 'Scale',
+          rows: [
+            { text: 'Freshness', value: 'up to a day old', tone: 'good' },
+            { text: 'Rare queries', value: 'may be missing', tone: 'good' },
+            { text: 'Latency', value: 'never traded', tone: 'bad' },
+          ],
+          footer: { text: 'Work ahead of time, answer instantly', tone: 'muted' },
+        },
+        caption: 'Do the hard work before anyone types',
+      },
+    },
+    {
+      title: 'The API',
+      tag: 'concept',
+      heading: 'One GET call, cacheable at every layer',
+      eli5: 'The kid asks one question: "what starts with din?" The librarian answers with a short list and writes the date on it, so the same question gets the same list.',
+      body: [
+        'The read API is one call: `GET /v1/suggest?q=din&locale=en-US&k=10`. It returns a list of strings with optional scores.',
+        'It is a pure function of the prefix and locale, so every layer can cache it (the caching lesson and the CDN lesson both apply).',
+      ],
+      keyIdea: 'A pure function of the prefix is a cacheable function.',
+      metrics: { qps: '700K/s', p99: 'target 50 ms', ram: '-', fresh: 'a day is fine' },
+      scene: {
+        nodes: [{ ...user, chips: ['GET /v1/suggest?q=din'] }, { ...svc, status: 'active', badge: 'pure function' }],
+        links: [{ from: 'user', to: 'svc' }],
         flows: [
           { path: ['user', 'svc'], tone: 'request', label: 'GET /suggest?q=din', duration: 1 },
           { path: ['svc', 'user'], tone: 'response', label: '["dinner ideas", ...]', duration: 1, delay: 1.1 },
-          { path: ['svc', 'logs'], tone: 'event', label: 'searched "dinner recipes"', duration: 1.2, delay: 2.3 },
         ],
-        caption: 'Reads and writes take different paths',
+        panel: {
+          title: 'Query parameters',
+          icon: 'Braces',
+          rows: [
+            { text: 'q', value: 'prefix, "din"' },
+            { text: 'locale', value: 'en-US' },
+            { text: 'k', value: 'how many, 10' },
+          ],
+          footer: { text: 'Same inputs, same answer', tone: 'good' },
+        },
+        caption: 'The whole read API is one call',
       },
       code: {
         language: 'json',
@@ -120,49 +194,161 @@ export const designSearchAutocomplete: Lesson = {
       },
     },
     {
-      title: 'Simple design',
-      tag: 'case',
-      heading: 'Version one: LIKE over a table of counts',
-      eli5: 'For every question the librarian walks the whole aisle of slips that start with "d", counts them up, and picks the top ten. It works for one kid. With a crowd, the **database** line never moves.',
+      title: 'Query log',
+      tag: 'concept',
+      heading: 'Writes go to a log, never to the keystroke path',
+      eli5: 'Every finished request also goes on a slip in a big **log** box, so the librarian can count later which books kids want most. Writing a slip never makes a kid wait.',
       body: [
-        'The obvious build: keep `query_counts` in a SQL database and run `SELECT query FROM query_counts WHERE query LIKE \'din%\' ORDER BY weighted_count DESC LIMIT 10`. An index on `query` turns the prefix into a range scan, so it looks fine in testing.',
-        'It breaks on short prefixes. The range for `d` holds millions of rows, and the database must read all of them to sort by count before it can return ten. One-letter and two-letter prefixes are also the most frequent requests, because every search starts with them. p99 climbs to seconds.',
-        'Add 700K requests per second and no amount of read replicas saves it (the replication lesson). The work per request is the problem, so the fix has to change the data structure.',
+        'When a user submits a search, the search service appends `(query, locale, timestamp, session_hash)` to a **query log** on a stream (the message queues lesson). The hashed session id is kept only for a short time. The serving path never writes.',
+        'At 1.5B searches a day and about 60 bytes each, that is **~90 GB a day**. We derive a `query_counts` table from it, and later a structure that serves reads.',
       ],
-      keyIdea: 'A prefix index finds matches fast, but ranking them means touching all of them, and short prefixes match everything.',
-      metrics: { qps: '700K/s', p99: '3 s', ram: '-', fresh: 'live' },
+      keyIdea: 'Split the system in two: a cheap, cacheable read API and an append-only log that feeds an offline build.',
+      metrics: { qps: '700K/s', p99: 'target 50 ms', ram: '-', fresh: 'a day is fine' },
       scene: {
-        nodes: [user, { ...svc, status: 'hot' }, { ...sql, status: 'hot', badge: 'scan 4M rows for "d"' }],
-        links: [{ from: 'user', to: 'svc' }, { from: 'svc', to: 'sql' }],
-        flows: [
-          { path: ['user', 'svc'], tone: 'request', count: 5, duration: 0.9 },
-          { path: ['svc', 'sql'], tone: 'request', label: "LIKE 'd%' ORDER BY count", count: 5, duration: 1, delay: 0.9 },
-          { path: ['sql', 'svc'], tone: 'error', label: 'timeout', duration: 1.4, delay: 2.2 },
+        nodes: [
+          { ...svc, status: 'active' },
+          { ...logs, status: 'active', badge: 'append only' },
+          { ...counts, badge: 'derived later' },
         ],
-        caption: 'Short prefixes match millions of rows',
+        links: [{ from: 'svc', to: 'logs', style: 'dashed', label: 'async' }, { from: 'logs', to: 'counts' }],
+        flows: [
+          { path: ['svc', 'logs'], tone: 'event', label: 'searched "dinner recipes"', duration: 1.2 },
+          { path: ['logs', 'counts'], tone: 'data', label: 'count per query', duration: 1.2, delay: 1.4 },
+        ],
+        panel: {
+          title: 'One log record',
+          icon: 'FileText',
+          code: '2026-11-16T09:14:02Z\nen-US\n"dinner recipes"\nsession_hash\n~60 bytes',
+          footer: { text: '1.5B records, ~90 GB a day', tone: 'muted' },
+        },
+        caption: 'The log decouples reads from counting',
       },
     },
     {
-      title: 'Trie + top-k',
-      tag: 'concept',
-      heading: 'A trie that stores its answers at every node',
-      eli5: 'The librarian builds a tree of drawers: d, then di, then din. Each drawer holds a card with its ten best books already written on it. Answering is opening one drawer, so this tree is a **trie** with answers inside.',
+      title: 'Simple design',
+      tag: 'case',
+      heading: 'Version one: LIKE over a table of counts',
+      eli5: 'For every question the librarian walks the whole aisle of slips that start with "d", counts them up, and picks the top ten. It works for one kid.',
       body: [
-        'A **trie** stores strings by their characters: the root branches on the first letter, each child on the next one. Finding the node for `din` takes three hops. A plain trie still has the old problem, because finding the best completions means walking the whole subtree under that node.',
-        'So we precompute. Each node stores the **top 10 completions in its subtree**, with their counts. A lookup walks `p` characters and reads a ready list: O(p) work, no sorting. We also cap stored prefixes at about 30 characters, since almost nobody types longer before choosing a suggestion.',
-        'The cost is memory and build time. With about 100M distinct queries kept, roughly 600M nodes each holding ten 4-byte query ids plus children, the English trie comes to **~45 GB**. That fits in RAM on one large server, and updating a count means fixing the lists on every ancestor, which is why we build it in batch.',
+        'The obvious build keeps `query_counts` in a SQL database. An index on `query` turns the prefix into a range scan, so the query below looks fine in testing.',
+        'Test data is small. In production, the range for a short prefix is not.',
       ],
-      keyIdea: 'Caching the top-k list at every node turns a subtree search into a fixed-cost walk of the prefix.',
-      metrics: { qps: '700K/s', p99: '45 ms', ram: '~45 GB', fresh: 'live' },
+      keyIdea: 'A prefix index finds the matching rows fast. Ranking them is the expensive part.',
+      metrics: { qps: '700K/s', p99: 'target 50 ms', ram: '-', fresh: 'live' },
       scene: {
-        nodes: [user, svc, { ...trie, status: 'ok', badge: 'walk d → i → n' }],
+        nodes: [user, { ...svc, status: 'active' }, { ...sql, status: 'active', chips: ['LIKE \'din%\''] }],
+        links: [{ from: 'user', to: 'svc' }, { from: 'svc', to: 'sql' }],
+        flows: [
+          { path: ['user', 'svc'], tone: 'request', label: 'din', duration: 0.9 },
+          { path: ['svc', 'sql'], tone: 'request', label: "LIKE 'din%'", duration: 1, delay: 1 },
+          { path: ['sql', 'svc'], tone: 'response', label: '10 rows', duration: 1, delay: 2.1 },
+        ],
+        panel: {
+          title: 'The query',
+          icon: 'Database',
+          code: "SELECT query\nFROM query_counts\nWHERE query LIKE 'din%'\nORDER BY weighted_count DESC\nLIMIT 10;",
+          footer: { text: 'Fine on a small table', tone: 'muted' },
+        },
+        caption: 'The obvious design is a database query',
+      },
+    },
+    {
+      title: 'It breaks',
+      tag: 'case',
+      heading: 'Short prefixes match millions of rows',
+      eli5: 'Everybody starts with "d" or "s", so the aisle for those letters is huge. The librarian counts it again for every kid, and the **database** line never moves.',
+      body: [
+        'The range for `d` holds millions of rows, and the database must read them all to sort by count before it returns ten. One and two letter prefixes are also the most frequent requests, because every search starts with them. p99 climbs to seconds.',
+        'At 700K per second, read replicas do not save it (the replication lesson). The work per request is the problem, so the fix changes the data structure.',
+      ],
+      keyIdea: 'Ranking means touching every match, and short prefixes match everything.',
+      metrics: { qps: '700K/s', p99: '3 s', ram: '-', fresh: 'live' },
+      metricTones: { p99: 'bad', qps: 'bad' },
+      scene: {
+        nodes: [
+          { ...user, chips: [{ text: 'd', tone: 'warn' }] },
+          { ...svc, status: 'hot', load: 90 },
+          { ...sql, status: 'hot', load: 100, badge: 'scan 4M rows for "d"' },
+        ],
+        links: [{ from: 'user', to: 'svc' }, { from: 'svc', to: 'sql', label: 'sort then limit 10', labelTone: 'warn' }],
+        flows: [
+          { path: ['user', 'svc'], tone: 'request', count: 5, duration: 0.9 },
+          { path: ['svc', 'sql'], tone: 'request', label: "LIKE 'd%'", count: 5, duration: 1, delay: 0.9 },
+          { path: ['sql', 'svc'], tone: 'error', label: 'timeout', duration: 1.4, delay: 2.2 },
+        ],
+        panel: {
+          title: 'Rows scanned per prefix',
+          icon: 'Table',
+          rows: [
+            { text: 'd', value: '4M rows', tone: 'bad' },
+            { text: 'di', value: '300K rows', tone: 'warn' },
+            { text: 'din', value: '9K rows' },
+          ],
+          footer: { text: 'p99 3 s against a 100 ms budget', tone: 'bad' },
+        },
+        caption: 'The shortest prefixes are the most common and the most expensive',
+      },
+    },
+    {
+      title: 'The trie',
+      tag: 'concept',
+      heading: 'A trie walks the prefix one letter at a time',
+      eli5: 'The librarian builds a tree of drawers: d, then di, then din. You open one drawer per letter you typed. This tree of drawers is a **trie**.',
+      body: [
+        'A **trie** stores strings by their characters: the root branches on the first letter, each child on the next one. Finding the node for `din` takes three hops.',
+        'A plain trie still has the old problem. The best completions need a walk of the whole subtree below that node.',
+      ],
+      keyIdea: 'A trie finds the prefix in a few hops, but ranking what lies below it is still a subtree search.',
+      metrics: { qps: '700K/s', p99: 'target 50 ms', ram: '-', fresh: 'live' },
+      scene: {
+        nodes: [user, svc, { ...trie, status: 'active', badge: 'walk d, i, n' }],
         links: [{ from: 'user', to: 'svc' }, { from: 'svc', to: 'trie' }],
         flows: [
           { path: ['user', 'svc'], tone: 'request', label: 'din', duration: 0.9 },
           { path: ['svc', 'trie'], tone: 'request', label: '3 hops', duration: 1, delay: 1 },
-          { path: ['trie', 'svc'], tone: 'response', label: 'top 10, precomputed', duration: 1, delay: 2.1 },
+        ],
+        panel: {
+          title: 'The path for "din"',
+          icon: 'Binary',
+          code: 'root\n  d\n    di\n      din   9K queries below\n        dina, dine, dinn...',
+          footer: { text: 'Finding the node is cheap. Ranking below it is not.', tone: 'warn' },
+        },
+        caption: 'One letter per hop',
+      },
+    },
+    {
+      title: 'Top-k per node',
+      tag: 'concept',
+      heading: 'Store the ten best answers at every node',
+      eli5: 'Each drawer holds a card with its ten best books already written on it. Answering is opening one drawer and reading the card, so this tree is a **trie** with answers inside.',
+      body: [
+        'So we precompute. Each node stores the **top 15 completions in its subtree**, with counts. A lookup walks `p` characters and reads a ready list: O(p) work, no sorting. We return 10, and the spare 5 survive filtering (part 2).',
+        'We cap stored prefixes at about 30 characters, since almost nobody types longer before choosing a suggestion.',
+      ],
+      keyIdea: 'Caching the top-k list at every node turns a subtree search into a fixed-cost walk of the prefix.',
+      metrics: { qps: '700K/s', p99: '45 ms', ram: '-', fresh: 'live' },
+      metricTones: { p99: 'good' },
+      scene: {
+        nodes: [user, svc, { ...trie, status: 'ok', badge: 'top 15 ready' }],
+        links: [{ from: 'user', to: 'svc' }, { from: 'svc', to: 'trie' }],
+        flows: [
+          { path: ['user', 'svc'], tone: 'request', label: 'din', duration: 0.9 },
+          { path: ['svc', 'trie'], tone: 'request', label: '3 hops', duration: 1, delay: 1 },
+          { path: ['trie', 'svc'], tone: 'response', label: 'precomputed list', duration: 1, delay: 2.1 },
           { path: ['svc', 'user'], tone: 'response', duration: 0.9, delay: 3.2 },
         ],
+        panel: {
+          title: 'Node "din" holds',
+          icon: 'Star',
+          rows: [
+            { text: 'dinner ideas', value: '98,120', tone: 'good' },
+            { text: 'dinner recipes', value: '87,403' },
+            { text: 'dinosaur', value: '61,277' },
+            { text: 'dinner near me', value: '55,190' },
+            { text: '...11 more', tone: 'muted' },
+          ],
+          footer: { text: 'O(p) walk, no sorting', tone: 'good' },
+        },
         caption: 'One walk, one ready-made list',
       },
       code: {
@@ -170,7 +356,7 @@ export const designSearchAutocomplete: Lesson = {
         title: 'Trie node with a cached top-k list',
         source: `import heapq
 
-K, MAX_PREFIX = 10, 30
+K, MAX_PREFIX, RETURN = 15, 30, 10
 
 class Node:
     __slots__ = ("children", "top")
@@ -198,11 +384,11 @@ def suggest(root, prefix):
         node = node.children.get(ch)
         if node is None:
             return []
-    return [q for _, q in node.top]   # O(len(prefix)), no sorting`,
+    return [q for _, q in node.top[:RETURN]]   # O(len(prefix)), no sorting`,
         highlight: [9, 17, 21, 31],
       },
       quiz: {
-        question: 'Why store the top 10 completions on every trie node instead of only on the leaves?',
+        question: 'Why store the top completions on every trie node instead of only on the leaves?',
         options: [
           'It makes the trie smaller in memory',
           'A lookup then reads one list after walking the prefix, instead of searching the whole subtree',
@@ -214,28 +400,96 @@ def suggest(root, prefix):
       },
     },
     {
-      title: 'Offline build',
+      title: 'Memory cost',
       tag: 'concept',
-      heading: 'Build the trie from logs, offline, once a day',
-      eli5: 'Every night the librarian empties the slip box, counts which books were asked for, and writes fresh cards for all the drawers. That nightly counting and card-making is the **offline build**.',
+      heading: 'What it costs: about 60 GB of RAM',
+      eli5: 'Writing ten titles on every drawer card takes a lot of paper. The whole tree of drawers still fits in one big room, and we can squeeze it by merging drawers that only lead to one other drawer.',
       body: [
-        'The query log lands in object storage in hourly files. A daily **aggregation** job (the background jobs lesson) groups by locale and query and computes a weighted count, where recent days weigh more than older ones, so last month\'s fad fades out. Queries searched by only a handful of people are dropped. They add memory and are a privacy risk.',
-        'The **trie builder** reads the aggregated table, builds the trie with top-k lists, and writes a serialized **snapshot** to object storage with a version stamp. Trie servers download the new snapshot, load it beside the old one, and swap a pointer. Readers never see a half-built trie.',
-        'This is the freshness trade we accepted at the start: suggestions are up to a day old. Breaking news is the exception, and it gets its own path later.',
+        'With about 100M distinct queries kept, the trie has roughly 600M nodes. Each holds fifteen 4-byte query ids plus child links, so the English trie comes to **~60 GB**.',
+        'That fits in RAM on one large server. Merging single-child chains into one edge, a **compressed trie** (radix tree), shrinks it further.',
       ],
-      keyIdea: 'Aggregate the logs in batch, build an immutable trie, and swap whole snapshots. Serving never waits on writes.',
-      metrics: { qps: '700K/s', p99: '45 ms', ram: '~45 GB', fresh: '24 h' },
+      keyIdea: 'The speed is paid for in memory: a full English trie is about 60 GB, small enough for one big machine.',
+      metrics: { qps: '700K/s', p99: '45 ms', ram: '~60 GB', fresh: 'live' },
+      metricTones: { ram: 'warn' },
       scene: {
-        nodes: [svc, { ...logs, status: 'active' }, { ...agg, status: 'active', badge: 'GROUP BY query' }, { ...builder, status: 'active' }, { ...snaps, badge: 'v2026-11-16' }, { ...trie, badge: 'swap pointer' }],
-        links: buildPath,
+        nodes: [user, svc, { ...trie, status: 'active', badge: '~60 GB' }],
+        links: [{ from: 'user', to: 'svc' }, { from: 'svc', to: 'trie' }],
+        flows: [{ path: ['svc', 'trie'], tone: 'request', duration: 1.2 }],
+        panel: {
+          title: 'Sizing the English trie',
+          icon: 'HardDrive',
+          rows: [
+            { text: 'Distinct queries kept', value: '100M' },
+            { text: 'Trie nodes', value: '~600M' },
+            { text: 'Per node', value: '15 ids x 4 B + links' },
+            { text: 'Total', value: '~60 GB', tone: 'warn' },
+            { text: 'Compressed (radix) trie', value: 'fewer nodes', tone: 'good' },
+          ],
+        },
+        caption: 'Fast reads cost memory',
+      },
+    },
+    {
+      title: 'Update plan',
+      tag: 'tradeoff',
+      heading: 'Why not update the trie on every search?',
+      eli5: 'Every time a kid asks, the librarian could rewrite the cards along the whole drawer path. With a crowd, that is all she would do, so she rewrites cards at night instead.',
+      body: [
+        'Adding one query means fixing the top-10 list of every ancestor node, up to 30 of them. Billions of searches a day would slow the query service to a crawl, and the top lists rarely change from hour to hour.',
+        'So we split reads and writes. The live trie is **immutable**, and a batch job builds a new one from the log.',
+      ],
+      keyIdea: 'Updating top-k lists in place is expensive and rarely useful. Rebuild in batch and serve an immutable trie.',
+      metrics: { qps: '700K/s', p99: '45 ms', ram: '~60 GB', fresh: 'a day is fine' },
+      scene: {
+        nodes: [{ ...svc, status: 'active' }, { ...trie, status: 'hot', badge: 'locked for updates' }, { ...logs, status: 'dim' }],
+        links: [{ from: 'svc', to: 'trie' }, { from: 'svc', to: 'logs', style: 'faint' }],
         flows: [
-          { path: ['svc', 'logs'], tone: 'event', count: 3, duration: 1 },
-          { path: ['logs', 'agg'], tone: 'data', label: '90 GB/day', duration: 1, delay: 1 },
-          { path: ['agg', 'builder'], tone: 'data', label: '100M queries', duration: 1, delay: 2.1 },
-          { path: ['builder', 'snaps'], tone: 'data', label: 'snapshot', duration: 1, delay: 3.2 },
-          { path: ['snaps', 'trie'], tone: 'data', label: 'load + swap', duration: 1.2, delay: 4.3 },
+          { path: ['svc', 'trie'], tone: 'error', label: 'fix 30 lists per search', count: 3, duration: 1.2 },
+          { path: ['svc', 'logs'], tone: 'event', label: 'append only', duration: 1.2, delay: 1.5 },
         ],
-        caption: 'Logs in, a fresh immutable trie out, every day',
+        panel: {
+          title: 'Two ways to update',
+          icon: 'Scale',
+          rows: [
+            { text: 'In place, per search', value: '30 list updates', tone: 'bad' },
+            { text: 'Searches per day', value: '1.5B', tone: 'warn' },
+            { text: 'Top lists change', value: 'slowly', tone: 'good' },
+            { text: 'Choice', value: 'rebuild in batch', tone: 'good' },
+          ],
+        },
+        caption: 'Reads and writes take different paths',
+      },
+    },
+    {
+      title: 'Aggregate logs',
+      tag: 'concept',
+      heading: 'Aggregate the log with time decay',
+      eli5: 'Every night the librarian empties the slip box and counts which books were asked for. Slips from last week count a little less than today\'s, and books only one kid wanted are left out.',
+      body: [
+        'A daily job (the background jobs lesson) groups the log by locale and query and computes a weighted count. Recent days weigh more, so last month\'s fad fades out.',
+        '`search_log_daily` holds one row per search. Queries searched by fewer than 20 distinct sessions are dropped, since they add memory and are a privacy risk.',
+      ],
+      keyIdea: 'Weight recent searches higher, drop rare ones, and the counts stay small, fresh enough and private.',
+      metrics: { qps: '700K/s', p99: '45 ms', ram: '~60 GB', fresh: '24 h' },
+      scene: {
+        nodes: [{ ...logs, status: 'active' }, { ...agg, status: 'active', badge: 'GROUP BY query' }, { ...counts, at: p(3.6, -8.5), badge: '100M queries' }],
+        links: [{ from: 'logs', to: 'agg', label: '90 GB/day' }, { from: 'agg', to: 'counts' }],
+        flows: [
+          { path: ['logs', 'agg'], tone: 'data', duration: 1.2 },
+          { path: ['agg', 'counts'], tone: 'data', label: 'weighted counts', duration: 1.2, delay: 1.3 },
+        ],
+        panel: {
+          title: 'Weight of one search',
+          icon: 'Clock',
+          rows: [
+            { text: 'Today', value: '1.00', tone: 'good' },
+            { text: '7 days ago', value: '0.48' },
+            { text: '28 days ago', value: '0.05', tone: 'muted' },
+            { text: 'Fewer than 20 sessions', value: 'dropped', tone: 'warn' },
+          ],
+          footer: { text: 'weight = 0.9 ^ days old', tone: 'muted' },
+        },
+        caption: 'Counts with decay and a privacy floor',
       },
       code: {
         language: 'sql',
@@ -249,246 +503,157 @@ SELECT locale,
 FROM search_log_daily
 WHERE day >= CURRENT_DATE - INTERVAL '28' DAY
 GROUP BY locale, lower(trim(query))
-HAVING COUNT(DISTINCT user_id) >= 20;   -- privacy and memory floor`,
+HAVING COUNT(DISTINCT session_hash) >= 20;   -- privacy and memory floor`,
         highlight: [5, 10],
+      },
+    },
+    {
+      title: 'Snapshot swap',
+      tag: 'concept',
+      heading: 'Build an immutable trie and swap it in',
+      eli5: 'The card-maker writes a whole new set of drawers in the back room and stamps a date on it. The librarian moves to the new set in one step, so nobody sees half-written cards.',
+      body: [
+        'The **trie builder** reads the counts, builds the trie with top-k lists, and writes a serialized **snapshot** to object storage with a version stamp.',
+        'Trie servers download it, load it beside the old one, and swap a pointer. Readers never see a half-built trie. Two copies need about 2x RAM, so swap a few replicas at a time.',
+      ],
+      keyIdea: 'Build offline, version it, and swap whole snapshots. Serving never waits on writes.',
+      metrics: { qps: '700K/s', p99: '45 ms', ram: '~60 GB', fresh: '24 h' },
+      scene: {
+        nodes: [{ ...agg }, { ...builder, status: 'active', badge: 'top 15 per node' }, { ...snaps, badge: 'v2026-11-16' }, { ...trie, badge: 'swap pointer' }],
+        links: [
+          { from: 'agg', to: 'builder' },
+          { from: 'builder', to: 'snaps' },
+          { from: 'snaps', to: 'trie', style: 'dashed', label: 'load + swap' },
+        ],
+        flows: [
+          { path: ['agg', 'builder'], tone: 'data', label: '100M queries', duration: 1, delay: 0 },
+          { path: ['builder', 'snaps'], tone: 'data', label: 'snapshot', duration: 1, delay: 1.1 },
+          { path: ['snaps', 'trie'], tone: 'data', label: 'v2026-11-16', duration: 1.2, delay: 2.2 },
+        ],
+        panel: {
+          title: 'Swap sequence',
+          icon: 'Repeat',
+          rows: [
+            { text: '1. Download snapshot', value: 'v2026-11-16' },
+            { text: '2. Load beside the old one', value: 'v2026-11-15' },
+            { text: '3. Swap the pointer', value: 'instant', tone: 'good' },
+            { text: '4. Drop the old copy', value: 'later', tone: 'muted' },
+            { text: 'Memory headroom', value: '~2x, or stagger replicas', tone: 'warn' },
+          ],
+        },
+        caption: 'Logs in, a fresh immutable trie out, every day',
       },
     },
     {
       title: 'Serve from RAM',
       tag: 'concept',
-      heading: 'Serve from memory, with a cache in front',
-      eli5: 'The ten most asked-for cards sit right on the front desk, the **prefix cache**. Most kids get their answer there, and only unusual questions send the librarian back to the drawers.',
+      heading: 'Trie servers keep the whole trie in memory',
+      eli5: 'The drawers all stay in the front room, not in a basement. Opening one takes a moment, so a single librarian can answer thousands of kids and a few spares cover sick days.',
       body: [
-        'The trie lives entirely in RAM on a pool of **trie servers**, each holding a full copy. A lookup costs microseconds, so one server handles tens of thousands of requests per second and the pool is sized by request rate, with a few spare for failures. The suggest API in front stays stateless and scales on its own (the load balancing lesson).',
-        'Traffic is very skewed. A few thousand short prefixes (`a`, `th`, `how to`) carry a large share of requests. A **prefix cache** in Redis keyed by `locale:prefix`, with a TTL matching the build cycle, answers those before they reach a trie server. A hit rate around 70% is realistic for this workload.',
-        'The cache key includes the snapshot version, so a new build does not mix old and new lists. When the snapshot swaps, the new keys warm up within minutes from the hottest prefixes.',
+        'The trie lives entirely in RAM on a pool of **trie servers**, each holding a full copy. A lookup costs microseconds, so one server handles tens of thousands of requests per second.',
+        'Size the pool by request rate, with a few spares for failures. The suggest API in front stays stateless and scales on its own (the load balancing lesson).',
       ],
-      keyIdea: 'Keep the whole trie in RAM for predictable speed, and let a small cache absorb the hottest prefixes.',
-      metrics: { qps: '700K/s', p99: '40 ms', ram: '~45 GB', fresh: '24 h' },
+      keyIdea: 'Keep the whole trie in RAM for predictable speed, and size the pool by request rate.',
+      metrics: { qps: '700K/s', p99: '40 ms', ram: '~60 GB', fresh: '24 h' },
+      metricTones: { p99: 'good' },
       scene: {
-        nodes: [user, { ...svc, status: 'active' }, { ...cache, status: 'ok', badge: '70% hits' }, { ...trie, status: 'active', badge: '30% misses' }],
-        links: [{ from: 'user', to: 'svc' }, { from: 'svc', to: 'cache' }, { from: 'cache', to: 'trie' }],
+        nodes: [user, { ...svc, status: 'active', chips: ['stateless'] }, { ...trie, status: 'active', load: 55, chips: ['full copy in RAM'] }],
+        links: [{ from: 'user', to: 'svc' }, { from: 'svc', to: 'trie', label: 'microsecond lookups' }],
         flows: [
           { path: ['user', 'svc'], tone: 'request', count: 4, duration: 0.9 },
-          { path: ['svc', 'cache', 'svc'], tone: 'response', label: 'hit "how to"', count: 3, duration: 1.4, delay: 1 },
+          { path: ['svc', 'trie'], tone: 'request', label: 'din', duration: 1, delay: 1 },
+          { path: ['trie', 'svc', 'user'], tone: 'response', label: 'top 10', duration: 1.6, delay: 2.1 },
+        ],
+        panel: {
+          title: 'Sizing the pool',
+          icon: 'Server',
+          rows: [
+            { text: 'One server, one lookup', value: 'microseconds' },
+            { text: 'One server', value: '10K+ req/s' },
+            { text: 'Copies per server', value: 'full trie' },
+            { text: 'Spares', value: 'a few', tone: 'good' },
+          ],
+        },
+        caption: 'Predictable speed from memory',
+      },
+    },
+    {
+      title: 'Prefix cache',
+      tag: 'concept',
+      heading: 'A small cache absorbs the hottest prefixes',
+      eli5: 'The ten most asked-for cards sit right on the front desk, the **prefix cache**. Most kids get their answer there, and only unusual questions send the librarian back to the drawers.',
+      body: [
+        'Traffic is very skewed. A few thousand short prefixes (`a`, `th`, `how to`) carry a large share. A **prefix cache** in Redis keyed by `locale:prefix:version` answers those before they reach a trie server. About 70% hits is realistic.',
+        'The version in the key keeps old and new lists apart across a swap. After a swap the hottest keys warm up within minutes.',
+      ],
+      keyIdea: 'A few prefixes carry most of the traffic, so a small cache in front takes most of the load off the trie.',
+      metrics: { qps: '700K/s', p99: '35 ms', ram: '~60 GB', fresh: '24 h' },
+      metricTones: { p99: 'good' },
+      scene: {
+        nodes: [{ ...svc, status: 'active' }, { ...cache, status: 'ok', badge: '70% hits' }, { ...trie, status: 'active', load: 35, badge: '30% misses' }],
+        links: [{ from: 'svc', to: 'cache' }, { from: 'cache', to: 'trie', label: 'on a miss' }],
+        flows: [
+          { path: ['svc', 'cache', 'svc'], tone: 'response', label: 'hit "how to"', count: 3, duration: 1.4 },
           { path: ['cache', 'trie'], tone: 'request', label: 'miss "dinosaur fo"', duration: 1, delay: 1.6 },
           { path: ['trie', 'cache'], tone: 'response', duration: 1, delay: 2.7 },
         ],
+        panel: {
+          title: 'Cache key',
+          icon: 'Key',
+          code: 'locale : prefix : version\nen-US:how to:2026-11-16\nen-US:th:2026-11-16',
+          footer: { text: 'TTL matches the build cycle', tone: 'muted' },
+        },
         caption: 'Hot prefixes stop at the cache',
       },
     },
     {
-      title: 'Client side',
-      tag: 'concept',
-      heading: 'Debounce, cancel, and let the browser cache',
-      eli5: 'The librarian waits until the kid pauses before guessing, and the kid keeps a little **notebook** of answers already heard. Rubbing out a letter means checking the notebook, not asking again.',
+      title: 'Part 1 recap',
+      tag: 'recap',
+      heading: 'Precompute the ranking, then serve it from RAM',
+      eli5: 'Count the slips every night, write the ten best titles on every drawer of the **trie**, and keep the favorites on the front desk. Kids get answers before they finish the word.',
       body: [
-        'Most keystrokes do not need a request. **Debouncing** waits until typing pauses for about 100 ms and sends only the latest prefix. Fast typists skip most intermediate prefixes, and our 20 requests per search drop to about 6. The client also cancels any request still in flight when a newer one starts, so an old answer can never overwrite a newer one.',
-        'The response carries `Cache-Control: public, max-age=300`. Backspacing from `dinn` to `din` is then answered from the **browser cache** with no network at all, and a CDN in front of the API (the CDN lesson) absorbs the most popular prefixes for everyone in a region. Personalized suggestions would need `private`, which is a reason to keep personalization as a separate, small call.',
-        'Together these cut peak traffic reaching our servers from 700K to about **125K requests per second**, before any server-side work.',
+        'The read path is a stateless suggest API, a prefix cache and trie servers with the **top 15 cached at every node** (10 returned). The write path is a query log, a daily aggregation, a builder and versioned snapshots swapped in by pointer.',
+        'Part 2 shrinks the traffic at the client, shards the trie, adds safety, trending and failure handling.',
       ],
-      keyIdea: 'The cheapest request is the one the client never sends. Debounce, cancel stale calls, and make responses cacheable.',
-      metrics: { qps: '125K/s', p99: '30 ms', ram: '~45 GB', fresh: '24 h' },
+      keyIdea: 'Autocomplete is fast because all the ranking happens before anyone types.',
+      metrics: { qps: '700K/s', p99: '35 ms', ram: '~60 GB', fresh: '24 h' },
+      metricTones: { p99: 'good', qps: 'warn' },
       scene: {
-        nodes: [{ ...user, status: 'active', badge: 'waits 100 ms' }, { ...edge, status: 'ok', badge: 'max-age=300' }, svc, cache, trie],
-        links: servePath,
-        flows: [
-          { path: ['user', 'edge'], tone: 'request', label: 'din (after pause)', duration: 1 },
-          { path: ['edge', 'user'], tone: 'response', label: 'cached', duration: 1, delay: 1.1 },
-          { path: ['user', 'edge', 'svc'], tone: 'request', label: 'dinosaur f', duration: 1.4, delay: 2.3 },
-          { path: ['svc', 'cache', 'trie'], tone: 'request', duration: 1.2, delay: 3.8 },
-        ],
-        caption: '700K keystrokes per second become 125K requests',
-      },
-      code: {
-        language: 'typescript',
-        title: 'Debounce and cancel in the search box',
-        source: `const DEBOUNCE_MS = 100;
-let timer: ReturnType<typeof setTimeout> | undefined;
-let inflight: AbortController | undefined;
-
-input.addEventListener('input', () => {
-  clearTimeout(timer);
-  timer = setTimeout(async () => {
-    const prefix = input.value.trim().toLowerCase();
-    if (!prefix) return render([]);
-    inflight?.abort();                       // drop the older request
-    inflight = new AbortController();
-    const res = await fetch(\`/v1/suggest?q=\${encodeURIComponent(prefix)}&k=10\`, {
-      signal: inflight.signal,               // browser cache answers repeats
-    });
-    render((await res.json()).suggestions);
-  }, DEBOUNCE_MS);
-});`,
-        highlight: [6, 7, 10, 13],
-      },
-    },
-    {
-      title: 'Hot letters',
-      tag: 'case',
-      heading: 'Case: twenty languages, and the letter s is on fire',
-      eli5: 'Too many drawers for one librarian, so three librarians split them by letter. Lots of books start with s and few with x, so the s librarian is swamped. Splitting the drawers by how busy they are is **sharding by prefix**.',
-      body: [
-        'The product launches in 20 locales. All tries together reach about **400 GB**, too much for one server\'s RAM. We shard by prefix (the sharding lesson): the first try gives each letter range its own trie servers. Within a day the shard holding `s` runs at 3x the load of the others, while the `x`, `y`, `z` servers idle. p99 on that shard jumps to 400 ms.',
-        'Letters are not uniform, in size or in traffic. The fix is to split by measured load: a **shard map** service holds ranges like `a to m`, `n to s`, `t to z` chosen from yesterday\'s request counts and node counts, and moves a boundary (say `sa to sm` versus `sn to sz`) when a range runs hot. The builder cuts each snapshot along the same ranges.',
-        'The hottest prefixes are one or two characters long. Their answers are tiny, so we also replicate them to every shard and cache them at the edge. A hot shard gets extra replicas rather than a bigger box. The suggest API reads the map and routes each prefix to its shard.',
-      ],
-      keyIdea: 'Shard on measured load. Skewed keys need movable ranges, extra replicas and caching for the hottest prefixes.',
-      metrics: { qps: '125K/s', p99: '400 ms → 35 ms', ram: '~400 GB, 3 shards', fresh: '24 h' },
-      scene: {
-        nodes: [
-          user,
-          { ...svc, status: 'active', badge: 'route by prefix' },
-          { ...shardMap, status: 'active', badge: 'move boundary' },
-          { ...shardA, status: 'ok' },
-          { ...shardS, status: 'hot', badge: '3x load on "s"' },
-          { ...shardT, status: 'dim', badge: 'mostly idle' },
-        ],
+        nodes: [{ ...svc, status: 'ok' }, { ...cache, status: 'ok' }, { ...trie, status: 'ok' }, { ...logs }, { ...builder }],
         links: [
-          { from: 'user', to: 'svc' },
-          { from: 'svc', to: 'shardMap', style: 'dashed' },
-          { from: 'svc', to: 'shardA' },
-          { from: 'svc', to: 'shardS' },
-          { from: 'svc', to: 'shardT' },
-        ],
-        flows: [
-          { path: ['user', 'svc'], tone: 'request', count: 4, duration: 0.9 },
-          { path: ['svc', 'shardMap'], tone: 'request', label: 'which shard has "sho"?', duration: 1, delay: 1 },
-          { path: ['svc', 'shardS'], tone: 'request', label: 's...', count: 5, duration: 1.2, delay: 2.1 },
-          { path: ['svc', 'shardA'], tone: 'request', duration: 1.2, delay: 2.1 },
-          { path: ['svc', 'shardT'], tone: 'request', duration: 1.6, delay: 2.6 },
-        ],
-        caption: 'The alphabet is a bad shard key',
-      },
-    },
-    {
-      title: 'Safety filter',
-      tag: 'concept',
-      heading: 'Never suggest something harmful',
-      eli5: 'Some cards have mean or unsafe titles on them. A grown-up checks every card before the kid sees it and crosses out bad ones at once. That checker is the **safety filter**.',
-      body: [
-        'Popularity is not approval. People search for hateful, sexual, violent and defamatory phrases, and a suggestion puts words in the user\'s mouth. Some suggestions also have to vanish for legal reasons, such as a court order or a privacy request.',
-        'There are two layers. At build time, the aggregator drops queries matching blocklists and a classifier, so most bad text never reaches the trie. At serve time, a **safety filter** in the suggest API checks each returned item against a small, live blocklist. Since each node keeps only 10, we store about 15 per node so filtering still leaves a full list.',
-        'The live layer exists because the batch layer is a day behind. When a harmful suggestion is reported at 3 PM, an operator adds it to the blocklist and it disappears worldwide within a minute, with no rebuild. The next build removes it for good.',
-      ],
-      keyIdea: 'Filter during the build for scale, and filter again at serve time so removals take effect in minutes.',
-      metrics: { qps: '125K/s', p99: '35 ms', ram: '~400 GB, 3 shards', fresh: '24 h' },
-      scene: {
-        nodes: [user, edge, { ...svc, status: 'active' }, { ...filter, status: 'active', badge: 'removed 1 of 15' }, cache, trie],
-        links: [
-          { from: 'user', to: 'edge' },
-          { from: 'edge', to: 'svc' },
-          { from: 'svc', to: 'filter' },
-          { from: 'svc', to: 'cache' },
-          { from: 'cache', to: 'trie' },
-        ],
-        flows: [
-          { path: ['svc', 'cache', 'trie'], tone: 'request', duration: 1.2 },
-          { path: ['trie', 'cache', 'svc'], tone: 'response', label: '15 candidates', duration: 1.2, delay: 1.3 },
-          { path: ['svc', 'filter', 'svc'], tone: 'request', label: 'check blocklist', duration: 1.2, delay: 2.6 },
-          { path: ['svc', 'edge', 'user'], tone: 'response', label: 'top 10 safe', duration: 1.2, delay: 3.9 },
-        ],
-        caption: 'Every list passes the filter on the way out',
-      },
-    },
-    {
-      title: 'Trending',
-      tag: 'tradeoff',
-      heading: 'Breaking news cannot wait for tomorrow\'s build',
-      eli5: 'Kids suddenly ask about a comet that appeared tonight, but the cards were written last night. A helper tallies the last few minutes of slips on a **whiteboard**, and the librarian mixes those in.',
-      body: [
-        'A storm gets a name at 9 AM and millions search for it. The daily trie does not know the word exists until tomorrow. Rebuilding the full trie every few minutes is too expensive, so we add a small fast path beside it.',
-        'A **trend counter** reads the same query log as a stream (the stream processing lesson) and counts queries in 5-minute windows. A query is trending when its recent rate is far above its daily baseline. The counter writes a small **trending overlay**, a few thousand prefixes with their hot queries, into the prefix cache. The suggest API merges the overlay with the trie\'s list, giving trending items a boosted score.',
-        'The overlay is small, so it is cheap to rebuild every minute, and it passes the same safety filter. The trade is complexity: two ranking sources must be blended so a spike does not crowd out stable, useful suggestions forever. Overlay entries expire after a few hours unless they keep trending.',
-      ],
-      keyIdea: 'Keep the big trie on a slow, cheap cycle, and add a small streaming overlay for what changed in the last few minutes.',
-      metrics: { qps: '125K/s', p99: '35 ms', ram: '~400 GB, 3 shards', fresh: '24 h + 5 min overlay' },
-      scene: {
-        nodes: [user, svc, { ...cache, status: 'active', badge: 'overlay: storm names' }, trie, { ...logs, status: 'active' }, { ...trend, status: 'active', badge: '40x baseline' }],
-        links: [
-          { from: 'user', to: 'svc' },
           { from: 'svc', to: 'cache' },
           { from: 'cache', to: 'trie' },
           { from: 'svc', to: 'logs', style: 'faint' },
-          { from: 'logs', to: 'trend' },
-          { from: 'trend', to: 'cache', style: 'dashed' },
+          { from: 'logs', to: 'builder', style: 'dashed' },
+          { from: 'builder', to: 'trie', style: 'dashed' },
         ],
         flows: [
-          { path: ['svc', 'logs'], tone: 'event', count: 4, duration: 1 },
-          { path: ['logs', 'trend'], tone: 'data', label: 'stream', duration: 1, delay: 1 },
-          { path: ['trend', 'cache'], tone: 'data', label: 'trending overlay', duration: 1.2, delay: 2.1 },
-          { path: ['svc', 'cache', 'svc'], tone: 'response', label: 'trie list + overlay', duration: 1.4, delay: 3.4 },
+          { path: ['svc', 'cache', 'trie'], tone: 'request', duration: 2 },
+          { path: ['trie', 'cache', 'svc'], tone: 'response', duration: 2, delay: 2.1 },
+          { path: ['logs', 'builder', 'trie'], tone: 'data', duration: 3, delay: 0.5 },
         ],
-        caption: 'A small streaming path covers the last few minutes',
-      },
-    },
-    {
-      title: 'Failures',
-      tag: 'case',
-      heading: 'Case: a bad snapshot and a dead trie server',
-      eli5: 'One night the card-maker writes every card wrong. The librarian tests a few drawers before using the new cards and keeps the old ones handy. Keeping the old set to switch back is a **rollback**.',
-      body: [
-        'A bug in the builder truncates every query to 8 characters. If the trie servers loaded it blindly, every suggestion worldwide would be broken within minutes. So each snapshot passes **validation** before the swap: node count and size within 10% of yesterday, a golden set of prefixes whose answers must overlap yesterday\'s, and a canary that loads it on one server first (the deployments lesson). The servers keep the previous snapshot on disk and can swap back in seconds.',
-        'Hardware fails too. Each shard has at least three replicas behind the load balancer, and health checks pull a dead one out within seconds. A replacement downloads the snapshot from object storage instead of rebuilding.',
-        'The last line of defense is that autocomplete is optional. If a shard is down, the API returns an empty list within its 50 ms timeout (the timeouts lesson) and the search box still works. Failing quiet is better than making typing slow.',
-      ],
-      keyIdea: 'Validate every snapshot before it serves, keep the last good one, and degrade to no suggestions instead of slow ones.',
-      metrics: { qps: '125K/s', p99: '35 ms', ram: '~400 GB, 3 shards', fresh: '24 h + 5 min overlay' },
-      scene: {
-        nodes: [
-          user,
-          svc,
-          cache,
-          { ...trie, status: 'ok', badge: 'kept v2026-11-15' },
-          { ...builder, status: 'down', badge: 'bad build' },
-          { ...snaps, status: 'hot', badge: 'validation failed' },
-        ],
-        links: [
-          { from: 'user', to: 'svc' },
-          { from: 'svc', to: 'cache' },
-          { from: 'cache', to: 'trie' },
-          { from: 'builder', to: 'snaps' },
-          { from: 'snaps', to: 'trie', style: 'dashed' },
-        ],
-        flows: [
-          { path: ['builder', 'snaps'], tone: 'data', label: 'v2026-11-16', duration: 1 },
-          { path: ['snaps', 'trie'], tone: 'error', label: 'rejected', duration: 1.2, delay: 1.1 },
-          { path: ['user', 'svc', 'cache', 'trie'], tone: 'request', duration: 1.6, delay: 2.4 },
-          { path: ['trie', 'cache', 'svc', 'user'], tone: 'response', label: 'yesterday\'s lists', duration: 1.6, delay: 4.1 },
-        ],
-        caption: 'A bad build never reaches users',
-      },
-    },
-    {
-      title: 'Recap',
-      tag: 'recap',
-      heading: 'Precompute everything, serve from RAM, fail quiet',
-      eli5: 'Count the slips every night, write ten best titles in every drawer of the **trie**, keep the favorites on the desk, and let a grown-up cross out bad ones. Kids get answers before they finish the word.',
-      body: [
-        'The read path is client debounce and browser cache, then CDN, then a stateless suggest API, a prefix cache, and trie servers holding the trie in RAM with the **top 10 cached at every node**. Peak traffic fell from 700K keystrokes to 125K requests per second, and p99 sits near 35 ms against a 100 ms budget.',
-        'The write path is a query log, a daily aggregation with decay and a privacy floor, a trie builder and versioned snapshots that are validated before a pointer swap. Shards follow measured load, a live filter removes harmful suggestions in minutes, and a streaming overlay adds trending queries between builds.',
-      ],
-      keyIdea: 'Autocomplete is fast because all the ranking happens before anyone types.',
-      metrics: { qps: '125K/s', p99: '35 ms', ram: '~400 GB, 3 shards', fresh: '24 h + 5 min overlay' },
-      scene: {
-        nodes: [user, edge, svc, filter, { ...cache, status: 'ok' }, { ...trie, status: 'ok' }, logs, agg, builder, snaps],
-        links: [...servePath, { from: 'svc', to: 'filter', style: 'faint' as const }, ...buildPath],
-        flows: [
-          { path: ['user', 'edge', 'svc', 'cache', 'trie'], tone: 'request', duration: 2 },
-          { path: ['trie', 'cache', 'svc', 'edge', 'user'], tone: 'response', duration: 2, delay: 2.1 },
-          { path: ['svc', 'logs', 'agg', 'builder', 'snaps', 'trie'], tone: 'data', duration: 3.4, delay: 0.5 },
-        ],
+        panel: {
+          title: 'Part 1 in numbers',
+          icon: 'Gauge',
+          rows: [
+            { text: 'Peak load', value: '700K/s' },
+            { text: 'Trie in RAM', value: '~60 GB' },
+            { text: 'Cache hit rate', value: '~70%', tone: 'good' },
+            { text: 'p99', value: '35 ms', tone: 'good' },
+          ],
+        },
+        caption: 'Read path, write path, both decoupled',
       },
       quiz: {
-        question: 'Users report that a hurricane named this morning does not show up in suggestions. What is the best fix?',
+        question: 'A teammate proposes updating the live trie in place on every search so suggestions are always fresh. What is the main problem?',
         options: [
-          'Rebuild the full trie every five minutes',
-          'Raise the prefix cache TTL so hot answers stay longer',
-          'Add a streaming trend counter that writes a small overlay merged with the trie\'s results',
-          'Lower the debounce delay in the browser',
+          'Tries cannot store counts',
+          'Each search would rewrite the top-10 lists of up to 30 ancestor nodes, at billions of searches a day',
+          'RAM cannot be written to while it serves reads',
+          'The prefix cache would stop working',
         ],
-        answer: 2,
-        explain: 'The daily trie cannot know about a term born today, and rebuilding the whole thing every few minutes is wasteful. A small streaming overlay covers recent spikes cheaply and expires on its own.',
+        answer: 1,
+        explain: 'Adding one query changes the top lists of every ancestor node. At billions of searches a day that write load would slow the reads. A batch build into an immutable snapshot keeps the serving path fast.',
       },
     },
   ],

@@ -141,18 +141,22 @@ export const containersServerless: Lesson = {
         language: 'bash',
         title: 'A Dockerfile for the shop API, then build and push',
         source: `# Dockerfile
-FROM python:3.12-slim                  # runtime pinned in the image
+# runtime pinned in the image
+FROM python:3.12-slim
 WORKDIR /app
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt   # cached layer
-COPY . .                               # only this layer changes per commit
-USER 10001                             # do not run as root
+# cached layer
+RUN pip install --no-cache-dir -r requirements.txt
+# only this layer changes per commit
+COPY . .
+# do not run as root
+USER 10001
 CMD ["gunicorn", "-b", "0.0.0.0:8080", "shop.app:app"]
 
 # build, tag with the version, push to the registry
 docker build -t registry.internal/shop-api:1.4.2 .
 docker push registry.internal/shop-api:1.4.2`,
-        highlight: [2, 5, 6, 11],
+        highlight: [3, 7, 9, 15],
       },
     },
     {
@@ -192,7 +196,7 @@ docker push registry.internal/shop-api:1.4.2`,
       eli5: 'The sealed lunchbox is the image. When a cook opens one and serves the soup, that serving is the **container**. Salt and spice from the shelf are added at the table.',
       body: [
         'A **container** is a running copy of an image, the way a process is a running copy of a program. Laptop, test cluster and production run byte-for-byte the same software.',
-        'Only config and secrets come in from outside, through environment variables or mounted files.',
+        'Only config and secrets come in from outside, through environment variables or mounted files. In Kubernetes a **ConfigMap** holds plain settings and a **Secret** holds passwords.',
       ],
       keyIdea: 'One image, many containers, and only config and secrets differ between environments.',
       metrics: { start: '~1 s', unit: 'container', idle: 'full server', ops: 'OS + runtime' },
@@ -211,8 +215,9 @@ docker push registry.internal/shop-api:1.4.2`,
           title: 'Same image, two environments',
           icon: 'KeyRound',
           rows: [
-            { text: 'DB_URL (staging)', value: 'db.staging' },
-            { text: 'DB_URL (prod)', value: 'db.prod' },
+            { text: 'Env var DB_URL', value: 'db.staging or db.prod' },
+            { text: 'ConfigMap', value: 'plain settings, env or file' },
+            { text: 'Secret', value: 'passwords, mounted file' },
             { text: 'Image', value: 'shop-api:1.4.2', tone: 'good' },
           ],
           footer: { text: 'Secrets are mounted, never baked in', tone: 'muted' },
@@ -326,8 +331,8 @@ docker push registry.internal/shop-api:1.4.2`,
       heading: 'Containers are disposable, so keep data outside',
       eli5: 'A serving of soup gets thrown away when the plate is cleared. Anything you want to keep goes in the pantry, not on the plate.',
       body: [
-        'A container\'s writable layer disappears when it is replaced. Keep the app **stateless** and put data outside: a managed database, object storage, or a mounted **volume**.',
-        'Then any copy can be killed and replaced without losing anything.',
+        'A container\'s writable layer disappears when it is replaced. Keep the app **stateless** and put data outside: a managed database, object storage, or a mounted **persistent volume**.',
+        'Then any copy can be killed and replaced without losing anything. Run databases as managed services where you can, since a volume is pinned to one zone and stateful workloads need extra care.',
       ],
       keyIdea: 'Treat containers as disposable and keep state in a database, object storage or a volume.',
       metrics: { start: '~1 s', unit: 'container', idle: 'shared host', ops: 'OS + runtime' },
@@ -335,7 +340,7 @@ docker push registry.internal/shop-api:1.4.2`,
         nodes: [
           { id: 'c1', kind: 'container', at: at(-3.8, -3.8), label: 'shop api', status: 'active', chips: [{ text: 'local files: lost on restart', tone: 'warn' }] },
           { ...db, at: at(3.8, -3.8), sub: 'survives restarts', status: 'ok' },
-          { id: 'vol', kind: 'storage', at: at(0, 3.8), label: 'volume', sub: 'uploads' },
+          { id: 'vol', kind: 'storage', at: at(0, 3.8), label: 'persistent volume', sub: 'uploads' },
         ],
         links: [link('c1', 'db', { label: 'orders' }), link('c1', 'vol', { label: 'mounted' })],
         flows: [
@@ -348,7 +353,7 @@ docker push registry.internal/shop-api:1.4.2`,
           rows: [
             { text: 'Container disk', value: 'gone on restart', tone: 'bad' },
             { text: 'Database', value: 'durable', tone: 'good' },
-            { text: 'Volume', value: 'durable', tone: 'good' },
+            { text: 'Persistent volume', value: 'outlives pod, one zone', tone: 'warn' },
           ],
         },
         caption: 'Kill a copy, lose nothing',
@@ -361,14 +366,14 @@ docker push registry.internal/shop-api:1.4.2`,
       eli5: 'The head chef keeps a list: three soup counters must always be open. She is the **orchestrator**. You hand her the list, and she works out the rest.',
       body: [
         'With 40 services and 300 containers, nobody picks servers by hand. An **orchestrator** such as Kubernetes takes a **desired state**: run 3 copies of `shop-api:1.4.2`, each with 0.5 CPU and 512 MB.',
-        'You tell it what should be true, not the steps. It keeps comparing reality to the list.',
+        'You tell it what should be true, not the steps. Each copy runs as a **pod**: one or more containers scheduled together, here one container.',
       ],
       keyIdea: 'You declare how many copies should run and with what resources. The orchestrator keeps fixing reality until it matches.',
       metrics: { start: '~2 s', unit: 'pod', idle: 'cluster nodes', ops: 'cluster' },
       scene: {
         nodes: [
           { ...laptop, label: 'you', sub: 'kubectl apply' },
-          { ...sched, status: 'active', badge: 'want 3 copies' },
+          { ...sched, status: 'active', badge: 'want 3 pods' },
           { id: 'state', kind: 'block', at: at(3.8, -3.8), label: 'cluster state', sub: 'desired + actual', icon: 'Database', tint: 'teal' },
         ],
         links: [link('laptop', 'sched', { label: 'declare' }), link('sched', 'state', { arrow: 'both' })],
@@ -381,9 +386,9 @@ docker push registry.internal/shop-api:1.4.2`,
           icon: 'List',
           rows: [
             { text: 'Image', value: 'shop-api:1.4.2' },
-            { text: 'Copies', value: '3' },
-            { text: 'CPU per copy', value: '0.5' },
-            { text: 'Memory per copy', value: '512 MB' },
+            { text: 'Pods', value: '3' },
+            { text: 'CPU per pod', value: '0.5' },
+            { text: 'Memory per pod', value: '512 MB' },
           ],
         },
         caption: 'Declare the goal, not the steps',
@@ -395,25 +400,35 @@ docker push registry.internal/shop-api:1.4.2`,
       heading: 'The scheduler picks a node for each copy',
       eli5: 'The head chef looks at which kitchens have a free counter and spare burners, and spreads the three soup counters across different kitchens.',
       body: [
-        'The **scheduler** places each copy on a node with enough free CPU and memory, using the numbers you declared. It spreads copies across nodes, so one dead machine does not take all three.',
-        'Placement uses the request values, so set them honestly.',
+        'The **scheduler** places each pod on a node with enough free CPU and memory, using the **requests** you declared. It spreads pods across nodes, so one dead machine does not take all three.',
+        'A **limit** is a hard cap: a pod over its memory limit is OOM-killed, and one over its CPU limit is throttled. Set requests honestly.',
       ],
-      keyIdea: 'The scheduler matches each copy\'s declared needs to a node with room, and spreads copies for safety.',
+      keyIdea: 'The scheduler matches each pod\'s requested resources to a node with room, and spreads pods for safety.',
       metrics: { start: '~2 s', unit: 'pod', idle: 'cluster nodes', ops: 'cluster' },
       scene: {
         nodes: [
-          { ...sched, status: 'active', badge: 'want 3 copies' },
-          { ...node1, chips: ['api #1'] },
-          { ...node2, chips: ['api #2'] },
-          { ...node3, chips: ['api #3'] },
+          { ...sched, status: 'active', badge: 'want 3 pods' },
+          { ...node1, chips: ['pod api-1'] },
+          { ...node2, chips: ['pod api-2'] },
+          { ...node3, chips: ['pod api-3'] },
         ],
         links: clusterLinks,
         flows: [
-          { path: ['sched', 'node1'], tone: 'event', label: 'place', duration: 1.2 },
+          { path: ['sched', 'node1'], tone: 'event', label: 'place pod', duration: 1.2 },
           { path: ['sched', 'node2'], tone: 'event', duration: 1.2, delay: 0.3 },
           { path: ['sched', 'node3'], tone: 'event', duration: 1.4, delay: 0.6 },
         ],
-        caption: 'Three copies, spread across three nodes',
+        panel: {
+          title: 'Request vs limit',
+          icon: 'Gauge',
+          rows: [
+            { text: 'Request', value: 'reserved for placement' },
+            { text: 'Limit', value: 'hard cap', tone: 'warn' },
+            { text: 'Memory over limit', value: 'OOM kill', tone: 'bad' },
+            { text: 'CPU over limit', value: 'throttled', tone: 'warn' },
+          ],
+        },
+        caption: 'Three pods, spread across three nodes',
       },
       code: {
         language: 'yaml',
@@ -435,11 +450,11 @@ spec:
           image: registry.internal/shop-api:1.4.2
           resources:
             requests: { cpu: 500m, memory: 512Mi }   # used for placement
-            limits: { memory: 512Mi }
+            limits: { cpu: 500m, memory: 512Mi }
           readinessProbe:              # no traffic until this passes
-            httpGet: { path: /healthz, port: 8080 }
-          livenessProbe:               # restart if this keeps failing
-            httpGet: { path: /healthz, port: 8080 }`,
+            httpGet: { path: /ready, port: 8080 }
+          livenessProbe:               # cheap, never checks the database
+            httpGet: { path: /alive, port: 8080 }`,
         highlight: [6, 15, 17, 19, 21],
       },
     },
@@ -474,21 +489,21 @@ spec:
       heading: 'Health probes decide who gets traffic',
       eli5: 'The head chef asks each cook "are you ready?" before sending diners over. If a cook is stuck and never answers, she sends a fresh one.',
       body: [
-        'The orchestrator calls each container\'s health endpoint. A failing **readiness** probe means no traffic yet, which covers warm-up. A **liveness** probe that keeps failing means restart.',
-        'The code is in the previous YAML.',
+        'The **kubelet** on each node calls each pod\'s health endpoints. A failing **readiness** probe (`/ready`) means no traffic yet, which covers warm-up. A **liveness** probe (`/alive`) that keeps failing means restart.',
+        'Liveness must be cheap and must not check dependencies, or a slow database restarts every pod. The YAML is in the previous step.',
       ],
       keyIdea: 'Readiness gates traffic, liveness triggers restarts, and together they keep broken copies out of rotation.',
       metrics: { start: '~2 s', unit: 'pod', idle: 'cluster nodes', ops: 'cluster' },
       scene: {
         nodes: [
-          { ...sched, status: 'active', badge: 'probing' },
-          { ...node1, status: 'ok', chips: [{ text: 'ready', tone: 'good' }] },
-          { ...node2, status: 'hot', chips: [{ text: 'not ready', tone: 'warn' }] },
+          { id: 'kubelet', kind: 'block', at: at(0, -3.8), label: 'kubelet', sub: 'on each node', icon: 'Activity', tint: 'violet', status: 'active', badge: 'probing' },
+          { id: 'p1', kind: 'container', at: at(-3.8, 3.8), label: 'api #1', status: 'ok', chips: [{ text: 'ready', tone: 'good' }] },
+          { id: 'p2', kind: 'container', at: at(3.8, 3.8), label: 'api #2', status: 'hot', chips: [{ text: 'not ready', tone: 'warn' }] },
         ],
-        links: [link('sched', 'node1', { style: 'dashed' }), link('sched', 'node2', { style: 'dashed' })],
+        links: [link('kubelet', 'p1', { style: 'dashed' }), link('kubelet', 'p2', { style: 'dashed' })],
         flows: [
-          { path: ['sched', 'node1', 'sched'], tone: 'response', label: '200 /healthz', duration: 1.6 },
-          { path: ['sched', 'node2', 'sched'], tone: 'error', label: '503 warming', duration: 1.6, delay: 1.7 },
+          { path: ['kubelet', 'p1', 'kubelet'], tone: 'response', label: '200 /ready', duration: 1.6 },
+          { path: ['kubelet', 'p2', 'kubelet'], tone: 'error', label: '503 warming', duration: 1.6, delay: 1.7 },
         ],
         panel: {
           title: 'Two probes',
@@ -499,7 +514,7 @@ spec:
             { text: 'Both pass', value: 'serving', tone: 'good' },
           ],
         },
-        caption: 'Only ready copies get requests',
+        caption: 'Only ready pods get requests',
       },
     },
     {
@@ -508,25 +523,25 @@ spec:
       heading: 'Case: a node dies during lunch',
       eli5: 'One kitchen loses power. The head chef notices that one soup counter went dark and opens a new one in a kitchen that still works.',
       body: [
-        'At 12:10 node 3 loses power. After a timeout, often under a minute, the orchestrator marks it unhealthy. Desired state says 3 copies, reality says 2, so the scheduler starts a new copy on node 2. The image is cached there, so it serves within seconds.',
-        'Nobody was paged. Run at least 2 copies and leave spare room on each node.',
+        'At 12:10 node 3 loses power. Kubernetes marks it NotReady after about 40 s, then waits about 5 min by default before evicting its pods, unless tuned. For those minutes capacity sits at 2 of 3.',
+        'Then the controller creates the missing pod and the scheduler places it on node 2, where the image is cached. Nobody was paged. This is why you run at least 2 or 3 pods and leave spare room on each node.',
       ],
-      keyIdea: 'Because the orchestrator compares desired and actual state in a loop, a dead node becomes a short dip in capacity, not an outage.',
-      metrics: { start: '~2 s', unit: 'pod', idle: 'cluster nodes', ops: 'cluster' },
-      metricTones: { start: 'good' },
+      keyIdea: 'Because the orchestrator compares desired and actual state in a loop, a dead node becomes a dip in capacity lasting minutes, not an outage, provided you run spare pods.',
+      metrics: { start: '~5 min', unit: 'pod', idle: 'cluster nodes', ops: 'cluster' },
+      metricTones: { start: 'warn' },
       scene: {
         nodes: [
-          { ...sched, status: 'active', badge: '2 of 3 running' },
-          { ...node1, chips: ['api #1'] },
-          { ...node2, status: 'ok', chips: ['api #2', { text: 'new #3', tone: 'good' }] },
+          { ...sched, status: 'active', badge: '2 of 3 pods running' },
+          { ...node1, chips: ['pod api-1'] },
+          { ...node2, status: 'ok', chips: ['pod api-2', { text: 'new pod api-3', tone: 'good' }] },
           { ...node3, status: 'down', badge: 'no heartbeat' },
         ],
         links: clusterLinks,
         flows: [
           { path: ['sched', 'node3'], tone: 'error', label: 'heartbeat?', duration: 1.2 },
-          { path: ['sched', 'node2'], tone: 'event', label: 'start copy #3', duration: 1.2, delay: 1.4 },
+          { path: ['sched', 'node2'], tone: 'event', label: 'controller creates, scheduler places', duration: 1.2, delay: 1.4 },
         ],
-        caption: 'The copy moves, the count stays at three',
+        caption: 'The pod moves after a wait, the count returns to three',
       },
     },
     {
@@ -535,17 +550,18 @@ spec:
       heading: 'Ship a new version without downtime',
       eli5: 'To change the recipe, the head chef opens one counter with the new soup, waits until it is ready, then closes one old counter, one at a time. If the new soup tastes bad, she stops.',
       body: [
-        'To ship `1.4.3`, the orchestrator starts a new copy, waits for readiness, then stops an old one, repeating until all three are new. Users see no downtime.',
-        'If new copies fail their probes, the rollout halts and `1.4.2` keeps serving. Rolling back means redeploying the old tag.',
+        'To ship `1.4.3`, the orchestrator starts a new pod, waits for readiness, then stops an old one, repeating until all three are new. If new pods fail their probes, the rollout halts and `1.4.2` keeps serving.',
+        'Rollback is `kubectl rollout undo`, which redeploys the old tag. Schema changes must stay backward compatible, or `1.4.2` breaks on the migrated database.',
+        'A **canary** sends a small traffic share to the new version first. **Blue/green** runs a full second set and switches all traffic at once.',
       ],
       keyIdea: 'Rolling updates swap copies one at a time behind readiness checks, so a bad release stalls instead of causing an outage.',
       metrics: { start: '~2 s', unit: 'pod', idle: 'cluster nodes', ops: 'cluster' },
       scene: {
         nodes: [
           { ...sched, status: 'active', badge: '1.4.2 to 1.4.3' },
-          { ...node1, status: 'ok', chips: [{ text: 'api 1.4.3', tone: 'good' }] },
-          { ...node2, chips: ['api 1.4.2'] },
-          { ...node3, chips: ['api 1.4.2'] },
+          { ...node1, status: 'ok', chips: [{ text: 'pod 1.4.3', tone: 'good' }] },
+          { ...node2, chips: ['pod 1.4.2'] },
+          { ...node3, chips: ['pod 1.4.2'] },
         ],
         links: clusterLinks,
         flows: [
@@ -556,12 +572,14 @@ spec:
           title: 'Rollout order',
           icon: 'Repeat',
           rows: [
-            { text: 'Start a 1.4.3 copy', value: 'wait ready' },
-            { text: 'Stop a 1.4.2 copy', value: 'one at a time' },
+            { text: 'Rolling', value: 'one pod at a time' },
+            { text: 'Canary', value: 'small traffic share first' },
+            { text: 'Blue/green', value: 'switch all traffic' },
             { text: 'Probe fails', value: 'rollout halts', tone: 'warn' },
+            { text: 'Rollback', value: 'keep schema compatible', tone: 'warn' },
           ],
         },
-        caption: 'One new copy in, one old copy out',
+        caption: 'One new pod in, one old pod out',
       },
       quiz: {
         question: 'During a rolling update, every new copy of 1.4.3 keeps failing its readiness probe. What happens?',
@@ -581,28 +599,26 @@ spec:
       heading: 'Autoscaling: more copies when traffic grows',
       eli5: 'When a big crowd walks in, the head chef opens more soup counters. When it gets quiet, she closes the extra ones. That is **autoscaling**.',
       body: [
-        'Traffic at 8 PM is four times the 4 AM level. A horizontal **autoscaler** watches average CPU or requests per copy and changes the copy count to hold a target. Target 60% CPU, measured 90%, so 3 copies become 5.',
+        'Traffic at 8 PM is four times the 4 AM level. A horizontal **autoscaler** watches average CPU or requests per pod and changes the pod count to hold a target. Target 60% CPU, measured 90%, so 3 pods become 5.',
         'Scale down slowly, so a short dip does not throw away capacity you need again a minute later.',
       ],
-      keyIdea: 'Autoscaling follows a metric toward a target, adding copies when load is high and removing them slowly when it falls.',
+      keyIdea: 'Autoscaling follows a metric toward a target, adding pods when load is high and removing them slowly when it falls.',
       metrics: { start: '~2 s', unit: 'pod', idle: 'min 3 pods', ops: 'cluster' },
       metricTones: { idle: 'good' },
       scene: {
         nodes: [
           { ...users, at: at(-4, -4), badge: '4x traffic' },
           { id: 'lb', kind: 'lb', at: at(0, -4), label: 'load balancer' },
-          { ...node1, at: at(-4, 3.8), status: 'hot', load: 90 },
-          { ...node2, at: at(0, 3.8), status: 'hot', load: 90 },
-          { ...node3, at: at(4, 3.8), status: 'ok', load: 45, badge: '+2 pods' },
+          { id: 'podsA', kind: 'container', at: at(-3.8, 3.8), label: 'pods 1 to 3', status: 'hot', load: 90, chips: [{ text: '90% CPU, target 60%', tone: 'warn' }] },
+          { id: 'podsB', kind: 'container', at: at(3.8, 3.8), label: 'pods 4 and 5', status: 'ok', load: 45, badge: '+2 pods' },
         ],
-        links: [link('users', 'lb'), link('lb', 'node1'), link('lb', 'node2'), link('lb', 'node3')],
+        links: [link('users', 'lb'), link('lb', 'podsA'), link('lb', 'podsB')],
         flows: [
           { path: ['users', 'lb'], tone: 'request', count: 6, duration: 1 },
-          { path: ['lb', 'node1'], tone: 'request', count: 3, duration: 1.2, delay: 1 },
-          { path: ['lb', 'node2'], tone: 'request', count: 3, duration: 1.2, delay: 1 },
-          { path: ['lb', 'node3'], tone: 'request', count: 2, duration: 1.4, delay: 1.6 },
+          { path: ['lb', 'podsA'], tone: 'request', count: 3, duration: 1.2, delay: 1 },
+          { path: ['lb', 'podsB'], tone: 'request', count: 2, duration: 1.4, delay: 1.6 },
         ],
-        caption: 'High CPU adds copies, new copies take load',
+        caption: 'High CPU adds pods, new pods take load',
       },
     },
     {
@@ -690,7 +706,7 @@ def handler(event, context):
       eli5: 'A bell rings when an order arrives, and an on-call cook comes. If the cook trips on the way, the bell rings again, so the same order might reach a cook twice.',
       body: [
         'A function can be triggered by an HTTP request, a file upload, a queue message or a schedule. Delivery is usually **at least once**: after a failure the provider retries, so the same event can arrive twice.',
-        'Write handlers to be **idempotent**, so a second run changes nothing.',
+        'Write handlers to be **idempotent**, so a second run changes nothing. A thumbnail written to a fixed key already is. An order insert needs a dedupe key, as in the code below.',
       ],
       keyIdea: 'Events can be delivered more than once, so a function must give the same result when it runs twice on the same event.',
       metrics: { start: 'ms warm', unit: 'function', idle: '$0', ops: 'your code' },
@@ -715,10 +731,25 @@ def handler(event, context):
             { text: 'File lands in a bucket' },
             { text: 'Queue message' },
             { text: 'Schedule' },
+            { text: 'Thumbnail to a fixed key', value: 'idempotent', tone: 'good' },
+            { text: 'Order insert', value: 'needs dedupe key', tone: 'warn' },
           ],
           footer: { text: 'Delivery: at least once', tone: 'warn' },
         },
         caption: 'The same event may arrive twice',
+      },
+      code: {
+        language: 'python',
+        title: 'An idempotent handler: skip events already done',
+        source: `def handler(event, context):
+    for r in event["records"]:
+        # same bucket + key + etag means the same event
+        done_id = f'{r["bucket"]}/{r["key"]}/{r["etag"]}'
+        if dedupe.seen(done_id):
+            continue          # a retry, already processed
+        create_order(r)
+        dedupe.mark(done_id)`,
+        highlight: [4, 5, 8],
       },
     },
     {
@@ -788,7 +819,8 @@ def handler(event, context):
       heading: 'Cost: per millisecond or per node',
       eli5: 'Hiring a cook per order is cheap on quiet days and costly on busy ones. Keeping your own cooks costs the same every day, busy or not.',
       body: [
-        'At steady high traffic, per-millisecond billing usually costs more than servers that run all day. Containers have a flat cost per node, cheaper per request as you fill the nodes, but someone runs the cluster: upgrades, security patches and capacity.',
+        'At steady high traffic, per-millisecond billing costs more than servers that run all day. Containers have a flat cost per node, but someone runs the cluster.',
+        'Illustrative: 50,000 uploads a day cost about $4 a month on functions against $70 on always-on containers. At 5,000 rps around the clock it flips to about $8,000 versus $700.',
         'Each provider also packages triggers differently, so moving functions away takes work.',
       ],
       keyIdea: 'Functions trade steady-state price and portability for zero idle cost. Containers trade operations work for cheaper steady load.',
@@ -808,10 +840,13 @@ def handler(event, context):
           title: 'Which is cheaper',
           icon: 'Receipt',
           rows: [
-            { text: 'Spiky, mostly idle', value: 'functions', tone: 'good' },
-            { text: 'Steady, high traffic', value: 'containers', tone: 'good' },
+            { text: '50k uploads/day, functions', value: '~$4 / month', tone: 'good' },
+            { text: '50k uploads/day, containers', value: '~$70 / month' },
+            { text: '5,000 rps 24/7, functions', value: '~$8,000 / month', tone: 'bad' },
+            { text: '5,000 rps 24/7, containers', value: '~$700 / month', tone: 'good' },
             { text: 'Who runs the cluster', value: 'you (containers)', tone: 'warn' },
           ],
+          footer: { text: 'Illustrative prices, check your provider', tone: 'muted' },
         },
         caption: 'The cheaper one depends on the traffic shape',
       },

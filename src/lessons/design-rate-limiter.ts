@@ -1,114 +1,276 @@
-import type { Lesson, SceneNode } from '../engine/types';
+import type { Lesson, SceneLink, SceneNode } from '../engine/types';
 
-// Screen layout: u = x - y runs left to right, v = x + y runs top to bottom.
-const clients: SceneNode = { id: 'clients', kind: 'client', at: [-4.5, 4.5], label: 'API clients', sub: '2M API keys' };
-const edge: SceneNode = { id: 'edge', kind: 'cdn', at: [-3.1, 3.1], label: 'edge', sub: 'per-IP flood cap' };
-const gw1: SceneNode = { id: 'gw1', kind: 'gateway', at: [-3.75, 1.75], label: 'gateway 1', sub: 'limiter library' };
-const gw2: SceneNode = { id: 'gw2', kind: 'gateway', at: [-1.65, 1.65], label: 'gateway 2', sub: 'limiter library' };
-const gw3: SceneNode = { id: 'gw3', kind: 'gateway', at: [0.45, 1.55], label: 'gateway 50', sub: 'limiter library' };
-const redis: SceneNode = { id: 'redis', kind: 'cache', at: [-2, -3], label: 'Redis cluster', sub: '16 shards + replicas' };
-const api: SceneNode = { id: 'api', kind: 'server', at: [3, -1], label: 'API services', sub: 'orders, search, login' };
-const rules: SceneNode = { id: 'rules', kind: 'service', at: [-3.75, -2.25], label: 'rules service', sub: 'YAML from git' };
-const monitor: SceneNode = { id: 'monitor', kind: 'monitor', at: [2.5, -4.5], label: 'dashboards', sub: 'per-rule metrics' };
+/** Place by screen column d (right is positive) and depth s (down is positive). */
+const at = (d: number, s: number): [number, number] => [(s + d) / 2, (s - d) / 2];
 
-// Three regions for the multi-region step: regions run along grid x, each pair along grid y.
-const gwUs: SceneNode = { id: 'gwUs', kind: 'gateway', at: [-4.5, 2.5], label: 'US gateways', sub: '250K req/s' };
-const redisUs: SceneNode = { id: 'redisUs', kind: 'cache', at: [-4.5, -1.5], label: 'US Redis', sub: 'local counts' };
-const gwEu: SceneNode = { id: 'gwEu', kind: 'gateway', at: [0, 2.5], label: 'EU gateways', sub: '150K req/s' };
-const redisEu: SceneNode = { id: 'redisEu', kind: 'cache', at: [0, -1.5], label: 'EU Redis', sub: 'local counts' };
-const gwAp: SceneNode = { id: 'gwAp', kind: 'gateway', at: [4.5, 2.5], label: 'AP gateways', sub: '100K req/s' };
-const redisAp: SceneNode = { id: 'redisAp', kind: 'cache', at: [4.5, -1.5], label: 'AP Redis', sub: 'local counts' };
+const client: SceneNode = { id: 'client', kind: 'client', at: at(-6.6, -2), label: 'API client', sub: 'free key' };
+const edge: SceneNode = { id: 'edge', kind: 'block', size: 0.72, at: at(-3.2, -2), label: 'edge', sub: 'per-IP cap', icon: 'Globe', tint: 'teal' };
+const gw: SceneNode = { id: 'gw', kind: 'block', at: at(0, -2), label: 'gateway', sub: 'limiter library', icon: 'Shield', tint: 'blue' };
+const gwB: SceneNode = { id: 'gwB', kind: 'block', at: at(-3.4, -7), label: 'gateway B', sub: '1 of 50', icon: 'Shield', tint: 'blue' };
+const api: SceneNode = { id: 'api', kind: 'block', at: at(5.2, -2), label: 'API services', sub: 'orders, search, login', icon: 'Server', tint: 'green' };
+const store: SceneNode = { id: 'store', kind: 'cache', at: at(0, 3), label: 'Redis cluster', sub: 'shared counters' };
+const rules: SceneNode = { id: 'rules', kind: 'block', size: 0.72, at: at(-5.2, 3), label: 'rules service', sub: 'YAML from git', icon: 'FileCode', tint: 'violet' };
 
-const gwNodes = [gw1, gw2, gw3];
-const coreLinks = [
-  { from: 'clients', to: 'gw1' },
-  { from: 'clients', to: 'gw2' },
-  { from: 'clients', to: 'gw3' },
-  { from: 'gw1', to: 'redis', style: 'dashed' as const },
-  { from: 'gw2', to: 'redis', style: 'dashed' as const },
-  { from: 'gw3', to: 'redis', style: 'dashed' as const },
-  { from: 'gw1', to: 'api' },
-  { from: 'gw2', to: 'api' },
-  { from: 'gw3', to: 'api' },
-];
+const link = (from: string, to: string, extra: Partial<SceneLink> = {}): SceneLink => ({ from, to, ...extra });
 
 export const designRateLimiter: Lesson = {
   id: 'design-rate-limiter',
-  title: 'Design a distributed rate limiter',
-  tagline: 'Enforce one limit per customer across 50 gateways and three regions, in under 2 ms, without becoming the outage.',
-  minutes: 18,
+  title: 'Design a distributed rate limiter (part 1)',
+  tagline: 'Enforce one limit per customer across 50 gateways in under 2 ms. Part 1 covers placement, rules, algorithms and the shared counter.',
+  minutes: 16,
   level: 'Intermediate',
   learn: [
-    'Where the limiter lives, and how rules ship without a deploy',
-    'Which algorithm each kind of rule should use',
-    'Sizing a shared counter store and updating it atomically',
-    'Hot keys, multi-region limits and synchronization lag',
-    'Headers, client behavior, monitoring, and a store that goes down',
+    'Why a per-node limiter fails, and what the requirements are',
+    'Who the caller is, and where the limiter lives',
+    'How rules ship without a deploy, and which algorithm each rule uses',
+    'Sizing a shared counter store and updating it atomically on one clock',
   ],
   metrics: [
-    { key: 'traffic', label: 'Traffic' },
-    { key: 'p99add', label: 'Added p99' },
-    { key: 'storeops', label: 'Store ops' },
-    { key: 'overshoot', label: 'Overshoot' },
-    { key: 'rejected', label: '429s' },
+    { key: 'traffic', label: 'Traffic', icon: 'Activity' },
+    { key: 'p99add', label: 'Added p99', icon: 'Timer' },
+    { key: 'storeops', label: 'Store ops', icon: 'Database' },
+    { key: 'overshoot', label: 'Overshoot', icon: 'Gauge' },
+    { key: 'rejected', label: '429s', icon: 'Shield' },
   ],
   steps: [
     {
-      title: 'Requirements',
+      title: 'Fifty tallies',
       tag: 'problem',
-      heading: 'One limit, enforced by 50 gateways in three regions',
+      heading: 'Fifty gateways, fifty private counts',
       eli5: 'A theme park sells passes good for 100 rides an hour. There are 50 ride gates, and each **gate attendant** keeps a private tally, so a visitor who hops between gates rides 5,000 times.',
       body: [
-        'We run a public API: **2M API keys**, **500K requests/s** at peak across three regions (US 250K, EU 150K, AP 100K), served by 50 gateway nodes. Free keys get 100 requests a minute, paid plans up to 6,000, login gets 5 attempts a minute per account, and every plan has a daily quota that matches the invoice.',
-        'The limiter sits on every request, so it may add at most **2 ms at p99**. It must never become the outage: if it breaks, the API keeps serving. A few percent of overshoot is fine. Rules must change without a deploy.',
-        'The in-memory limiter from the rate limiting lesson counts per node. Behind a load balancer that spreads requests evenly, a free key gets 100 a minute on each of 50 nodes: **5,000 a minute**, 50 times its plan.',
+        'The in-memory limiter from the rate limiting lesson counts per node. We now run **50 gateways** behind a load balancer that spreads requests evenly.',
+        'A free key is allowed 100 requests a minute, and each gateway enforces that alone. The key gets 100 on every node: **5,000 a minute**, 50 times its plan.',
       ],
-      keyIdea: 'A limit is only real if every node enforcing it sees the same count, and checking that count must be nearly free.',
+      keyIdea: 'A limit is only real if every node enforcing it sees the same count.',
       metrics: { traffic: '500K/s', p99add: 'budget 2 ms', storeops: '-', overshoot: '50x', rejected: '-' },
+      metricTones: { overshoot: 'bad' },
       scene: {
         nodes: [
-          { ...clients, status: 'hot', badge: 'free key: 5,000/min' },
-          { ...gw1, badge: '100/100 local' },
-          { ...gw2, badge: '100/100 local' },
-          { ...gw3, badge: '100/100 local' },
-          { ...api, status: 'hot', badge: 'CPU 95%' },
+          { ...client, status: 'hot', badge: '5,000/min' },
+          { ...gwB, chips: [{ text: '100 of 100 allowed', tone: 'good' }] },
+          { ...gw, chips: [{ text: '100 of 100 allowed', tone: 'good' }] },
+          { ...api, status: 'hot', load: 95 },
         ],
-        links: coreLinks.filter((l) => l.to !== 'redis'),
+        links: [link('client', 'gwB'), link('client', 'gw', { route: 'straight' }), link('gwB', 'api'), link('gw', 'api', { route: 'straight' })],
         flows: [
-          { path: ['clients', 'gw1', 'api'], tone: 'request', count: 3, duration: 1.6 },
-          { path: ['clients', 'gw2', 'api'], tone: 'request', count: 3, duration: 1.6, delay: 0.3 },
-          { path: ['clients', 'gw3', 'api'], tone: 'request', count: 3, duration: 1.6, delay: 0.6 },
+          { path: ['client', 'gwB', 'api'], tone: 'request', count: 3, duration: 1.6 },
+          { path: ['client', 'gw', 'api'], tone: 'request', count: 3, duration: 1.6, delay: 0.4 },
         ],
-        caption: 'Each gateway thinks the key is within its limit',
+        panel: {
+          title: 'One free key, one minute',
+          icon: 'Table',
+          rows: [
+            { text: 'Plan limit', value: '100 / min' },
+            { text: 'Allowed per gateway', value: '100 / min', tone: 'good' },
+            { text: 'Gateways', value: '50' },
+            { text: 'Total let through', value: '5,000 / min', tone: 'bad' },
+          ],
+          footer: { text: 'Every gateway thinks the key is within its limit', tone: 'bad' },
+        },
+        caption: 'Each gateway counts alone, so the limit multiplies by 50',
+      },
+    },
+    {
+      title: 'Requirements',
+      tag: 'concept',
+      heading: 'The numbers we design for',
+      eli5: 'The park has to say how many gates it has, how many visitors arrive, and how fast a check must be. A **checkpoint** that makes everyone wait is worse than no checkpoint.',
+      body: [
+        'A public API with **2M API keys** and **500K requests/s** at peak across three regions (US 250K, EU 150K, AP 100K), served by 50 gateways. Free keys get 100 a minute, paid plans up to 6,000, login gets 5 attempts a minute per account, and every plan has a daily quota that matches the invoice.',
+        'The limiter may add at most **2 ms at p99**. It must never become the outage. A few percent of overshoot is fine. Rules must change without a deploy.',
+      ],
+      keyIdea: 'Fix the numbers first: 500K requests/s, 2M keys, a 2 ms budget, and a limiter that fails safe.',
+      metrics: { traffic: '500K/s', p99add: 'budget 2 ms', storeops: '-', overshoot: 'few %', rejected: '-' },
+      scene: {
+        nodes: [
+          { ...client, badge: '2M keys' },
+          { ...gw, chips: ['limiter check'] },
+          api,
+        ],
+        links: [link('client', 'gw', { route: 'straight' }), link('gw', 'api', { route: 'straight' })],
+        flows: [{ path: ['client', 'gw', 'api'], tone: 'request', count: 3, duration: 1.8 }],
+        panel: {
+          title: 'Requirements',
+          icon: 'List',
+          rows: [
+            { text: 'Peak traffic', value: '500K req/s' },
+            { text: 'API keys', value: '2M' },
+            { text: 'Added latency, p99', value: '2 ms', tone: 'warn' },
+            { text: 'If the limiter breaks', value: 'API keeps serving', tone: 'good' },
+            { text: 'Accuracy', value: 'few % overshoot ok' },
+            { text: 'Rule changes', value: 'no deploy' },
+          ],
+        },
+        caption: 'Tight latency, loose accuracy, safe failure',
+      },
+    },
+    {
+      title: 'Why limit',
+      tag: 'concept',
+      heading: 'What the limiter protects',
+      eli5: 'The park limits rides so no one visitor hogs the roller coaster. The limit keeps rides fair, keeps the machines from breaking, and keeps the park from paying for rides nobody paid for.',
+      body: [
+        'Three jobs. **Protect the backend** from a buggy client stuck in a retry loop or a scraper. **Share fairly**, so one noisy customer cannot starve the rest. **Cap cost**, because every request spends compute and sometimes a paid downstream call.',
+        'A limit is also a product: free gets 100 a minute and paid gets 6,000. A login limit of 5 a minute slows brute-force password guessing.',
+      ],
+      keyIdea: 'A limiter protects the backend, shares capacity fairly, and enforces what each plan paid for.',
+      metrics: { traffic: '500K/s', p99add: 'budget 2 ms', storeops: '-', overshoot: '-', rejected: '-' },
+      scene: {
+        nodes: [
+          { ...client, status: 'hot', badge: 'retry loop', chips: [{ text: 'GET /v1/search x 9,000', tone: 'warn' }] },
+          { ...gw, status: 'active' },
+          { ...api, load: 40 },
+        ],
+        links: [link('client', 'gw', { route: 'straight' }), link('gw', 'api', { route: 'straight' })],
+        flows: [
+          { path: ['client', 'gw'], tone: 'request', count: 4, duration: 1.2 },
+          { path: ['gw', 'client'], tone: 'error', label: '429', duration: 1.2, delay: 1.3 },
+          { path: ['gw', 'api'], tone: 'request', duration: 1.2, delay: 1.3 },
+        ],
+        panel: {
+          title: 'What a limit buys',
+          icon: 'Shield',
+          rows: [
+            { text: 'Backend', value: 'stays under load', tone: 'good' },
+            { text: 'Other customers', value: 'still get their share', tone: 'good' },
+            { text: 'Cost', value: 'capped per key', tone: 'good' },
+            { text: 'Login', value: '5 tries / min', tone: 'good' },
+          ],
+        },
+        caption: 'The excess bounces at the gateway',
+      },
+    },
+    {
+      title: 'Who is calling',
+      tag: 'concept',
+      heading: 'Pick what to count by',
+      eli5: 'The gate needs to know whose tally to mark. A **wristband** is a good name. A seat number is a poor one, because a whole school class might share a single bus seat.',
+      body: [
+        'Count by the strongest identity available: the **API key** for API calls, the **account** for login, the **IP address** only for anonymous traffic. One IP can be a whole office behind NAT, so a per-IP limit set too low blocks innocent people.',
+        'Behind proxies the real IP arrives in `X-Forwarded-For`. Clients can forge that header, so trust only the entries your own proxies appended. Rules can also match a route, a plan or a tenant.',
+      ],
+      keyIdea: 'Count by the strongest identity you have, and never trust a client-supplied header for it.',
+      metrics: { traffic: '500K/s', p99add: 'budget 2 ms', storeops: '-', overshoot: '-', rejected: '-' },
+      scene: {
+        nodes: [
+          { ...client, chips: [{ text: 'X-Forwarded-For: 1.2.3.4', tone: 'warn' }] },
+          { ...gw, status: 'active', badge: 'key = api_key' },
+        ],
+        links: [link('client', 'gw', { route: 'straight' })],
+        flows: [{ path: ['client', 'gw'], tone: 'request', count: 2, duration: 1.4 }],
+        panel: {
+          title: 'Count by',
+          icon: 'Key',
+          rows: [
+            { text: 'API key', value: 'best for the API', tone: 'good' },
+            { text: 'Account id', value: 'login, signup', tone: 'good' },
+            { text: 'IP address', value: 'anonymous only', tone: 'warn' },
+            { text: 'X-Forwarded-For', value: 'forgeable', tone: 'bad' },
+          ],
+        },
+        caption: 'Identity comes from auth, not from headers',
       },
     },
     {
       title: 'Where it lives',
       tag: 'tradeoff',
-      heading: 'Put the limiter where it knows the caller and nothing has been spent',
+      heading: 'Put the limiter where it knows the caller',
       eli5: 'The ride check happens at the gate, after the visitor shows a pass and before the ride starts. The **gateway** is the one spot that knows who you are and has not spent anything on you yet.',
       body: [
-        'Client-side limits can be removed by anyone who edits the client, so they are a courtesy at most. Limits inside each service get rebuilt by every team, and a rejected request has already cost a hop. The **API gateway** (the reverse proxies and API gateways lesson) sits after auth, so it knows the API key, and before anything expensive.',
-        'Two shapes fit there: a separate limiter service that each gateway calls, or a **limiter library** inside the gateway that talks straight to a shared counter store. The service adds a network hop and another fleet to keep up. We use the library, one hop to the store, behind a small interface: `check(key, rule, cost)` returns allowed, remaining and reset time.',
-        'Limits stack in layers. A coarse per-IP cap at the edge (the web security lesson) soaks up floods before they cost TLS work. Per-key and per-route rules run at the gateway. Services keep their own leaky buckets for outbound calls to partners.',
+        'Client-side limits vanish when anyone edits the client, so they are a courtesy at most. Limits inside each service get rebuilt by every team, and a rejected request has already cost a hop.',
+        'The **API gateway** sits after auth, so it knows the key, and before anything expensive. Keep the gateway thin: auth, rate limit, route, observe.',
       ],
-      keyIdea: 'Rate limit at the first point that knows the caller, and layer a cheap coarse limit in front of the precise one.',
-      metrics: { traffic: '500K/s', p99add: 'budget 2 ms', storeops: '-', overshoot: '50x', rejected: '-' },
+      keyIdea: 'Rate limit at the first point that knows the caller and has spent nothing on the request.',
+      metrics: { traffic: '500K/s', p99add: 'budget 2 ms', storeops: '-', overshoot: '-', rejected: '-' },
       scene: {
-        nodes: [clients, { ...edge, status: 'active', badge: 'per IP' }, { ...gw2, label: 'gateways', status: 'active', badge: 'per key + route' }, redis, api],
-        links: [
-          { from: 'clients', to: 'edge' },
-          { from: 'edge', to: 'gw2' },
-          { from: 'gw2', to: 'redis', style: 'dashed' },
-          { from: 'gw2', to: 'api' },
+        nodes: [
+          { ...client, chips: [{ text: 'client limit: bypassed', tone: 'bad' }] },
+          { ...gw, status: 'active', badge: 'knows the key' },
+          { ...api, chips: [{ text: 'per-service limits: drift', tone: 'warn' }] },
         ],
+        links: [link('client', 'gw', { route: 'straight' }), link('gw', 'api', { route: 'straight' })],
         flows: [
-          { path: ['clients', 'edge'], tone: 'request', count: 4, duration: 1 },
-          { path: ['edge', 'clients'], tone: 'error', label: 'flood: 429', duration: 1, delay: 1.1 },
-          { path: ['edge', 'gw2'], tone: 'request', count: 2, duration: 1, delay: 1.1 },
-          { path: ['gw2', 'redis', 'gw2'], tone: 'data', label: 'check()', duration: 1.2, delay: 2.2 },
-          { path: ['gw2', 'api'], tone: 'request', label: 'allowed', duration: 1, delay: 3.5 },
+          { path: ['client', 'gw'], tone: 'request', count: 3, duration: 1.2 },
+          { path: ['gw', 'client'], tone: 'error', label: '429', duration: 1.2, delay: 1.3 },
         ],
+        panel: {
+          title: 'Where to enforce',
+          icon: 'Layers',
+          rows: [
+            { text: 'In the client', value: 'forgeable', tone: 'bad' },
+            { text: 'In every service', value: 'rebuilt by each team', tone: 'warn' },
+            { text: 'At the gateway', value: 'after auth, before work', tone: 'good' },
+          ],
+        },
+        caption: 'The gateway is the first trusted checkpoint',
+      },
+    },
+    {
+      title: 'Library or service',
+      tag: 'tradeoff',
+      heading: 'A library in the gateway, not another fleet',
+      eli5: 'The attendant can walk to the scoreboard personally, or phone a clerk who walks there. Walking personally is one trip. The clerk adds a call and one more person who can be away.',
+      body: [
+        'Two shapes fit. A separate **limiter service** each gateway calls adds a network hop and another fleet to keep up. A **limiter library** inside the gateway talks straight to the shared counter store.',
+        'We use the library: one hop to the store, behind a small interface. `check(key, rule, cost)` returns allowed, remaining and reset time.',
+        'Sticky routing (one gateway per key) would skip the store, but loads go uneven, failover moves keys, and hot keys overload one gateway.',
+      ],
+      keyIdea: 'A library keeps the limiter to one network hop and one less fleet to run.',
+      metrics: { traffic: '500K/s', p99add: 'budget 2 ms', storeops: '-', overshoot: '-', rejected: '-' },
+      scene: {
+        nodes: [
+          { ...gw, status: 'active', chips: ['check(key, rule, cost)'] },
+          { ...store, badge: '1 hop' },
+          { id: 'svc', kind: 'block', size: 0.72, at: at(5.2, 3), label: 'limiter service', sub: 'extra hop', icon: 'Server', tint: 'gray', status: 'dim' },
+        ],
+        links: [
+          link('gw', 'store', { style: 'dashed', label: '0.5 ms' }),
+          link('gw', 'svc', { style: 'faint', label: '+1 hop', labelTone: 'warn' }),
+        ],
+        flows: [{ path: ['gw', 'store', 'gw'], tone: 'data', label: 'check()', duration: 1.6 }],
+        panel: {
+          title: 'check() returns',
+          icon: 'Code',
+          code: '{ allowed: true,\n  remaining: 17,\n  resetMs: 41000 }',
+          footer: { text: 'One round trip to the store', tone: 'good' },
+        },
+        caption: 'The gateway asks the store directly',
+      },
+    },
+    {
+      title: 'Layers',
+      tag: 'concept',
+      heading: 'Stack a cheap coarse limit in front of the precise one',
+      eli5: 'A big turnstile at the park entrance turns away crowds in a rush. Only after that do the individual ride gates do their careful counting.',
+      body: [
+        'A coarse per-IP cap at the edge (the web security lesson) soaks up floods before they cost TLS work or a store call. Per-key and per-route rules run at the gateway.',
+        'Services keep their own leaky buckets for outbound calls to partners, which shapes our traffic with hard caps and protects other people\'s systems from us.',
+      ],
+      keyIdea: 'Limits stack in layers. Cheap and coarse first, precise and per-customer behind it.',
+      metrics: { traffic: '500K/s', p99add: 'budget 2 ms', storeops: '-', overshoot: '-', rejected: '-' },
+      scene: {
+        nodes: [
+          { ...client, status: 'hot', badge: 'flood' },
+          { ...edge, status: 'active', badge: 'per IP' },
+          { ...gw, status: 'active', badge: 'per key + route' },
+          api,
+        ],
+        links: [link('client', 'edge', { route: 'straight' }), link('edge', 'gw', { route: 'straight' }), link('gw', 'api', { route: 'straight' })],
+        flows: [
+          { path: ['client', 'edge'], tone: 'request', count: 4, duration: 1 },
+          { path: ['edge', 'client'], tone: 'error', label: 'flood: 429', duration: 1, delay: 1.1 },
+          { path: ['edge', 'gw', 'api'], tone: 'request', count: 2, duration: 1.6, delay: 1.1 },
+        ],
+        panel: {
+          title: 'Three layers',
+          icon: 'Layers',
+          rows: [
+            { text: 'Edge', value: 'per IP, coarse' },
+            { text: 'Gateway', value: 'per key, per route' },
+            { text: 'Service', value: 'outbound partner caps' },
+          ],
+        },
         caption: 'Coarse at the edge, precise at the gateway',
       },
     },
@@ -118,27 +280,31 @@ export const designRateLimiter: Lesson = {
       heading: 'Rules live in config, not in code',
       eli5: 'The park office writes the ride rules in a **rulebook** and sends copies to every gate. To change a rule, the office sends a new page, and no gate has to be rebuilt.',
       body: [
-        'A rule names what it matches (plan, route), what it counts by (API key, account, IP), an algorithm and its numbers. Rules live as YAML in git, reviewed like code. A **rules service** publishes them, and each gateway keeps the whole set in memory and refreshes it every 10 seconds (the feature flags and config lesson). A change reaches all 50 gateways in seconds with no deploy.',
-        'One request can match several rules, a per-key rate and a per-route limit, and all of them must pass. Per-customer deals, such as an enterprise key bought at 3M a minute, are override rows in the rules service, not code.',
-        'The whole rule set is a few kilobytes. If the rules service goes down, gateways keep the last good copy, so it is never on the request path.',
+        'A rule names what it matches (plan, route), what it counts by (API key, account, IP), an algorithm and its numbers. Rules live as YAML in git, reviewed like code.',
+        'Each rule can also say what to do if the counter store is down, and whether it runs in shadow mode. A per-key override entry (for example a partner with a negotiated 2,000 a minute) sits above the plan rule and wins for that key.',
       ],
-      keyIdea: 'Rules are data the gateways cache. Changing a limit is a reviewed config change, not a release.',
-      metrics: { traffic: '500K/s', p99add: 'budget 2 ms', storeops: '-', overshoot: '50x', rejected: '-' },
+      keyIdea: 'A rule is data: match, count by, algorithm, numbers, and its failure behavior.',
+      metrics: { traffic: '500K/s', p99add: 'budget 2 ms', storeops: '-', overshoot: '-', rejected: '-' },
       scene: {
-        nodes: [clients, ...gwNodes.map((g) => ({ ...g, badge: 'rules v42' })), { ...rules, status: 'active', badge: 'v42 published' }, api],
-        links: [
-          ...coreLinks.filter((l) => l.to !== 'redis'),
-          { from: 'rules', to: 'gw1', style: 'dashed' },
-          { from: 'rules', to: 'gw2', style: 'dashed' },
-          { from: 'rules', to: 'gw3', style: 'dashed' },
+        nodes: [
+          { ...rules, status: 'active', badge: 'git, reviewed' },
+          { ...gw, chips: ['rules v42'] },
+          api,
         ],
-        flows: [
-          { path: ['rules', 'gw1'], tone: 'event', label: 'rules v42', duration: 1.2 },
-          { path: ['rules', 'gw2'], tone: 'event', duration: 1.2 },
-          { path: ['rules', 'gw3'], tone: 'event', duration: 1.2 },
-          { path: ['clients', 'gw2', 'api'], tone: 'request', count: 2, duration: 1.6, delay: 1.4 },
-        ],
-        caption: 'Every gateway holds the full rule set in memory',
+        links: [link('rules', 'gw', { style: 'dashed' }), link('gw', 'api', { route: 'straight' })],
+        flows: [{ path: ['rules', 'gw'], tone: 'event', label: 'rules v42', duration: 1.6 }],
+        panel: {
+          title: 'One rule',
+          icon: 'FileCode',
+          rows: [
+            { text: 'match', value: 'plan: free' },
+            { text: 'key', value: 'api_key' },
+            { text: 'algorithm', value: 'token_bucket' },
+            { text: 'rate / burst', value: '100/min, 20' },
+            { text: 'on_store_down', value: 'fail open' },
+          ],
+        },
+        caption: 'A limit change is a reviewed config change',
       },
       code: {
         language: 'yaml',
@@ -151,6 +317,12 @@ rules:
     algorithm: token_bucket
     rate: 100/min
     burst: 20
+  - name: override-acme
+    match: { api_key: "key_acme_01" }   # per-key override, beats the plan rule
+    key: api_key
+    algorithm: token_bucket
+    rate: 2000/min
+    burst: 200
   - name: login
     match: { route: "POST /v1/login" }
     key: account_id
@@ -168,7 +340,41 @@ rules:
     algorithm: concurrency
     max_in_flight: 10
     mode: shadow                # log would-be 429s, do not enforce yet`,
-        highlight: [6, 14, 19, 25],
+        highlight: [6, 21, 26],
+      },
+    },
+    {
+      title: 'Rollout',
+      tag: 'concept',
+      heading: 'Rules reach 50 gateways in seconds',
+      eli5: 'The office mails a new page to every gate, and each gate keeps the whole rulebook in a pocket. If the office closes for lunch, the gates still know the rules.',
+      body: [
+        'A **rules service** publishes the set, and each gateway keeps all of it in memory and refreshes every 10 seconds (the feature flags and config lesson). A change reaches all 50 gateways with no deploy.',
+        'The whole set is a few kilobytes. If the rules service goes down, gateways keep the last good copy, so it is never on the request path.',
+      ],
+      keyIdea: 'Gateways cache the full rule set, so the rules service is never on the request path.',
+      metrics: { traffic: '500K/s', p99add: 'budget 2 ms', storeops: '-', overshoot: '-', rejected: '-' },
+      scene: {
+        nodes: [
+          { ...rules, status: 'active', badge: 'v42 published' },
+          { ...gw, chips: [{ text: 'rules v42 in memory', tone: 'good' }] },
+          { ...gwB, chips: [{ text: 'rules v42 in memory', tone: 'good' }] },
+        ],
+        links: [link('rules', 'gw', { style: 'dashed', label: 'every 10 s' }), link('rules', 'gwB', { style: 'dashed' })],
+        flows: [
+          { path: ['rules', 'gw'], tone: 'event', label: 'v42', duration: 1.4 },
+          { path: ['rules', 'gwB'], tone: 'event', duration: 1.4, delay: 0.2 },
+        ],
+        panel: {
+          title: 'If the rules service dies',
+          icon: 'FileCode',
+          rows: [
+            { text: 'Rule set size', value: 'a few KB' },
+            { text: 'Gateways keep', value: 'last good copy', tone: 'good' },
+            { text: 'Request path', value: 'unaffected', tone: 'good' },
+          ],
+        },
+        caption: 'Every gateway holds the full rule set',
       },
     },
     {
@@ -177,78 +383,209 @@ rules:
       heading: 'Pick the algorithm per rule',
       eli5: 'Different rides need different rules. The roller coaster lets a family ride a few times in a row, the haunted house allows only so many people inside at once, and the **daily pass** resets at midnight.',
       body: [
-        'The rate limiting lesson explains how each algorithm works. The design question is which rule gets which. **Token bucket** for per-key API rates: apps burst when they open, and the two numbers, rate and burst, are what we sell. **Sliding window counter** for login and per-IP rules: no burst allowance, no boundary trick, two integers per key. **Fixed window** for the daily quota: the invoice resets at midnight UTC, so the counter should too, and a boundary burst does not matter at day scale.',
-        'Two rules are not rates at all. A **concurrency limit** caps requests in flight, such as 10 searches at once per key, because one 30-second export costs more than a thousand profile reads. A leaky bucket queue shapes our outbound calls to partners with hard caps.',
-        'Requests can cost more than one. A bulk endpoint that writes 100 records takes 100 tokens, so the limit tracks work done, not calls made.',
+        'The rate limiting lesson explains how each works. The design question is which rule gets which. **Token bucket** for per-key API rates: apps burst when they open, and rate plus burst are what we sell.',
+        '**Sliding window counter** for login, counted per account: no burst allowance, no boundary trick, two integers per key. The per-IP cap lives only at the edge, for anonymous traffic. **Fixed window** for the daily quota: the invoice resets at midnight UTC, so the counter should too.',
       ],
       keyIdea: 'Match the algorithm to what the rule protects: bursts for user traffic, strict windows for abuse, calendar windows for billing.',
-      metrics: { traffic: '500K/s', p99add: 'budget 2 ms', storeops: '-', overshoot: '50x', rejected: '-' },
+      metrics: { traffic: '500K/s', p99add: 'budget 2 ms', storeops: '-', overshoot: '-', rejected: '-' },
       scene: {
         nodes: [
-          clients,
-          { ...gw1, label: 'token bucket', sub: 'per key', status: 'active', badge: 'burst 20' },
-          { ...gw2, label: 'window', sub: 'login, per IP', status: 'active', badge: '5/min' },
-          { ...gw3, label: 'concurrency', sub: 'search', status: 'active', badge: '10 in flight' },
-          api,
+          { ...client, status: 'active' },
+          { ...gwB, label: 'token bucket', sub: 'per key', chips: [{ text: 'burst 20 passes', tone: 'good' }] },
+          { ...gw, label: 'sliding window', sub: 'login, per account', chips: [{ text: '6th try: 429', tone: 'bad' }] },
+          { id: 'quota', kind: 'block', at: at(3.4, 1.5), label: 'fixed window', sub: 'daily quota', icon: 'Clock', tint: 'amber', chips: ['resets 00:00 UTC'] },
         ],
-        links: coreLinks.filter((l) => l.to !== 'redis'),
+        links: [link('client', 'gwB'), link('client', 'gw', { route: 'straight' }), link('client', 'quota')],
         flows: [
-          { path: ['clients', 'gw1', 'api'], tone: 'request', count: 4, duration: 1.6, label: 'burst passes' },
-          { path: ['clients', 'gw2'], tone: 'request', count: 3, duration: 1, delay: 0.4, label: 'POST /login' },
-          { path: ['gw2', 'clients'], tone: 'error', duration: 1, delay: 1.5, label: '429' },
-          { path: ['clients', 'gw3', 'api'], tone: 'request', count: 2, duration: 1.6, delay: 0.8 },
+          { path: ['client', 'gwB'], tone: 'request', count: 4, duration: 1.2 },
+          { path: ['client', 'gw'], tone: 'request', count: 3, duration: 1.2, delay: 0.3 },
+          { path: ['gw', 'client'], tone: 'error', label: '429', duration: 1.2, delay: 1.6 },
         ],
+        panel: {
+          title: 'Rule to algorithm',
+          icon: 'Table',
+          rows: [
+            { text: 'Per-key API rate', value: 'token bucket' },
+            { text: 'Login, per account', value: 'sliding window' },
+            { text: 'Daily quota', value: 'fixed window' },
+          ],
+        },
         caption: 'One limiter, several algorithms, chosen per rule',
+      },
+    },
+    {
+      title: 'Cost, concurrency',
+      tag: 'concept',
+      heading: 'Not every limit is a rate',
+      eli5: 'The haunted house holds 10 people at a time, however fast they walk in. And a family wanting 100 rides in one go pays 100 tickets, not 1.',
+      body: [
+        'A **concurrency limit** caps requests in flight, such as 10 searches at once per key, because one 30-second export costs more than a thousand profile reads. The counter is separate from the token bucket: INCR when a request starts, DECR when it finishes, and a TTL on the counter as a safety net so a gateway that crashes mid-request cannot leave slots stuck.',
+        'Requests can cost more than one. A bulk endpoint that writes 100 records takes 100 tokens, so the limit tracks work done, not calls made.',
+      ],
+      keyIdea: 'Limit what is scarce: requests in flight for slow calls, tokens for heavy ones.',
+      metrics: { traffic: '500K/s', p99add: 'budget 2 ms', storeops: '-', overshoot: '-', rejected: '-' },
+      scene: {
+        nodes: [
+          { ...client, chips: ['POST /bulk x 100'] },
+          { ...gw, status: 'active', chips: [{ text: 'search: 10 in flight', tone: 'warn' }, { text: 'bulk: cost 100', tone: 'default' }] },
+          { ...api, load: 55 },
+        ],
+        links: [link('client', 'gw', { route: 'straight' }), link('gw', 'api', { route: 'straight' })],
+        flows: [
+          { path: ['client', 'gw', 'api'], tone: 'request', count: 3, duration: 1.8 },
+          { path: ['gw', 'client'], tone: 'error', label: '11th search: 429', duration: 1.2, delay: 1.9 },
+        ],
+        panel: {
+          title: 'Costs',
+          icon: 'Scale',
+          rows: [
+            { text: 'GET /profile', value: '1 token' },
+            { text: 'POST /bulk (100 rows)', value: '100 tokens', tone: 'warn' },
+            { text: 'GET /search', value: '10 in flight' },
+          ],
+        },
+        caption: 'Count work done, not calls made',
       },
     },
     {
       title: 'Counter store',
       tag: 'concept',
-      heading: 'A shared counter store, sized for operations',
+      heading: 'A shared counter store',
       eli5: 'All the gates now share one big **scoreboard** in the middle of the park. Every gate marks rides on it, so a visitor who hops gates still uses one tally.',
       body: [
         'All 50 gateways must see the same count, so counters live in a shared in-memory store: **Redis**, in the same zone as the gateways for a round trip of about 0.5 ms.',
-        'Each (key, rule) pair is one small hash, such as `rl:{key_8f3a}:free-tier` holding `tokens` and `ts`, with a TTL so idle keys vanish. 2M keys × 3 rules × about 150 bytes is roughly **1 GB**. Memory is not the problem. Operations are.',
-        'At 500K requests/s with one script call each, a single Redis thread is far too few. We run **16 primaries** at about 31K calls/s each, sharded by key (the consistent hashing lesson), each with a replica. The braces in `{key_8f3a}` are a Redis Cluster hash tag: every rule for one key lands on the same shard, so one script can check them all in one round trip.',
+        'Each (key, rule) pair is one small hash, such as `rl:{key_8f3a}:free-tier` holding `tokens` and `ts`, with a TTL so idle keys vanish.',
       ],
-      keyIdea: 'Size the counter store by operations per second, not bytes. Keep all of one key\'s counters on one shard.',
+      keyIdea: 'One shared in-memory store makes every gateway see the same count, at about 0.5 ms a call.',
       metrics: { traffic: '500K/s', p99add: '0.8 ms', storeops: '500K/s', overshoot: '~0', rejected: '10K/s' },
+      metricTones: { p99add: 'good', overshoot: 'good' },
       scene: {
-        nodes: [clients, ...gwNodes, { ...redis, status: 'active', badge: '31K calls/s per shard' }, api],
-        links: coreLinks,
-        flows: [
-          { path: ['clients', 'gw1'], tone: 'request', duration: 1 },
-          { path: ['clients', 'gw3'], tone: 'request', duration: 1, delay: 0.2 },
-          { path: ['gw1', 'redis', 'gw1'], tone: 'data', label: 'check', duration: 1.4, delay: 1.1 },
-          { path: ['gw3', 'redis', 'gw3'], tone: 'data', duration: 1.4, delay: 1.3 },
-          { path: ['gw1', 'api'], tone: 'request', duration: 1, delay: 2.6 },
-          { path: ['gw3', 'clients'], tone: 'error', label: '429', duration: 1, delay: 2.8 },
+        nodes: [
+          { ...gwB, chips: ['check'] },
+          { ...gw, chips: ['check'] },
+          { ...store, status: 'active', badge: 'rl:{key_8f3a}:free-tier' },
         ],
+        links: [link('gwB', 'store', { style: 'dashed' }), link('gw', 'store', { style: 'dashed', label: '0.5 ms' })],
+        flows: [
+          { path: ['gwB', 'store', 'gwB'], tone: 'data', label: 'one count', duration: 1.6 },
+          { path: ['gw', 'store', 'gw'], tone: 'data', duration: 1.6, delay: 0.3 },
+        ],
+        panel: {
+          title: 'One hash per key and rule',
+          icon: 'Database',
+          rows: [
+            { text: 'tokens (cap 20)', value: '13' },
+            { text: 'ts (last refill)', value: '1700000041000' },
+            { text: 'TTL', value: 'idle keys expire' },
+          ],
+        },
         caption: 'One shared count per key, wherever the request lands',
       },
     },
     {
-      title: 'Atomic check',
+      title: 'Sizing',
       tag: 'concept',
-      heading: 'Read, refill, compare and write in one step',
-      eli5: 'Two gates must never read the scoreboard, think, and then both write over each other. Each gate does its whole **atomic** turn at the board in one go, so no other gate can cut in halfway.',
+      heading: 'Size the store by operations, not bytes',
+      eli5: 'The scoreboard is small, a few pages. The trouble is that 50 gates all shout at it every second, so we use 16 scoreboards and split visitors between them.',
       body: [
-        'The rate limiting lesson fixed a fixed-window race with `INCR`. A token bucket needs more: read tokens and last time, refill by elapsed time, compare, subtract, write back. Run all of it as one **Lua script**. Redis executes a script start to finish with no other command in between, and it costs one round trip.',
-        'Mind the clock. If each gateway passes in its own time, a gateway whose clock runs 300 ms fast refills buckets early. The script reads the time from Redis itself, so every decision for a key uses one clock (the clocks and ordering lesson).',
-        'The script returns the decision and the tokens left. The gateway turns those into response headers without a second call.',
+        '2M keys × 3 rules × about 150 bytes is roughly **1 GB**. Memory is not the problem. Operations are: 500K script calls a second is far too many for one Redis thread.',
+        'We run **16 primaries** at about 31K calls/s each, sharded by key (the consistent hashing lesson), each with a replica. The braces in `{key_8f3a}` are a hash tag, so every rule for one key lands on one shard and one script can check them all in one round trip.',
       ],
-      keyIdea: 'A multi-step check is only safe if it runs as one indivisible operation, on one clock, next to the data.',
-      metrics: { traffic: '500K/s', p99add: '0.8 ms', storeops: '500K/s', overshoot: '~0', rejected: '10K/s' },
+      keyIdea: 'Size the counter store by operations per second. Keep all of one key\'s counters on one shard.',
+      metrics: { traffic: '500K/s', p99add: '0.8 ms', storeops: '31K/s per shard', overshoot: '~0', rejected: '10K/s' },
+      metricTones: { storeops: 'good' },
       scene: {
-        nodes: [clients, { ...gw1, status: 'active' }, gw2, { ...gw3, status: 'active' }, { ...redis, status: 'active', badge: '1 token left' }, api],
-        links: coreLinks,
-        flows: [
-          { path: ['gw1', 'redis'], tone: 'request', label: 'EVAL bucket', duration: 1 },
-          { path: ['gw3', 'redis'], tone: 'request', label: 'EVAL bucket', duration: 1 },
-          { path: ['redis', 'gw1'], tone: 'response', label: 'allowed, 0 left', duration: 1, delay: 1.1 },
-          { path: ['redis', 'gw3'], tone: 'error', label: 'denied', duration: 1, delay: 1.1 },
-          { path: ['gw1', 'api'], tone: 'request', duration: 1, delay: 2.2 },
+        nodes: [
+          { ...gw, chips: ['500K calls/s in total'] },
+          { ...store, status: 'active', badge: '16 shards + replicas' },
+          { id: 'mem', kind: 'block', size: 0.72, at: at(5.2, 3), label: 'memory', sub: '2M x 3 x 150 B', icon: 'HardDrive', tint: 'green', badge: '1 GB' },
         ],
+        links: [link('gw', 'store', { style: 'dashed' }), link('store', 'mem', { style: 'faint', route: 'straight' })],
+        flows: [{ path: ['gw', 'store', 'gw'], tone: 'data', label: 'one script', duration: 1.6 }],
+        panel: {
+          title: 'Capacity sums',
+          icon: 'Table',
+          rows: [
+            { text: 'Memory', value: '1 GB', tone: 'good' },
+            { text: 'Operations', value: '500K / s', tone: 'warn' },
+            { text: 'Primaries', value: '16' },
+            { text: 'Per primary', value: '31K calls / s', tone: 'good' },
+          ],
+          footer: { text: 'Hash tag: one key, one shard', tone: 'muted' },
+        },
+        caption: 'Memory is easy. Operations set the size',
+      },
+    },
+    {
+      title: 'The race',
+      tag: 'problem',
+      heading: 'Read, think, write is a race',
+      eli5: 'Two attendants read the scoreboard at once and both see one ride left. Both say yes, both write it down, and one ride was handed out twice.',
+      body: [
+        'A token bucket check reads tokens and the last time, refills by elapsed time, compares, subtracts and writes back. If two gateways run those steps at once, both read **1 token left** and both allow the request.',
+        'The rate limiting lesson fixed a fixed-window race with `INCR`, one atomic command. A bucket needs several steps, so one command is not enough.',
+      ],
+      keyIdea: 'A check that reads, decides and writes in separate calls lets two requests spend the same token.',
+      metrics: { traffic: '500K/s', p99add: '0.8 ms', storeops: '500K/s', overshoot: '2 for 1 token', rejected: '10K/s' },
+      metricTones: { overshoot: 'bad' },
+      scene: {
+        nodes: [
+          { ...gwB, chips: [{ text: 'read: 1 token', tone: 'warn' }] },
+          { ...gw, chips: [{ text: 'read: 1 token', tone: 'warn' }] },
+          { ...store, status: 'hot', badge: 'tokens: 1' },
+        ],
+        links: [link('gwB', 'store', { style: 'dashed' }), link('gw', 'store', { style: 'dashed' })],
+        flows: [
+          { path: ['store', 'gwB'], tone: 'response', label: 'tokens: 1', duration: 1.2 },
+          { path: ['store', 'gw'], tone: 'response', label: 'tokens: 1', duration: 1.2, delay: 0.1 },
+          { path: ['gwB', 'store'], tone: 'request', label: 'write 0', duration: 1.2, delay: 1.5 },
+          { path: ['gw', 'store'], tone: 'request', label: 'write 0', duration: 1.2, delay: 1.6 },
+        ],
+        panel: {
+          title: 'Two gateways, one token',
+          icon: 'Bug',
+          rows: [
+            { text: 'A reads tokens', value: '1' },
+            { text: 'B reads tokens', value: '1' },
+            { text: 'A allows, writes', value: '0', tone: 'warn' },
+            { text: 'B allows, writes', value: '0', tone: 'bad' },
+          ],
+          footer: { text: 'One token, two requests let through', tone: 'bad' },
+        },
+        caption: 'Both read the same value before either writes',
+      },
+    },
+    {
+      title: 'Atomic script',
+      tag: 'concept',
+      heading: 'Run the whole check as one Lua script',
+      eli5: 'Each attendant does the whole turn at the scoreboard in one go, with the board locked to everyone else until they finish. No one can cut in halfway.',
+      body: [
+        'Run read, refill, compare and write as one **Lua script**. Redis executes a script start to finish with no other command in between, and it costs one round trip.',
+        'The script returns the decision and the tokens left, so the gateway builds response headers without a second call.',
+      ],
+      keyIdea: 'A multi-step check is only safe as one indivisible operation next to the data.',
+      metrics: { traffic: '500K/s', p99add: '0.8 ms', storeops: '500K/s', overshoot: '~0', rejected: '10K/s' },
+      metricTones: { overshoot: 'good' },
+      scene: {
+        nodes: [
+          { ...gwB, chips: [{ text: 'denied', tone: 'bad' }] },
+          { ...gw, chips: [{ text: 'allowed, 0 left', tone: 'good' }] },
+          { ...store, status: 'active', badge: 'EVAL runs alone' },
+        ],
+        links: [link('gwB', 'store', { style: 'dashed' }), link('gw', 'store', { style: 'dashed' })],
+        flows: [
+          { path: ['gw', 'store'], tone: 'request', label: 'EVAL bucket', duration: 1 },
+          { path: ['gwB', 'store'], tone: 'request', label: 'EVAL bucket', duration: 1, delay: 0.1 },
+          { path: ['store', 'gw'], tone: 'response', label: 'allowed, 0 left', duration: 1, delay: 1.2 },
+          { path: ['store', 'gwB'], tone: 'error', label: 'denied', duration: 1, delay: 1.5 },
+        ],
+        panel: {
+          title: 'In one script',
+          icon: 'Code',
+          code: 'read tokens, ts\nrefill by elapsed time\nif tokens >= cost then\n  tokens = tokens - cost\nwrite tokens, ts\nreturn allowed, left',
+          footer: { text: 'Exactly one request gets the last token', tone: 'good' },
+        },
         caption: 'Two racing checks, exactly one gets the last token',
       },
       code: {
@@ -277,224 +614,100 @@ export async function check(apiKey: string, rule: Rule, cost = 1) {
 }`,
         highlight: [4, 9, 12, 18],
       },
-    },
-    {
-      title: 'Hot key',
-      tag: 'case',
-      heading: 'Case: one customer sends 40K requests a second',
-      eli5: 'One school group rides nonstop, and every gate runs to the same corner of the scoreboard. Now each gate grabs a **stack of ride stamps** at once and hands them out itself, walking to the board far less often.',
-      body: [
-        'An enterprise key with a custom plan of 3M requests a minute (50K/s) starts a backfill at **40K/s**. One key lives on one shard, so that shard jumps from 31K to about 70K script calls a second. Its single thread saturates, and every other key on it now waits: the added p99 for those customers climbs to **9 ms**. The limiter meant to protect the API is slowing it down.',
-        'The fix is **local token leases** for hot keys. When a key passes a rate threshold, a gateway takes 200 tokens from the shared bucket in one call and spends them from memory, going back only when they run out. 40K/s over 50 gateways is 800/s each, so each gateway calls Redis 4 times a second for that key: **200 calls/s in total instead of 40,000**.',
-        'The price is accuracy. Up to 50 × 200 = 10,000 tokens can sit unspent across gateways, a fifth of one second\'s budget for this key. Leases expire after a second, and quiet keys keep exact per-request checks.',
-      ],
-      keyIdea: 'A hot key overloads one shard. Batch its checks locally and accept a small, bounded overshoot.',
-      metrics: { traffic: '500K/s', p99add: '9 ms → 0.8 ms', storeops: '460K/s', overshoot: '≤ 10K tokens', rejected: '10K/s' },
-      scene: {
-        nodes: [
-          { ...clients, status: 'hot', badge: 'one key: 40K/s' },
-          ...gwNodes.map((g) => ({ ...g, status: 'active' as const, badge: 'lease: 200 tokens' })),
-          { ...redis, status: 'ok', badge: '4 calls/s per gateway' },
-          api,
-        ],
-        links: coreLinks,
-        flows: [
-          { path: ['clients', 'gw1', 'api'], tone: 'request', count: 4, duration: 1.4 },
-          { path: ['clients', 'gw2', 'api'], tone: 'request', count: 4, duration: 1.4, delay: 0.2 },
-          { path: ['clients', 'gw3', 'api'], tone: 'request', count: 4, duration: 1.4, delay: 0.4 },
-          { path: ['gw2', 'redis', 'gw2'], tone: 'data', label: 'take 200', duration: 1.4, delay: 1.6 },
-        ],
-        caption: 'Leases turn 40,000 store calls a second into 200',
-      },
-    },
-    {
-      title: 'Multi-region',
-      tag: 'tradeoff',
-      heading: 'One limit across three regions, and the lag between them',
-      eli5: 'The park has three sites far apart, and one pass works at all of them. Each site keeps its own **scoreboard** and phones the others every half second, so for a moment each site does not know the latest count.',
-      body: [
-        'A key can send traffic to the US, EU and AP at once. One global store in the US would put an 80 to 150 ms round trip on every EU and AP request, far past the 2 ms budget, and a cross-ocean outage would break limiting everywhere. Out.',
-        '**Split the budget**: each region enforces a fixed share, say 60/25/15%. No cross-region traffic and simple, but wrong when a customer moves. **Count locally, sync asynchronously** (the multi-region lesson): each region decides on its own count plus the last-heard counts from the others, and broadcasts its usage every 500 ms. Decisions stay local and fast.',
-        'The price is **synchronization lag**. For up to 500 ms a region does not know what the others allowed, so a key that bursts in all three regions at once can get up to about 3× its limit for that moment, until the next sync closes the gap. Geo routing sends most keys to one region, so real overshoot is small. Billing quotas get reconciled exactly from usage logs afterwards.',
-      ],
-      keyIdea: 'Across regions, decide locally and share counts in the background. The sync interval sets the size of the overshoot.',
-      metrics: { traffic: '500K/s', p99add: '0.8 ms', storeops: '460K/s', overshoot: '≤ 3x for 500 ms', rejected: '10K/s' },
-      scene: {
-        zones: [
-          { id: 'us', from: [-5.3, -2.3], to: [-3.7, 3.3], label: 'us-east', tone: 'blue' },
-          { id: 'eu', from: [-0.8, -2.3], to: [0.8, 3.3], label: 'eu-west', tone: 'violet' },
-          { id: 'ap', from: [3.7, -2.3], to: [5.3, 3.3], label: 'ap-south', tone: 'green' },
-        ],
-        nodes: [
-          { ...gwUs, status: 'active' },
-          { ...redisUs, badge: 'key: 40 local' },
-          { ...gwEu, status: 'active' },
-          { ...redisEu, badge: 'key: 35 local' },
-          gwAp,
-          { ...redisAp, badge: 'key: 25 local' },
-        ],
-        links: [
-          { from: 'gwUs', to: 'redisUs' },
-          { from: 'gwEu', to: 'redisEu' },
-          { from: 'gwAp', to: 'redisAp' },
-          { from: 'redisUs', to: 'redisEu', style: 'dashed', label: 'every 500 ms' },
-          { from: 'redisEu', to: 'redisAp', style: 'dashed' },
-        ],
-        flows: [
-          { path: ['gwUs', 'redisUs', 'gwUs'], tone: 'request', duration: 1.2 },
-          { path: ['gwEu', 'redisEu', 'gwEu'], tone: 'request', duration: 1.2, delay: 0.2 },
-          { path: ['gwAp', 'redisAp', 'gwAp'], tone: 'request', duration: 1.2, delay: 0.4 },
-          { path: ['redisUs', 'redisEu'], tone: 'data', label: 'US used 40', duration: 1.4, delay: 1.6 },
-          { path: ['redisEu', 'redisAp'], tone: 'data', label: 'US+EU used 75', duration: 1.4, delay: 3.1 },
-        ],
-        caption: 'Local decisions, counts shared in the background',
-      },
       quiz: {
-        question: 'A customer\'s limit is 1,000 requests a minute, split statically by region: US 60%, EU 25%, AP 15%. They move all their traffic to EU servers. What happens?',
+        question: 'Two gateways check the same key at the same instant. The bucket holds exactly 1 token. The checks are separate GET and SET calls. What can happen?',
         options: [
-          'Nothing changes: they still get 1,000 a minute',
-          'They get 429s above about 250 a minute',
-          'They get 429s above about 600 a minute',
-          'The EU region borrows the unused US share automatically',
+          'Redis queues the two checks, so exactly one passes',
+          'Both read 1 token and both pass, so one token is spent twice',
+          'Both are rejected to be safe',
+          'The second gateway waits for a distributed lock automatically',
         ],
         answer: 1,
-        explain: 'A static split only knows the EU share, 25% of 1,000. The customer pays for 1,000 and gets 250. Local counting with background sync follows the traffic instead.',
+        explain: 'Separate read and write calls interleave. Both reads see 1 token before either write lands. A single Lua script runs with no commands in between, so exactly one check wins.',
       },
     },
     {
-      title: 'Headers, clients',
+      title: 'One clock',
       tag: 'concept',
-      heading: 'Tell clients the budget, and give them a good default',
-      eli5: 'Every gate shows a little sign with how many rides you have left and when the count resets. Polite visitors read the **sign** and wait their turn instead of pushing at the gate.',
+      heading: 'Let Redis tell the time',
+      eli5: 'If every attendant wears their own watch, a fast watch hands out new ride stamps too early. So everyone reads the same clock on the scoreboard wall.',
       body: [
-        'Every response carries the budget, not only rejections: `X-RateLimit-Limit`, `X-RateLimit-Remaining` and `X-RateLimit-Reset`, and a `429` adds `Retry-After`. An IETF draft defines standard `RateLimit` headers, and many APIs still send the `X-` names.',
-        '**Hard or soft.** A hard limit rejects at the line. A soft limit lets paid plans run 10% over for a few minutes with a warning header and an email, because cutting off a paying customer in the middle of a launch costs more than the extra load. Free plans stay hard.',
-        'Good clients slow down when `Remaining` gets low, wait `Retry-After` plus random jitter on a 429 (the timeouts and retries lesson), and never retry in a tight loop. Shipping that behavior in the official SDKs removes most retry storms before they start.',
+        'If each gateway passes in its own time, a gateway whose clock runs 300 ms fast refills buckets early, and a slow one refills late.',
+        'The script reads the time from Redis with `TIME`, so every decision for a key uses one clock (the clocks and ordering lesson). The cost is one extra call inside a script that already runs.',
       ],
-      keyIdea: 'Publish the budget on every response, and make the polite retry the default in the code clients actually run.',
-      metrics: { traffic: '500K/s', p99add: '0.8 ms', storeops: '460K/s', overshoot: '≤ 3x for 500 ms', rejected: '10K/s' },
-      scene: {
-        nodes: [{ ...clients, status: 'active', badge: 'SDK backs off' }, gw1, { ...gw2, status: 'active', badge: 'Remaining: 0' }, gw3, redis, api],
-        links: coreLinks,
-        flows: [
-          { path: ['clients', 'gw2'], tone: 'request', duration: 1 },
-          { path: ['gw2', 'redis', 'gw2'], tone: 'data', duration: 1.2, delay: 1.1 },
-          { path: ['gw2', 'clients'], tone: 'error', label: '429 Retry-After: 3', duration: 1, delay: 2.4 },
-          { path: ['clients', 'gw2', 'api'], tone: 'request', label: 'after 3 s + jitter', duration: 1.6, delay: 4 },
-        ],
-        caption: 'The client waits as told, then succeeds',
-      },
-      code: {
-        language: 'typescript',
-        title: 'What the official SDK does on every call',
-        source: `async function call(req: Request, attempt = 0): Promise<Response> {
-  const res = await fetch(req.clone());
-  const left = Number(res.headers.get('X-RateLimit-Remaining') ?? 'Infinity');
-  if (left < 5) await sleep(500);                  // ease off before the wall
-  if (res.status !== 429 || attempt >= 4) return res;
-  const waitMs = Number(res.headers.get('Retry-After') ?? '1') * 1000;
-  await sleep(waitMs + Math.random() * 1000);       // jitter: no lockstep retries
-  return call(req, attempt + 1);
-}`,
-        highlight: [4, 6, 7],
-      },
-    },
-    {
-      title: 'Monitoring',
-      tag: 'concept',
-      heading: 'Watch the limiter, and try rules in shadow first',
-      eli5: 'The park control room watches how many riders each gate turns away. A new rule first runs in **shadow mode**: gates write down who they would have stopped, and stop nobody yet.',
-      body: [
-        'Each gateway emits per-rule counters: allowed, rejected, and would-reject for rules in shadow mode, plus store latency and errors (the observability lesson). The dashboards answer three questions: which rules reject paying customers at normal traffic, which rules let the API overload anyway, and which keys are rejected most.',
-        '**Shadow mode** comes before every new or tighter rule. The `search-cost` rule ran in shadow for a week and showed 40 keys it would have cut off, 3 of them paying customers with a legitimate nightly job. They got overrides before the rule was enforced.',
-        'Alert on a jump in the 429 rate for a plan (a bad rule change), on store p99 above 2 ms, and on rejections falling to zero, which often means the limiter is failing open without anyone noticing.',
-      ],
-      keyIdea: 'A limiter you cannot see is a limiter you cannot tune. Measure every rule, and dry-run new ones before they bite.',
-      metrics: { traffic: '500K/s', p99add: '0.8 ms', storeops: '460K/s', overshoot: '≤ 3x for 500 ms', rejected: '10K/s' },
-      scene: {
-        nodes: [clients, ...gwNodes, redis, api, rules, { ...monitor, status: 'active', badge: 'search-cost: 40 would-reject' }],
-        links: [
-          ...coreLinks,
-          { from: 'gw3', to: 'monitor', style: 'faint' },
-          { from: 'rules', to: 'gw1', style: 'faint' },
-        ],
-        flows: [
-          { path: ['clients', 'gw3', 'api'], tone: 'request', count: 2, duration: 1.6 },
-          { path: ['gw3', 'monitor'], tone: 'event', label: 'would reject', duration: 1.2, delay: 1 },
-          { path: ['rules', 'gw1'], tone: 'event', label: 'override for 3 keys', duration: 1.2, delay: 2.4 },
-        ],
-        caption: 'Shadow mode: log the 429, still serve the request',
-      },
-    },
-    {
-      title: 'Store down',
-      tag: 'case',
-      heading: 'Case: a Redis shard dies at peak',
-      eli5: 'One corner of the scoreboard breaks. Gates for most rides keep a rough tally on paper, a **local fallback**, while the gate to the treasure room stays shut until the board is fixed.',
-      body: [
-        'One of the 16 primaries dies. Its replica is promoted in about 15 seconds (the failover lesson), and for that window one sixteenth of keys, about 31K requests/s, have no shared counter. Calls to that shard hit their **5 ms timeout**, and after a few failures a circuit breaker (the circuit breakers lesson) stops calling it, so latency comes back down.',
-        'What each rule does next comes from its config. Most rules **fail open to a local fallback**: each gateway enforces the limit divided by 50 in memory, which is about right because the load balancer spreads requests evenly. Login and one-time-code rules **fail closed**, since unlimited password guesses are worse than a minute of errors.',
-        'The promoted replica was a fraction of a second behind (async replication), so some keys get a small free burst. The API stayed up, added latency spiked for seconds, and a dashboard showed every step.',
-      ],
-      keyIdea: 'Design the failure path before you need it: short timeouts, a breaker, a local fallback per rule, and fail closed only where an unlimited caller is worse than an error.',
-      metrics: { traffic: '500K/s', p99add: '5 ms, then 0.8 ms', storeops: '430K/s', overshoot: 'local ÷ 50 for 15 s', rejected: '9K/s' },
+      keyIdea: 'Decide with one clock per key. The store\'s clock is the natural choice.',
+      metrics: { traffic: '500K/s', p99add: '0.8 ms', storeops: '500K/s', overshoot: '~0', rejected: '10K/s' },
       scene: {
         nodes: [
-          clients,
-          { ...gw1, status: 'active', badge: 'fail open: 100 ÷ 50' },
-          { ...gw2, status: 'active', badge: '/login: fail closed' },
-          { ...gw3, status: 'active', badge: 'breaker open' },
-          { ...redis, status: 'down', badge: 'shard 7 down' },
-          { ...api, status: 'ok' },
-          { ...monitor, status: 'hot', badge: 'store errors' },
+          { ...gwB, chips: [{ text: 'clock +300 ms', tone: 'warn' }] },
+          { ...gw, chips: ['clock exact'] },
+          { ...store, status: 'active', badge: 'TIME: one clock' },
         ],
-        links: [...coreLinks, { from: 'redis', to: 'monitor', style: 'faint' }],
+        links: [link('gwB', 'store', { style: 'dashed' }), link('gw', 'store', { style: 'dashed' })],
         flows: [
-          { path: ['gw3', 'redis'], tone: 'error', label: '5 ms timeout', duration: 0.8 },
-          { path: ['clients', 'gw1', 'api'], tone: 'request', count: 3, duration: 1.6, delay: 0.4, label: 'local count' },
-          { path: ['clients', 'gw2'], tone: 'request', duration: 1, delay: 0.8, label: 'POST /login' },
-          { path: ['gw2', 'clients'], tone: 'error', duration: 1, delay: 1.9, label: '503' },
-          { path: ['redis', 'monitor'], tone: 'event', duration: 1, delay: 1 },
+          { path: ['gwB', 'store'], tone: 'request', label: 'ignore my time', duration: 1.2 },
+          { path: ['gw', 'store'], tone: 'request', duration: 1.2, delay: 0.3 },
         ],
-        caption: 'Normal routes stay up on local counts, login stays locked',
+        panel: {
+          title: 'Whose clock',
+          icon: 'Clock',
+          rows: [
+            { text: 'Gateway clock', value: 'can drift 300 ms', tone: 'bad' },
+            { text: 'Refill math', value: 'uses elapsed time' },
+            { text: 'Redis TIME', value: 'one clock per key', tone: 'good' },
+          ],
+        },
+        caption: 'Every decision for a key uses the same clock',
       },
     },
     {
-      title: 'Recap',
+      title: 'Recap, part 1',
       tag: 'recap',
-      heading: 'A limiter that is shared, fast, and safe to lose',
-      eli5: 'A **distributed rate limiter** is one rulebook, one shared scoreboard, gates that grab stamps in bulk for busy groups, parks that phone each other, and a paper backup for when the board breaks.',
+      heading: 'A shared, atomic count, close by',
+      eli5: 'The park now has one rulebook, one shared scoreboard split into 16 boards, and attendants who finish a whole check before the next one starts. Part 2 covers rushes, far-apart parks and broken boards.',
       body: [
-        'The limiter is a library in 50 gateways, behind a coarse per-IP cap at the edge. Rules are YAML from a rules service, cached in memory, with the algorithm picked per rule. Counters live in 16 Redis shards, keyed with a hash tag and updated by one atomic script that reads Redis time.',
-        'Hot keys lease tokens in batches. Regions decide locally and sync every 500 ms, accepting brief overshoot. Clients get budget headers and an SDK that backs off. New rules run in shadow, and a dead shard means a local fallback, with login failing closed.',
+        'The limiter is a library in 50 gateways behind a coarse edge cap, counting by API key. Rules are YAML cached in memory, with the algorithm picked per rule, plus concurrency and cost limits.',
+        'Counters live in 16 Redis shards, keyed with a hash tag and updated by one atomic script that reads Redis time. Part 2 takes on hot keys, regions, clients, monitoring and failure.',
       ],
-      keyIdea: 'Count in one shared place, atomically and close by. Batch or sync where one place is too slow, and decide in advance what happens when that place is gone.',
-      metrics: { traffic: '500K/s', p99add: '0.8 ms', storeops: '460K/s', overshoot: '≤ 3x for 500 ms', rejected: '10K/s' },
+      keyIdea: 'Count in one shared place, atomically, on one clock, and close to the gateways.',
+      metrics: { traffic: '500K/s', p99add: '0.8 ms', storeops: '500K/s', overshoot: '~0', rejected: '10K/s' },
+      metricTones: { p99add: 'good', overshoot: 'good' },
       scene: {
-        nodes: [clients, ...gwNodes.map((g) => ({ ...g, status: 'ok' as const })), { ...redis, status: 'ok' }, api, rules, monitor],
+        nodes: [{ ...client, status: 'ok' }, { ...gw, status: 'ok' }, { ...store, status: 'ok' }, { ...api, status: 'ok' }, { ...rules, at: at(-3.4, 3.5), status: 'ok' }],
         links: [
-          ...coreLinks,
-          { from: 'rules', to: 'gw1', style: 'faint' },
-          { from: 'gw3', to: 'monitor', style: 'faint' },
+          link('client', 'gw', { route: 'straight' }),
+          link('gw', 'store', { style: 'dashed' }),
+          link('gw', 'api', { route: 'straight' }),
+          link('rules', 'gw', { style: 'faint' }),
         ],
         flows: [
-          { path: ['clients', 'gw1', 'api'], tone: 'request', count: 2, duration: 1.6 },
-          { path: ['gw1', 'redis', 'gw1'], tone: 'data', duration: 1.2, delay: 0.5 },
-          { path: ['clients', 'gw3'], tone: 'request', count: 3, duration: 1, delay: 0.3 },
-          { path: ['gw3', 'clients'], tone: 'error', label: '429', duration: 1, delay: 1.4 },
+          { path: ['client', 'gw'], tone: 'request', count: 3, duration: 1 },
+          { path: ['gw', 'store', 'gw'], tone: 'data', duration: 1.4, delay: 1 },
+          { path: ['gw', 'api'], tone: 'request', count: 2, duration: 1.2, delay: 2.5 },
+          { path: ['gw', 'client'], tone: 'error', label: '429', duration: 1.2, delay: 2.5 },
         ],
+        panel: {
+          title: 'Part 1 in one table',
+          icon: 'List',
+          rows: [
+            { text: 'Placement', value: 'library in gateway' },
+            { text: 'Rules', value: 'YAML, cached' },
+            { text: 'Store', value: '16 Redis shards' },
+            { text: 'Check', value: 'one Lua script' },
+          ],
+        },
         caption: 'Real users flow through, the excess bounces off',
       },
       quiz: {
-        question: 'One enterprise key sends 40K requests a second, and the Redis shard holding it hits its limit, slowing every other key on that shard. What is the best fix?',
+        question: 'Why does the counter script read the time from Redis instead of using the gateway\'s clock?',
         options: [
-          'Give every gateway its own in-memory counters for all keys',
-          'Let gateways lease batches of tokens for hot keys and spend them locally',
-          'Move all counters into the main SQL database',
-          'Fail closed for that key until traffic drops',
+          'Redis time is always faster',
+          'A gateway with a fast or slow clock would refill buckets at the wrong moment, so every decision for a key should use one clock',
+          'Gateways cannot read the time',
+          'It avoids needing a hash tag',
         ],
         answer: 1,
-        explain: 'Leasing 200 tokens at a time cuts that key\'s store calls from 40,000 to about 200 a second, with a small bounded overshoot. Per-gateway counters bring back the 50x problem, SQL is slower than Redis, and failing closed punishes a paying customer for our bottleneck.',
+        explain: 'With 50 gateways, clocks differ by some hundreds of milliseconds. One clock per key keeps refills consistent. Speed and hash tags are unrelated.',
       },
     },
   ],

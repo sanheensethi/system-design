@@ -26,6 +26,7 @@ export const migrationPatterns: Lesson = {
     'How to pick a slice, route by rule, and cut inside the monolith when no network seam exists',
     'An anti-corruption layer that keeps the old model out of the new code',
     'Why each slice should own its own database',
+    'What the facade costs, how sessions carry over, and what breaks when tables are split',
   ],
   metrics: [
     { key: 'share', label: 'Traffic on new', icon: 'Split' },
@@ -171,6 +172,35 @@ export const migrationPatterns: Lesson = {
       },
     },
     {
+      title: 'Facade risks',
+      tag: 'tradeoff',
+      heading: 'The facade is a hop and a single point of failure',
+      eli5: 'The greeter at the door is one more stop for every customer. If the greeter faints, nobody gets in, so the bakery needs two greeters who only point and never bake.',
+      body: [
+        'The **facade** adds a network hop to every request, often a millisecond or two. It is also a single point of failure: run at least two copies behind a load balancer, and give it its own dashboard for errors and latency.',
+        'Keep it dumb. Routing and little else. Business logic in the facade becomes a second monolith that nobody owns.',
+      ],
+      keyIdea: 'The facade costs latency and is a single point of failure, so run it redundant, monitor it and keep logic out of it.',
+      metrics: { share: '0%', blast: 'every request', systems: '1 + facade', diff: '-' },
+      metricTones: { blast: 'warn' },
+      scene: {
+        nodes: [users, { ...facade, status: 'active', badge: '2 copies', chips: [{ text: '+2 ms', tone: 'warn' }] }, legacy],
+        links: [link('users', 'facade'), link('facade', 'legacy')],
+        flows: [{ path: ['users', 'facade', 'legacy'], tone: 'request', count: 3, duration: 1.8 }],
+        panel: {
+          title: 'Facade checklist',
+          icon: 'Shield',
+          rows: [
+            { text: 'Added latency', value: '1 to 2 ms', tone: 'warn' },
+            { text: 'Single point of failure', value: 'run 2+ copies', tone: 'warn' },
+            { text: 'Own monitoring', value: 'errors, p99', tone: 'good' },
+            { text: 'Business logic inside', value: 'none', tone: 'good' },
+          ],
+        },
+        caption: 'One switchboard that must never be the outage',
+      },
+    },
+    {
       title: 'Pick a slice',
       tag: 'concept',
       heading: 'Pick the first slice by its seams',
@@ -204,14 +234,14 @@ export const migrationPatterns: Lesson = {
       heading: 'Route one slice to the new service',
       eli5: 'The bakery opens a shiny new cake counter. The greeter sends cake buyers there and everyone else to the old counters, which keep working as before.',
       body: [
-        'The team builds the new **orders service** for one job: showing order history. The facade sends `GET /orders` to it and everything else to the monolith. Customers cannot tell which system answered.',
-        'Start smaller than the whole slice: 1% of order-history requests, or only staff accounts. Raise the share only when errors and latency match the old path.',
+        'The team builds the new **orders service** for one job: showing order history. The facade sends `GET /orders` to it, and every other method and path, such as `POST /orders`, to the monolith.',
+        'Start with staff accounts only, picked by a header. Customers stay at 0% until the new database is filled and checked (part 2). Then 1%, raised only when errors and latency match the old path.',
       ],
       keyIdea: 'Each slice is small enough to ship in weeks and to start with a tiny share of traffic.',
-      metrics: { share: '1% of /orders', blast: 'order history', systems: '2 + facade', diff: '-' },
+      metrics: { share: '0% (staff only)', blast: 'order history', systems: '2 + facade', diff: '-' },
       metricTones: { share: 'good' },
       scene: {
-        nodes: [{ ...facade, status: 'active', badge: '/orders: 1% new' }, legacy, { ...orders, status: 'ok', chips: ['GET /orders'] }, newDb],
+        nodes: [{ ...facade, status: 'active', badge: '/orders: staff only' }, legacy, { ...orders, status: 'ok', chips: ['GET /orders'] }, newDb],
         links: [link('facade', 'legacy'), link('facade', 'orders'), link('orders', 'newDb')],
         flows: [
           { path: ['facade', 'legacy'], tone: 'request', count: 4, duration: 1.2 },
@@ -221,25 +251,60 @@ export const migrationPatterns: Lesson = {
       },
       code: {
         language: 'bash',
-        title: 'nginx facade: 1% of order history goes to the new service',
-        source: `# hash each user into a bucket so a user stays on one side
-split_clients "\${cookie_uid}" $orders_backend {
-    1%      orders_new;
-    *       monolith;
+        title: 'nginx facade: staff first, customers after the data is ready',
+        source: `upstream orders_new { server orders.internal:8080; }
+upstream monolith   { server monolith.internal:8080; }
+
+# staff header only for now. Later: split_clients on the uid cookie,
+# falling back to $remote_addr when the cookie is missing
+map $http_x_staff $orders_backend {
+    1        orders_new;
+    default  monolith;
 }
 
 server {
     listen 443 ssl;
 
-    location /orders {
-        proxy_pass http://$orders_backend;   # the slice being moved
+    location = /orders {                      # exact path, not /orders-admin
+        limit_except GET { proxy_pass http://monolith; }
+        proxy_pass http://$orders_backend;    # the slice being moved
     }
 
     location / {
-        proxy_pass http://monolith;          # everything else, unchanged
+        proxy_pass http://monolith;           # everything else, unchanged
     }
 }`,
-        highlight: [2, 3, 11, 15],
+        highlight: [6, 14, 15, 16],
+      },
+    },
+    {
+      title: 'Auth and sessions',
+      tag: 'concept',
+      heading: 'Shoppers must stay logged in on both sides',
+      eli5: 'A customer shows a stamp on their hand at the front door. Both counters must recognize the same stamp, or the customer is asked to sign in again.',
+      body: [
+        'The facade sends one shopper to either backend, so login has to work on both. Use one session store, or a signed token such as a JWT that both systems can verify with the same key.',
+        'Keep the cookie name, domain and expiry unchanged. Otherwise staff, and later the first customers, look logged out on the new service. Logout must end the session on both.',
+      ],
+      keyIdea: 'Share one session or token across old and new backends, or the split shows up as surprise logouts.',
+      metrics: { share: '0% (staff only)', blast: 'order history', systems: '2 + facade', diff: '-' },
+      scene: {
+        nodes: [users, { ...facade, status: 'active', chips: ['cookie: sid'] }, legacy, { ...orders, status: 'ok' }],
+        links: [link('users', 'facade'), link('facade', 'legacy'), link('facade', 'orders')],
+        flows: [
+          { path: ['users', 'facade', 'legacy'], tone: 'request', label: 'sid', duration: 1.4 },
+          { path: ['users', 'facade', 'orders'], tone: 'request', label: 'same sid', duration: 1.4, delay: 0.5 },
+        ],
+        panel: {
+          title: 'Session continuity',
+          icon: 'Shield',
+          rows: [
+            { text: 'Cookie name, domain', value: 'unchanged', tone: 'good' },
+            { text: 'Token verification', value: 'same key on both', tone: 'good' },
+            { text: 'Logout', value: 'ends both', tone: 'warn' },
+          ],
+        },
+        caption: 'One login, two backends',
       },
     },
     {
@@ -248,21 +313,21 @@ server {
       heading: 'Rollback is one config line',
       eli5: 'If the new cake counter burns the cakes, the greeter just stops sending people there. The old counters never closed.',
       body: [
-        'If the new service misbehaves, the fix is one config line that sends the slice back. That rollback takes seconds.',
-        'It only affects order history. Every other page never noticed. This is the safety that a big-bang switch cannot offer.',
+        'If the new service misbehaves, the fix is one config line that sends the slice back. That rollback takes seconds, and every other page never noticed.',
+        'That is trivial while the slice only reads. Once a service owns writes, rolling back needs the reverse sync from Flip the sync (part 2), or the new rows are lost.',
       ],
-      keyIdea: 'A slice-level switch makes rollback a seconds-long config change with a small blast radius.',
-      metrics: { share: '1% then 0%', blast: 'order history', systems: '2 + facade', diff: '-' },
+      keyIdea: 'A slice-level switch makes rollback a seconds-long config change for reads. After writes move, it also needs the reverse sync.',
+      metrics: { share: '0% (staff only)', blast: 'order history', systems: '2 + facade', diff: '-' },
       metricTones: { blast: 'good' },
       scene: {
-        nodes: [{ ...facade, status: 'active', badge: '/orders: 0% new' }, legacy, { ...orders, status: 'down', badge: 'errors up' }],
+        nodes: [{ ...facade, status: 'active', badge: '/orders: all old' }, legacy, { ...orders, status: 'down', badge: 'errors up' }],
         links: [link('facade', 'legacy', { label: 'all traffic back' }), link('facade', 'orders', { style: 'faint' })],
         flows: [{ path: ['facade', 'legacy'], tone: 'request', count: 4, duration: 1.4 }],
         panel: {
           title: 'The rollback',
           icon: 'Repeat',
-          code: 'split_clients "${cookie_uid}" $orders_backend {\n    0%      orders_new;   # was 1%\n    *       monolith;\n}',
-          footer: { text: 'Reload takes seconds', tone: 'good' },
+          code: 'map $http_x_staff $orders_backend {\n    1        monolith;   # was orders_new\n    default  monolith;\n}',
+          footer: { text: 'Seconds for reads. After writes move, reverse the sync', tone: 'good' },
         },
         caption: 'The slice goes home, nothing else notices',
       },
@@ -304,7 +369,7 @@ server {
         'An **anti-corruption layer** (ACL) is a thin translator between the two. All knowledge of the old model lives in one place.',
       ],
       keyIdea: 'Translate at the border so the old system\'s model never spreads into the new code.',
-      metrics: { share: '10% of /orders', blast: 'order history', systems: '2 + facade', diff: '-' },
+      metrics: { share: '0% (staff only)', blast: 'order history', systems: '2 + facade', diff: '-' },
       scene: {
         nodes: [{ ...legacy, status: 'active' }, { ...acl, status: 'ok', chips: [{ text: 'CST_STAT_CD A', tone: 'warn' }, { text: 'active', tone: 'good' }] }, { ...orders, status: 'active' }],
         links: [link('orders', 'acl'), link('acl', 'legacy')],
@@ -327,7 +392,7 @@ server {
         'When the customer slice later moves to its own new service, you change the ACL and nothing else. Once the old system is gone, the ACL is deleted too.',
       ],
       keyIdea: 'The ACL is small, lives at one border, and is deleted with the old system.',
-      metrics: { share: '10% of /orders', blast: 'order history', systems: '2 + facade', diff: '-' },
+      metrics: { share: '0% (staff only)', blast: 'order history', systems: '2 + facade', diff: '-' },
       scene: {
         nodes: [{ ...acl, status: 'active' }, orders, legacy],
         links: [link('orders', 'acl'), link('acl', 'legacy')],
@@ -390,7 +455,7 @@ def get_customer(customer_id: int) -> Customer:
         'Give the slice its own database with its own schema, and fill it from the old one with the data pipeline described next.',
       ],
       keyIdea: 'A shared database is the tightest coupling there is. Each slice owns its data.',
-      metrics: { share: '10% of /orders', blast: 'order history', systems: '2 + facade', diff: '-' },
+      metrics: { share: '0% (staff only)', blast: 'order history', systems: '2 + facade', diff: '-' },
       metricTones: { blast: 'good' },
       scene: {
         nodes: [{ ...legacy, status: 'dim' }, { ...legacyDb, status: 'dim' }, { ...orders, status: 'ok' }, { ...newDb, status: 'ok', badge: 'own schema' }],
@@ -409,6 +474,35 @@ def get_customer(customer_id: int) -> Customer:
       },
     },
     {
+      title: 'Split tables',
+      tag: 'tradeoff',
+      heading: 'What breaks when tables move apart',
+      eli5: 'When the order book moves to a new counter, the old trick of looking up the customer in the same book stops working. The counters must ask each other or keep a note.',
+      body: [
+        'Tables that lived together now sit in two databases. A SQL join between orders and `CUST_MSTR` no longer works, a foreign key cannot span databases, and one transaction cannot cover both.',
+        'The usual fixes: call the owning service\'s API, keep a replicated read model of the few fields you need, or store a denormalized copy such as the customer name on the order. Pick per query.',
+      ],
+      keyIdea: 'Splitting a database breaks joins, foreign keys and transactions, so each one needs an API call, a replicated copy or a denormalized field.',
+      metrics: { share: '0% (staff only)', blast: 'order history', systems: '2 + facade', diff: '-' },
+      metricTones: { blast: 'warn' },
+      scene: {
+        nodes: [{ ...orders, status: 'active', chips: [{ text: 'JOIN customers', tone: 'bad' }] }, newDb, { ...acl, at: at(7, 0), status: 'ok' }, legacyDb],
+        links: [link('orders', 'newDb'), link('orders', 'acl', { label: 'API call' }), link('acl', 'legacyDb')],
+        flows: [{ path: ['orders', 'acl', 'legacyDb'], tone: 'request', label: 'customer name', duration: 1.8 }],
+        panel: {
+          title: 'What breaks, what fixes it',
+          icon: 'Table',
+          rows: [
+            { text: 'JOIN across tables', value: 'API or read model', tone: 'warn' },
+            { text: 'Foreign key', value: 'check in code', tone: 'warn' },
+            { text: 'One transaction', value: 'outbox or saga', tone: 'warn' },
+            { text: 'Customer name on order', value: 'denormalized copy', tone: 'good' },
+          ],
+        },
+        caption: 'Rules the database enforced now live in code',
+      },
+    },
+    {
       title: 'Part 1 recap',
       tag: 'recap',
       heading: 'So far: a facade, a slice and a translator',
@@ -418,7 +512,7 @@ def get_customer(customer_id: int) -> Customer:
         'Pick slices by their seams, use **branch by abstraction** when no URL exists, and let an **anti-corruption layer** keep the old model out of the new code. Each slice owns its data. Part 2 moves that data and finishes the job.',
       ],
       keyIdea: 'Route one small slice through a facade, keep the old model behind a translator, and give the slice its own data.',
-      metrics: { share: '10% of /orders', blast: 'order history', systems: '2 + facade', diff: '-' },
+      metrics: { share: '0% (staff only)', blast: 'order history', systems: '2 + facade', diff: '-' },
       metricTones: { blast: 'good' },
       scene: {
         nodes: [users, { ...facade, status: 'ok' }, legacy, { ...orders, status: 'ok' }, { ...acl, size: 0.7 }],

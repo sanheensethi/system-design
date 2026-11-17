@@ -116,7 +116,7 @@ export const whatIsSystemDesign: Lesson = {
       heading: 'One machine always runs out of something',
       eli5: 'Even the biggest kitchen has a limit: only so many stoves, shelves and doors. Past that limit the **server** cannot take one more order, however hard the cook tries.',
       body: [
-        'Every machine has ceilings. A large server tops out around 64 to 128 CPU cores, 1 to 4 TB of RAM, 100 TB of disk and 10 to 100 Gbps of network.',
+        'Every machine has ceilings. The biggest reach 64 to 128 cores, 1 to 4 TB of RAM (typical: 64 to 512 GB), 100 TB of disk and 100 Gbps of network.',
         'Whichever you hit first stops you. The small rented box running PawPost hits its CPU limit at about 500 requests per second.',
         'Why not rent a bigger box? That is **vertical scaling** (scale up): simple, but it hits the ceilings above, the price climbs faster than the power, and it is still one machine. **Horizontal scaling** (scale out) adds more machines instead.',
       ],
@@ -131,7 +131,7 @@ export const whatIsSystemDesign: Lesson = {
           icon: 'Cpu',
           rows: [
             { text: 'CPU', value: '64 to 128 cores' },
-            { text: 'RAM', value: '1 to 4 TB' },
+            { text: 'RAM (largest; typical 64 to 512 GB)', value: '1 to 4 TB' },
             { text: 'Disk', value: 'about 100 TB' },
             { text: 'Network', value: '10 to 100 Gbps' },
             { text: 'Scale up: bigger box', value: 'ceiling, one failure point', tone: 'warn' },

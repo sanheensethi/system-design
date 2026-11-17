@@ -147,7 +147,7 @@ export const authentication: Lesson = {
       heading: 'Make the hash slow on purpose',
       eli5: 'The scribble machine at the **front desk** is deliberately slow. One guess takes a moment, so a thief with a stolen book needs forever to try many words.',
       body: [
-        'A fast hash like SHA-256 lets an attacker with the leaked table try billions of guesses per second. Use a deliberately slow, memory-hard function built for passwords, such as **Argon2id** or bcrypt, tuned so one check costs roughly 100 ms.',
+        'A fast hash like SHA-256 lets an attacker with the leaked table try billions of guesses per second. Use a deliberately slow function built for passwords, such as **Argon2id** (memory-hard), scrypt or bcrypt, tuned so one check costs roughly 100 ms.',
         'At login, hash the submitted password with the stored salt and compare. The cost is paid once per login, and the attacker pays it for every guess.',
       ],
       keyIdea: 'A password hash should be salted and slow, so a stolen table is expensive to crack one account at a time.',
@@ -191,17 +191,19 @@ def register(email, password):
 
 def login(email, password):
     user = db.query_one("SELECT id, pw_hash FROM users WHERE email = %s", email)
-    if user is None:
-        return None
+    # Unknown email: verify against a fixed dummy hash so both paths cost the same.
+    stored = user.pw_hash if user else DUMMY_HASH
     try:
-        ph.verify(user.pw_hash, password)     # slow on purpose
+        ph.verify(stored, password)           # slow on purpose
+        if user is None:
+            return None
     except VerifyMismatchError:
         return None
     if ph.check_needs_rehash(user.pw_hash):   # cost settings were raised
         db.execute("UPDATE users SET pw_hash = %s WHERE id = %s",
                    ph.hash(password), user.id)
     return user.id`,
-        highlight: [4, 9, 16, 19],
+        highlight: [4, 9, 14, 16, 21],
       },
       quiz: {
         question: 'Why is Argon2id a better choice than SHA-256 for storing passwords?',
@@ -221,8 +223,8 @@ def login(email, password):
       heading: 'Defend the login endpoint itself',
       eli5: 'Even with a slow scribble machine, a thief can queue at the **front desk** and try one word after another. The desk slows people down after a few wrong tries.',
       body: [
-        'Attackers rarely crack hashes. They replay leaked email and password pairs from other sites, a trick called **credential stuffing**, and they guess common passwords across many accounts. Put a **rate limit** on `/login` per account and per IP, and add a short delay after repeated failures.',
-        'Return the same message for a wrong email and a wrong password, so the endpoint does not reveal which accounts exist.',
+        'Attackers replay leaked email and password pairs from other sites, called **credential stuffing**. Rate limit `/login` per account and per IP, and add a CAPTCHA after repeated failures, since per-IP limits do little against a botnet. Prefer slowing down to a hard lockout, which lets an attacker lock a victim out. Reject breached passwords at signup.',
+        'Return the same message for a wrong email and a wrong password, and spend the same time on both, so accounts cannot be listed.',
       ],
       keyIdea: 'Slow hashing protects a stolen table. Rate limits and uniform errors protect the live login endpoint.',
       metrics: { lookup: '1 at login', check: '~100 ms hash', life: '-', revoke: '-' },
@@ -243,10 +245,48 @@ def login(email, password):
           rows: [
             { text: 'limit per account', value: '5 per 15 min', tone: 'good' },
             { text: 'limit per IP', value: '20 per min', tone: 'good' },
-            { text: 'wrong email or password', value: 'same message', tone: 'good' },
+            { text: 'wrong email or password', value: 'same message and timing', tone: 'good' },
+            { text: 'repeated failures', value: 'CAPTCHA', tone: 'good' },
+            { text: 'new passwords', value: 'breached list check', tone: 'good' },
           ],
         },
         caption: 'The gateway turns a flood of guesses into 429s',
+      },
+    },
+    {
+      title: 'Password reset',
+      tag: 'concept',
+      heading: 'Reset flows are the easiest way in',
+      eli5: 'When someone forgets their secret word, the **front desk** mails a one-time slip to the address on file. Anyone who can read that mail can get in, so the slip must be short-lived and work once.',
+      body: [
+        'Account recovery is the most common way accounts get taken over, because it skips the password. Send a random **reset token** by email, store only its hash, make it single-use and expire it in about 15 minutes.',
+        'Answer the same way whether or not the email exists, so the form cannot be used to list accounts. After a reset, end all existing sessions and refresh tokens.',
+      ],
+      keyIdea: 'A reset token is a temporary password. Treat it like one: random, hashed, single-use and short-lived.',
+      metrics: { lookup: '1 per reset', check: '~100 ms hash', life: '15 min', revoke: 'on use' },
+      scene: {
+        nodes: [
+          { ...browser, sub: 'forgot password' },
+          { ...auth, status: 'active', badge: 'reset token' },
+          { ...userdb, badge: 'token hash only' },
+        ],
+        links: [link('browser', 'auth'), link('auth', 'userdb')],
+        flows: [
+          { path: ['browser', 'auth'], tone: 'request', label: 'POST /reset', duration: 1.3 },
+          { path: ['auth', 'userdb'], tone: 'request', label: 'store token hash', duration: 1, delay: 1.4 },
+          { path: ['auth', 'browser'], tone: 'response', label: 'same reply for any email', duration: 1.3, delay: 2.6 },
+        ],
+        panel: {
+          title: 'Reset token rules',
+          icon: 'KeyRound',
+          rows: [
+            { text: 'token', value: 'random, stored hashed', tone: 'good' },
+            { text: 'lifetime', value: '15 min, single use', tone: 'good' },
+            { text: 'unknown email', value: 'same response', tone: 'good' },
+            { text: 'after reset', value: 'end all sessions', tone: 'good' },
+          ],
+        },
+        caption: 'Recovery must not be weaker than login',
       },
     },
     {
@@ -292,7 +332,7 @@ def login(email, password):
       eli5: 'After checking you in, the **front desk** gives you a numbered ticket and writes your name next to that number in its book. Each time you come back, staff look the number up in the book.',
       body: [
         'After a good login the auth service creates a **session**: a long random ID, stored in Redis next to the user ID and an expiry. The ID goes back to the browser in a cookie, and the browser attaches it to every later request.',
-        'The ID itself means nothing, so stealing a copy of some other service\'s data reveals nothing about it.',
+        'The ID carries no data. Anyone who reads the cookie learns nothing about the user, but anyone who steals it can act as that user until the row expires, which is why the cookie flags matter.',
       ],
       keyIdea: 'A session keeps the state on the server. The client holds only a random pointer to it.',
       metrics: { lookup: '1 at login', check: '-', life: '14 days', revoke: 'instant' },
@@ -443,7 +483,7 @@ def login(email, password):
       eli5: 'Only the **front desk** owns the stamp that makes the seal. Every guard has a picture of what a real seal looks like, so guards can check a card but cannot print one.',
       body: [
         'The auth service signs with a private key. With an asymmetric algorithm such as `RS256` or `ES256`, every other service only needs the public key to verify, so a breach of one API leaks no signing power.',
-        'Change one character of the payload and the signature no longer matches.',
+        '`HS256` uses one shared secret and suits a single service, but every verifier can then also forge tokens. Change one character of the payload and the signature no longer matches.',
       ],
       keyIdea: 'Only the issuer can sign. Anyone with the public key can verify, and any edit breaks the signature.',
       metrics: { lookup: '1 at login', check: 'sign once', life: '15 min', revoke: '-' },
@@ -561,7 +601,7 @@ def login(email, password):
       heading: 'Three rules keep token checks safe',
       eli5: 'The **door guard** follows three rules. Only accept the seals on the list, only open doors named on the card, and keep a fresh picture of the real seal.',
       body: [
-        'Pin the allowed algorithms in your code and never trust the `alg` field of an incoming token on its own, or an attacker picks the weakest one. Reject a token whose `aud` names another service.',
+        'Pin the allowed algorithms in your code and never trust the `alg` field of an incoming token on its own. Otherwise an attacker can send `alg: none`, or the algorithm confusion attack: switch to `HS256` and sign with the RS256 public key as the shared secret, which anyone can download. Reject a token whose `aud` names another service.',
         'Fetch public keys by `kid` from the issuer\'s key set, so keys can rotate without a deploy.',
       ],
       keyIdea: 'The verifier decides the algorithm, audience and key source. The token never does.',
@@ -606,13 +646,14 @@ def authenticate(request):
             algorithms=["RS256"],                # pinned, never read from the token
             audience="shop-api",
             issuer="https://auth.shop.example",
+            options={"require": ["exp", "aud", "iss", "sub"]},
         )                                        # also rejects an expired exp
-    except jwt.InvalidTokenError:
+    except jwt.PyJWTError:                       # bad token, unknown kid, JWKS down
         return Response(401)
     request.headers["X-User-Id"] = claims["sub"]
     request.headers["X-Roles"] = ",".join(claims.get("roles", []))
     return forward(request)`,
-        highlight: [9, 12, 13, 14, 16],
+        highlight: [9, 12, 13, 14, 17],
       },
     },
     {
@@ -658,7 +699,7 @@ def authenticate(request):
       heading: 'Rotate the refresh token on every use',
       eli5: 'Each time you swap your long-lasting slip, the **front desk** takes the old one and gives you a new one. If someone shows an old slip later, the desk knows it was copied.',
       body: [
-        '**Rotate** on every use: each refresh returns a new refresh token and retires the old one. If a retired token shows up again, someone copied it, and the auth service ends that whole session family.',
+        '**Rotate** on every use: each refresh returns a new refresh token and retires the old one. If a retired token shows up again, someone copied it, and the auth service ends that whole session family. Allow a short grace window (for example 10 s) for the previous token, so a retry or a second tab does not log the user out.',
         'In a browser, keep the refresh token in an `HttpOnly` cookie, out of reach of scripts.',
       ],
       keyIdea: 'A refresh token works once. A replayed one reveals theft and kills the session.',
@@ -731,22 +772,22 @@ def authenticate(request):
       heading: 'Three ways to shrink the revocation gap',
       eli5: 'The **front desk** hands the **door guard** a short list of cancelled cards. The guard still checks the seal, and now also glances at the list.',
       body: [
-        'Accept the window and keep it short. Keep a **denylist** of revoked token IDs (the `jti` claim) in a cache that the gateway checks, with entries expiring when the token would have. Or store a per-user token version and reject older ones.',
+        'Accept the window and keep it short. The auth service rarely knows every `jti` a user holds, so store a per-user **revoked before** time that the gateway checks and reject any token whose `iat` is older. A `jti` **denylist** works if the issuer records the latest `jti` per session.',
         'The last two bring a lookup back, though a denylist is tiny compared with a full session store. Many systems mix the models: sessions for the browser, short JWTs between internal services.',
       ],
-      keyIdea: 'A small denylist turns a 15 minute gap into seconds, at the price of one cheap lookup.',
+      keyIdea: 'A small revocation list turns a 15 minute gap into seconds, at the price of one cheap lookup.',
       metrics: { lookup: 'denylist only', check: '<1 ms + cache', life: '15 min', revoke: 'seconds' },
       metricTones: { lookup: 'warn', revoke: 'good' },
       scene: {
         nodes: [
           { ...browser, label: 'stolen phone', sub: 'token from 09:58', status: 'hot' },
-          { ...gw, status: 'active', badge: 'check jti' },
+          { ...gw, status: 'active', badge: 'check iat' },
           { ...auth, badge: 'revoke user 42' },
-          { ...sessions, label: 'denylist', sub: 'revoked jti, TTL 15 min', status: 'active' },
+          { ...sessions, label: 'denylist', sub: 'user 42 revoked before 10:00', status: 'active' },
         ],
         links: [link('browser', 'gw'), link('gw', 'auth'), link('auth', 'sessions'), link('gw', 'sessions', { style: 'dashed' })],
         flows: [
-          { path: ['auth', 'sessions'], tone: 'event', label: 'add jti 7b1e', duration: 1 },
+          { path: ['auth', 'sessions'], tone: 'event', label: 'user 42 revoked before 10:00', duration: 1 },
           { path: ['browser', 'gw'], tone: 'request', label: 'Bearer eyJ...', duration: 1, delay: 1.2 },
           { path: ['gw', 'sessions', 'gw'], tone: 'request', label: 'revoked?', duration: 1.4, delay: 2.3 },
           { path: ['gw', 'browser'], tone: 'error', label: '401', duration: 1, delay: 3.8 },
@@ -756,8 +797,8 @@ def authenticate(request):
           icon: 'List',
           rows: [
             { text: 'short lifetime', value: 'gap 15 min', tone: 'warn' },
-            { text: 'jti denylist', value: 'gap seconds', tone: 'good' },
-            { text: 'per-user version', value: 'gap seconds', tone: 'good' },
+            { text: 'per-user revoked before', value: 'gap seconds', tone: 'good' },
+            { text: 'jti denylist (per session)', value: 'gap seconds', tone: 'good' },
             { text: 'both bring a lookup back', tone: 'muted' },
           ],
         },
@@ -771,11 +812,11 @@ def authenticate(request):
       eli5: 'The **front desk** checks who you are once, maybe twice, and gives you a stamped card. Guards read the card at each door, and the card runs out quickly so a lost one cannot be used for long.',
       body: [
         '**Authentication** proves who is calling and **authorization** decides what they may do. Passwords live as salted, slow hashes, guarded by rate limits and a second factor. A **session** is a random ID that costs a lookup per request and can be revoked at once.',
-        'A **JWT** is a signed set of claims the gateway checks with a public key and no lookup. Keep access tokens short, rotate refresh tokens and add a denylist when 15 minutes is too long. Part 2 covers OAuth, SSO and access control.',
+        'A **JWT** is a signed set of claims the gateway checks with a public key and no lookup. Keep access tokens short, rotate refresh tokens and add a revocation check when 15 minutes is too long. Part 2 covers OAuth, SSO and access control.',
       ],
       keyIdea: 'Sessions buy control with a lookup. Signed tokens buy speed with a revocation gap. Pick per use case.',
-      metrics: { lookup: '0/s', check: '<1 ms CPU', life: '15 min + 30 d', revoke: 'seconds' },
-      metricTones: { lookup: 'good', check: 'good', revoke: 'good' },
+      metrics: { lookup: 'denylist only', check: '<1 ms CPU', life: '15 min + 30 d', revoke: 'seconds' },
+      metricTones: { lookup: 'warn', check: 'good', revoke: 'good' },
       scene: {
         nodes: [
           { ...browser, chips: ['Bearer eyJ...'] },
@@ -804,11 +845,11 @@ def authenticate(request):
         options: [
           'Change the signing key for all users',
           'Wait for the access token to expire',
-          'Revoke the refresh token and add the access token ID to a short-lived denylist the gateway checks',
+          'Revoke the refresh token and store a revoked-before time for the user that the gateway checks against each token\'s iat',
           'Ask the user to change their password',
         ],
         answer: 2,
-        explain: 'Revoking the refresh token stops new access tokens. The denylist entry kills the one already issued, and it only needs to live 15 minutes. Rotating the signing key logs everyone out, and a password change alone does not cancel a token that is already signed.',
+        explain: 'Revoking the refresh token stops new access tokens. The revoked-before time rejects every token issued earlier, without needing to know their IDs, and it only needs to live 15 minutes. Rotating the signing key logs everyone out, and a password change alone does not cancel a token that is already signed.',
       },
     },
   ],
