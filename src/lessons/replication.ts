@@ -4,12 +4,12 @@ import type { Lesson, SceneLink, SceneNode } from '../engine/types';
 const at = (d: number, s: number): [number, number] => [(s + d) / 2, (s - d) / 2];
 const link = (from: string, to: string, extra: Partial<SceneLink> = {}): SceneLink => ({ from, to, ...extra });
 
-const app: SceneNode = { id: 'app', kind: 'server', at: at(-4.2, -3), label: 'app server', sub: 'shop backend' };
-const primary: SceneNode = { id: 'primary', kind: 'db', at: at(0, -3), label: 'primary', sub: 'takes writes' };
-const r1: SceneNode = { id: 'r1', kind: 'replica', at: at(-3.8, 3.5), label: 'replica 1' };
-const r2: SceneNode = { id: 'r2', kind: 'replica', at: at(0, 3.5), label: 'replica 2' };
-const r3: SceneNode = { id: 'r3', kind: 'replica', at: at(3.8, 3.5), label: 'replica 3' };
-const mgr: SceneNode = { id: 'mgr', kind: 'monitor', at: at(4.2, -3), label: 'failover manager', sub: 'Patroni' };
+const app: SceneNode = { id: 'app', kind: 'server', at: at(-7.2, -4.5), label: 'app server', sub: 'shop backend' };
+const primary: SceneNode = { id: 'primary', kind: 'db', at: at(-3.6, -4.5), label: 'primary', sub: 'takes writes' };
+const r1: SceneNode = { id: 'r1', kind: 'replica', at: at(-5.4, 4.5), label: 'replica 1' };
+const r2: SceneNode = { id: 'r2', kind: 'replica', at: at(-1.8, 4.5), label: 'replica 2' };
+const r3: SceneNode = { id: 'r3', kind: 'replica', at: at(1.8, 4.5), label: 'replica 3' };
+const mgr: SceneNode = { id: 'mgr', kind: 'monitor', at: at(3.6, -4.5), label: 'failover manager', sub: 'Patroni' };
 
 const feed = (extra: Partial<SceneLink> = {}) => [
   link('primary', 'r1', { style: 'dashed', ...extra }),
@@ -88,7 +88,7 @@ export const replication: Lesson = {
         nodes: [
           { ...app, status: 'hot' },
           { ...primary, label: 'database', sub: 'only copy', status: 'down', badge: 'disk dead' },
-          { id: 'backup', kind: 'storage', at: at(4.2, -3), label: 'nightly backup', sub: '1 AM', status: 'ok' },
+          { id: 'backup', kind: 'storage', at: at(3.6, -4.5), label: 'nightly backup', sub: '1 AM', status: 'ok' },
         ],
         links: [link('app', 'primary', { style: 'faint' }), link('primary', 'backup', { style: 'dashed' })],
         flows: [
@@ -150,6 +150,7 @@ export const replication: Lesson = {
             { text: 'INSERT, UPDATE, DELETE', value: 'primary' },
             { text: 'SELECT', value: 'any replica', tone: 'good' },
             { text: 'Replicas needed for 30K', value: '3' },
+            { text: 'Routing layer', value: 'PgBouncer, ProxySQL' },
           ],
         },
       },
@@ -204,6 +205,42 @@ read("SELECT * FROM products WHERE id = %s", 42)`,
             { text: 'Read capacity', value: '10K to 30K/s', tone: 'good' },
             { text: 'Write capacity', value: 'unchanged', tone: 'warn' },
             { text: '1 TB dataset on disk', value: '4 TB', tone: 'warn' },
+          ],
+        },
+      },
+    },
+    {
+      title: 'Not a backup',
+      tag: 'tradeoff',
+      heading: 'Replicas are not backups',
+      eli5: 'The helpers copy every change the librarian makes, even a mistake. If she rips out a page, they rip it out too. You still need an old photo of the book, kept somewhere safe.',
+      body: [
+        'Replicas protect against **losing a machine**. They do not protect against a **logical mistake**: a `DROP TABLE`, a bad migration or a buggy deploy replicates to every copy within milliseconds.',
+        'Keep backups and **point-in-time recovery** (base backup plus archived WAL). Some teams add a **delayed replica**, for example 1 hour behind, as a safety net.',
+      ],
+      keyIdea: 'Replication copies mistakes as fast as it copies data. Keep backups and point-in-time recovery as well.',
+      metrics: { replicas: '3 + 1 delayed', reads: '30K/s', lag: '20 ms (1 h delayed)', commit: '2 ms', risk: 'mistakes copy instantly' },
+      metricTones: { risk: 'bad' },
+      scene: {
+        nodes: [
+          { ...primary, status: 'hot', chips: [{ text: 'DROP TABLE orders', tone: 'bad' }] },
+          { ...r1, status: 'down', badge: 'table gone' },
+          { ...r2, status: 'down', badge: 'table gone' },
+          { ...r3, label: 'delayed replica', sub: '1 h behind', status: 'ok', badge: 'still has it' },
+        ],
+        links: [link('primary', 'r1', { style: 'dashed' }), link('primary', 'r2', { style: 'dashed' }), link('primary', 'r3', { style: 'dashed', label: '1 h delay', labelTone: 'good' })],
+        flows: [
+          { path: ['primary', 'r1'], tone: 'error', label: 'DROP TABLE', duration: 1.2 },
+          { path: ['primary', 'r2'], tone: 'error', duration: 1.2 },
+        ],
+        panel: {
+          title: 'What protects against what',
+          icon: 'Shield',
+          rows: [
+            { text: 'DROP TABLE', value: 'replicates everywhere', tone: 'bad' },
+            { text: 'Disk or machine dies', value: 'replicas', tone: 'good' },
+            { text: 'Bad migration or bug', value: 'backup + PITR', tone: 'good' },
+            { text: 'Delayed replica', value: 'optional safety net', tone: 'warn' },
           ],
         },
       },
@@ -285,7 +322,7 @@ read("SELECT * FROM products WHERE id = %s", 42)`,
       scene: {
         nodes: [
           { ...primary, status: 'active', badge: 'still taking writes' },
-          { id: 'snap', kind: 'storage', at: at(4.2, -3), label: 'snapshot', sub: 'at LSN 0/2F0000', status: 'ok' },
+          { id: 'snap', kind: 'storage', at: at(3.6, -4.5), label: 'snapshot', sub: 'at LSN 0/2F0000', status: 'ok' },
           { ...r3, label: 'new replica', status: 'active', badge: 'catching up' },
         ],
         links: [link('primary', 'snap', { style: 'dashed' }), link('snap', 'r3', { style: 'dashed' }), link('primary', 'r3', { style: 'faint' })],
@@ -342,19 +379,21 @@ read("SELECT * FROM products WHERE id = %s", 42)`,
       heading: 'Synchronous: wait for the copy',
       eli5: '**Synchronous** means the librarian waits until a helper calls "copied!" before telling you your page is saved. It takes a bit longer, but the page is safe even if the main book is lost.',
       body: [
-        'The primary waits until a replica confirms it has the change. You lose nothing on failover, but every commit pays a round trip: about 1 ms inside a datacenter, **60 ms or more** across regions.',
-        'If that replica stalls, writes stall too. One slow machine slows the whole system.',
+        'The primary waits until **every** replica confirms it has the change. You lose nothing on failover, but every commit pays a round trip to the slowest replica: about 1 ms inside a datacenter, **60 ms or more** across regions.',
+        'If any replica stalls, writes stall too. The next step relaxes this by waiting for only one.',
       ],
-      keyIdea: 'Sync replication buys zero data loss with latency on every write, and a stalled replica can freeze them.',
-      metrics: { replicas: '3 (1 sync)', reads: '30K/s', lag: '0 for sync', commit: '3 ms', risk: '0 committed writes' },
+      keyIdea: 'Sync replication buys zero data loss with latency on every write, and any stalled replica can freeze them.',
+      metrics: { replicas: '3 (all sync)', reads: '30K/s', lag: '0', commit: '3 ms', risk: '0 committed writes' },
       metricTones: { commit: 'warn', risk: 'good' },
       scene: {
-        nodes: [app, { ...primary, status: 'active', badge: 'waits for 1 ack' }, { ...r1, status: 'ok', badge: 'sync' }],
-        links: [link('app', 'primary'), link('primary', 'r1', { style: 'dashed', arrow: 'both', label: '+1 ms same DC', labelTone: 'warn' })],
+        nodes: [app, { ...primary, status: 'active', badge: 'waits for all acks' }, { ...r1, status: 'ok', badge: 'sync' }, { ...r2, status: 'ok', badge: 'sync' }],
+        links: [link('app', 'primary'), link('primary', 'r1', { style: 'dashed', arrow: 'both', label: '+1 ms same DC', labelTone: 'warn' }), link('primary', 'r2', { style: 'dashed', arrow: 'both' })],
         flows: [
           { path: ['app', 'primary'], tone: 'request', label: 'COMMIT', duration: 1 },
           { path: ['primary', 'r1'], tone: 'data', label: 'WAL', duration: 0.9, delay: 1.05 },
+          { path: ['primary', 'r2'], tone: 'data', duration: 0.9, delay: 1.05 },
           { path: ['r1', 'primary'], tone: 'handshake', label: 'ack', duration: 0.9, delay: 2 },
+          { path: ['r2', 'primary'], tone: 'handshake', label: 'ack', duration: 0.9, delay: 2 },
           { path: ['primary', 'app'], tone: 'response', label: 'committed', duration: 1, delay: 3 },
         ],
         panel: {
@@ -365,7 +404,7 @@ read("SELECT * FROM products WHERE id = %s", 42)`,
             { text: 'Sync, same datacenter', value: '3 ms' },
             { text: 'Sync, other region', value: '60+ ms', tone: 'bad' },
           ],
-          footer: { text: 'Replica stalls: writes stall', tone: 'bad' },
+          footer: { text: 'Any replica stalls: writes stall', tone: 'bad' },
         },
       },
     },
@@ -407,9 +446,9 @@ ALTER SYSTEM SET synchronous_standby_names = 'FIRST 1 (replica1, replica2)';
 ALTER SYSTEM SET synchronous_commit = 'on';
 SELECT pg_reload_conf();
 
--- a like counter can skip the wait
+-- a like counter can skip the standby wait (still flushed locally)
 BEGIN;
-SET LOCAL synchronous_commit = 'off';
+SET LOCAL synchronous_commit = 'local';
 UPDATE posts SET likes = likes + 1 WHERE id = 42;
 COMMIT;`,
         highlight: [2, 8],
@@ -619,24 +658,32 @@ def load_profile(session, user_id):
     {
       title: 'Prefix reads',
       tag: 'concept',
-      heading: 'Causal order can break across shards',
+      heading: 'Causal order can break across partitions',
       eli5: 'A story page says "the dragon left", and a later page says "why did the dragon leave?". If a copy shows the answer before the question, the story is nonsense.',
       body: [
-        'If a user posts a question and someone answers, a reader must not see the answer first. On one log the order holds. When data is split across shards, each shard replicates on its own clock.',
-        '**Consistent prefix reads** guarantee readers see writes in the order they happened. Keep causally related writes on one shard, or track dependencies.',
+        'A user posts a question and someone answers, but the two rows live in different partitions. Each partition is its own primary with its own replicas, and each replicates on its own clock.',
+        '**Consistent prefix reads** guarantee readers see writes in the order they happened. Keep causally related writes in one partition, or track dependencies. Splitting data this way is covered in the sharding lesson.',
       ],
       keyIdea: 'Readers should see a valid prefix of history. Related writes must replicate in order.',
       metrics: { replicas: '3', reads: '29K/s', lag: 'uneven', commit: '2 ms', risk: 'out-of-order views' },
       scene: {
         nodes: [
-          { ...primary, label: 'primary', sub: 'both shards', status: 'active' },
-          { ...r1, label: 'shard A copy', sub: 'question', badge: 'lag 3 s', status: 'hot' },
-          { ...r2, label: 'shard B copy', sub: 'answer', badge: 'lag 20 ms', status: 'ok' },
+          { ...primary, id: 'pA', at: at(-5.4, -6), label: 'shard A primary', sub: 'questions', status: 'active' },
+          { ...primary, id: 'pB', at: at(1.8, -6), label: 'shard B primary', sub: 'answers', status: 'active' },
+          { ...r1, id: 'rA', at: at(-5.4, 2.5), label: 'shard A replica', badge: 'lag 3 s', status: 'hot' },
+          { ...r2, id: 'rB', at: at(1.8, 2.5), label: 'shard B replica', badge: 'lag 20 ms', status: 'ok' },
+          { ...app, id: 'reader', at: at(-1.8, 7), label: 'reader', sub: 'one page view' },
         ],
-        links: [link('primary', 'r1', { style: 'dashed', label: 'slow', labelTone: 'warn' }), link('primary', 'r2', { style: 'dashed' })],
+        links: [
+          link('pA', 'rA', { style: 'dashed', label: 'slow', labelTone: 'warn' }),
+          link('pB', 'rB', { style: 'dashed' }),
+          link('reader', 'rA', { style: 'faint' }),
+          link('reader', 'rB', { style: 'faint' }),
+        ],
         flows: [
-          { path: ['primary', 'r1'], tone: 'data', label: 'question', duration: 3 },
-          { path: ['primary', 'r2'], tone: 'data', label: 'answer', duration: 1, delay: 0.3 },
+          { path: ['pA', 'rA'], tone: 'data', label: 'question', duration: 3 },
+          { path: ['pB', 'rB'], tone: 'data', label: 'answer', duration: 1, delay: 0.3 },
+          { path: ['reader', 'rB', 'reader'], tone: 'response', label: 'sees answer', duration: 1.6, delay: 3.4 },
         ],
         panel: {
           title: 'What a reader sees',
@@ -650,7 +697,7 @@ def load_profile(session, user_id):
       },
     },
     {
-      title: 'Detect',
+            title: 'Detect',
       tag: 'case',
       heading: 'Case: the primary dies at 2 AM',
       eli5: 'The main book gets lost at night! A watcher, the failover manager, keeps asking "are you there?" and after ten quiet seconds decides the book is gone.',
@@ -700,7 +747,7 @@ def load_profile(session, user_id):
           { ...primary, status: 'down', badge: 'dead' },
           { ...r2, kind: 'db', label: 'new primary', sub: 'was replica 2', status: 'ok', badge: 'promoted' },
           { ...r1, status: 'active', badge: 'follows new primary' },
-          { ...mgr, at: at(4.2, 0), status: 'active', badge: 'picks highest LSN' },
+          { ...mgr, at: at(3.6, 0), status: 'active', badge: 'picks highest LSN' },
         ],
         links: [
           link('mgr', 'r2', { style: 'dashed', label: 'promote' }),
@@ -718,6 +765,7 @@ def load_profile(session, user_id):
             { text: '1. Detect', value: '~10 s' },
             { text: '2. Promote freshest replica', value: '~5 s' },
             { text: '3. Re-point replicas and app', value: '~15 s' },
+            { text: 'App finds new primary via', value: 'proxy, VIP or DNS' },
             { text: 'Total', value: '~30 s', tone: 'warn' },
           ],
         },
@@ -772,14 +820,14 @@ def load_profile(session, user_id):
       metricTones: { lag: 'bad', risk: 'bad' },
       scene: {
         zones: [
-          { id: 'azA', from: [-5.4, -2.2], to: [-0.9, 3.4], label: 'zone A', tone: 'blue' },
-          { id: 'azB', from: [0.2, -5.6], to: [5.2, -0.4], label: 'zone B', tone: 'amber' },
+          { id: 'azA', from: [-3.4, 0.4], to: [1.8, 3.4], label: 'zone A', tone: 'blue' },
+          { id: 'azB', from: [-0.5, -4.5], to: [5, 0], label: 'zone B', tone: 'amber' },
         ],
         nodes: [
           { ...app, at: at(-4.2, 0), label: 'app A', status: 'active' },
           { ...primary, at: at(-0.8, 2.4), status: 'hot', badge: 'still primary?' },
           { ...r2, kind: 'db', at: at(3.6, -2.4), label: 'new primary', status: 'hot', badge: 'also primary' },
-          { ...app, id: 'app2', at: at(4.4, 1.6), label: 'app B', status: 'active' },
+          { ...app, id: 'app2', at: at(7.4, 3), label: 'app B', status: 'active' },
         ],
         links: [
           link('app', 'primary'),
@@ -800,8 +848,8 @@ def load_profile(session, user_id):
       heading: 'Quorum and fencing keep one leader',
       eli5: 'Helpers vote, and the main book needs a majority. The old librarian gets a note that her turn is over, and the book room refuses pages with an old turn number.',
       body: [
-        'Leadership is decided by a **majority vote** of 3 or 5 nodes (etcd, ZooKeeper, Raft), so a cut-off minority cannot elect itself.',
-        '**Fencing** stops the loser. Its lease expires and it stops taking writes, or it is forcibly shut down. Each leader carries an **epoch** number, and storage rejects writes from an older epoch.',
+        'Leadership is decided by a **majority vote** of 3 or 5 nodes, run by etcd or ZooKeeper (which use Raft or a similar protocol), so a cut-off minority cannot elect itself. The consensus lesson explains how.',
+        '**Fencing** stops the loser: its lease expires, or **STONITH** powers it off. Fenced storage and lock services also give each leader an **epoch** number and reject writes from an older one.',
       ],
       keyIdea: 'Failover is only safe if the old primary is guaranteed to stop. Use a majority vote and fence the loser.',
       metrics: { replicas: '2', reads: '20K/s', lag: '20 ms', commit: '2 ms', risk: 'one writer only' },
@@ -810,7 +858,7 @@ def load_profile(session, user_id):
         nodes: [
           { ...primary, status: 'down', badge: 'fenced', chips: [{ text: 'epoch 7', tone: 'bad' }] },
           { ...r2, kind: 'db', label: 'new primary', status: 'ok', chips: [{ text: 'epoch 8', tone: 'good' }] },
-          { ...mgr, at: at(4.2, 0), label: 'etcd quorum', sub: '3 voters', status: 'active' },
+          { ...mgr, at: at(3.6, 0), label: 'etcd quorum', sub: '3 voters', status: 'active' },
         ],
         links: [link('mgr', 'r2', { style: 'dashed', label: 'lease: epoch 8' }), link('primary', 'r2', { style: 'faint' })],
         flows: [
@@ -823,7 +871,41 @@ def load_profile(session, user_id):
           rows: [
             { text: 'Majority vote', value: 'minority cannot lead', tone: 'good' },
             { text: 'Lease expiry', value: 'old primary stops', tone: 'good' },
-            { text: 'Epoch check', value: 'old writes rejected', tone: 'good' },
+            { text: 'Epoch check', value: 'fenced storage rejects old writes', tone: 'good' },
+            { text: 'STONITH', value: 'power off the old node', tone: 'good' },
+          ],
+        },
+      },
+    },
+    {
+      title: 'Old primary',
+      tag: 'concept',
+      heading: 'The old primary returns as a replica',
+      eli5: 'The lost main book turns up the next morning. It cannot just go back on the desk. It must hand in its extra pages, copy the new main book, and become a helper.',
+      body: [
+        'When the old primary comes back it must **not** accept writes. It is demoted and its unshipped writes are discarded, or **rewound** to the point where histories split (`pg_rewind`), or it is rebuilt from a fresh snapshot.',
+        'Then it follows the new primary as an ordinary replica. Skipping this step leaves two diverging histories.',
+      ],
+      keyIdea: 'A returning old primary is demoted, rewound or rebuilt, and rejoins as a replica.',
+      metrics: { replicas: '3', reads: '30K/s', lag: 'catching up', commit: '2 ms', risk: 'old writes discarded' },
+      scene: {
+        nodes: [
+          { ...r2, kind: 'db', label: 'new primary', status: 'ok' },
+          { ...primary, label: 'old primary', sub: 'back online', status: 'active', badge: 'demoted', chips: [{ text: 'extra: order 9001', tone: 'warn' }] },
+          { ...mgr, at: at(3.6, 0), status: 'active' },
+        ],
+        links: [link('mgr', 'primary', { style: 'dashed', label: 'demote' }), link('r2', 'primary', { style: 'dashed', label: 'follow' })],
+        flows: [
+          { path: ['mgr', 'primary'], tone: 'event', label: 'demote', duration: 1.4 },
+          { path: ['r2', 'primary'], tone: 'data', label: 'rewind, replay', duration: 1.6, delay: 1.6 },
+        ],
+        panel: {
+          title: 'Rejoining safely',
+          icon: 'List',
+          rows: [
+            { text: '1. Stop accepting writes', value: 'demote' },
+            { text: '2. Discard or rewind extra writes', value: 'pg_rewind', tone: 'warn' },
+            { text: '3. Follow the new primary', value: 'replica', tone: 'good' },
           ],
         },
       },

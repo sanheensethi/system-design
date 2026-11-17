@@ -899,12 +899,15 @@ a.tree-lesson:hover {
   display: flex;
   flex-direction: column;
   gap: 14px;
-  max-height: calc(100vh - var(--topbar) - 28px);
+  /* A fixed height (not just a maximum) lets the reading card take every pixel the short
+     "You'll learn" box does not need. */
+  height: calc(100vh - var(--topbar) - 28px);
   min-width: 0;
 }
 .step-card {
   display: flex;
   flex-direction: column;
+  flex: 1 1 auto;
   min-height: 0;
   padding: 16px 16px 12px;
 }
@@ -1031,9 +1034,19 @@ a.tree-lesson:hover {
 .hints kbd + kbd {
   margin-left: 0;
 }
+/* Secondary to the reading card: kept short, its list scrolls. */
 .learn-card {
-  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
   flex: none;
+  max-height: 168px;
+  padding: 12px 16px;
+}
+.learn-card ul {
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  padding-right: 4px !important;
 }
 .learn-card h3 {
   font-size: 15px;
@@ -1819,8 +1832,10 @@ a.lesson-card:hover {
     grid-template-columns: minmax(0, 1fr);
     padding-bottom: 84px;
   }
+  /* Stacked under the stage, the page scrolls instead of the panel. */
   .panel {
     position: static;
+    height: auto;
     max-height: none;
   }
   .step-body {
@@ -1946,5 +1961,53 @@ a.lesson-card:hover {
   .link-dashed,
   .art .led-b {
     animation: none;
+  }
+}
+
+/* ------------------------------------------------------------ author credit */
+.credits {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+}
+.credit-name {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.15;
+  font-weight: 700;
+  font-size: 14px;
+  padding: 2px 4px;
+  border-radius: 6px;
+}
+.credit-name:hover {
+  text-decoration: underline;
+}
+.credit-label {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--ink-3);
+}
+.credit-icon {
+  color: var(--ink);
+}
+/* The compact copies (drawer, home footer) read as one line. */
+.credits.compact .credit-name {
+  flex-direction: row;
+  gap: 5px;
+  align-items: baseline;
+}
+.drawer .credits {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1.5px solid var(--line);
+}
+.site-foot .credits {
+  margin-bottom: 10px;
+}
+/* The phone top bar has no room; the credit lives in the drawer and the home footer there. */
+@media (max-width: 860px) {
+  .topbar > .credits {
+    display: none;
   }
 }

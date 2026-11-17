@@ -2,6 +2,7 @@ import { AnimatePresence, motion } from 'motion/react';
 import { Check, ChevronDown, ChevronRight, FileText, Folder, Menu, Moon, PanelLeftClose, PanelLeftOpen, Search, Sun, Volume2, VolumeX, X } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { isCompleted } from '../engine/progress';
+import { Credits } from './Credits';
 import { BOOKS, allLessons } from '../lessons';
 
 export function TopBar({
@@ -41,6 +42,7 @@ export function TopBar({
         <span>Search lessons and concepts</span>
         <kbd>Ctrl K</kbd>
       </button>
+      <Credits />
       <div className="topbar-right">
         <button className="icon-btn" onClick={toggleSound} aria-label={soundOn ? 'Mute sound effects' : 'Turn sound effects on'} title="Sound effects">
           {soundOn ? <Volume2 size={17} /> : <VolumeX size={17} />}
@@ -145,6 +147,7 @@ export function Sidebar({ open, onClose, currentId }: { open: boolean; onClose: 
               </button>
             </div>
             <CourseTree currentId={currentId} onNavigate={onClose} />
+            <Credits compact />
           </motion.aside>
         </>
       )}

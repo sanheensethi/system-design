@@ -2,6 +2,7 @@ import { ArrowRight, Check, Clock } from 'lucide-react';
 import { lessonProgress } from '../engine/progress';
 import type { Scene as SceneData } from '../engine/types';
 import { BOOKS, allLessons } from '../lessons';
+import { Credits } from './Credits';
 import { Scene } from './Scene';
 
 const HERO: SceneData = {
@@ -131,6 +132,7 @@ export function Home() {
       </section>
 
       <footer className="site-foot">
+        <Credits compact />
         Prefer to read? The full text lives in the <a href="books/">system design books</a>. In a lesson: arrow keys
         step, Space pauses, R replays, Ctrl K searches.
       </footer>
