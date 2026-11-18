@@ -166,12 +166,12 @@ export const lldBehavioralPatterns: Lesson = {
         'Then marketing asks for free shipping on Black Friday. The chain grows, `Order` is edited again, and the tests for the old rules must be rerun. The choice depends on runtime context, so it cannot be hard-wired.',
       ],
       keyIdea: 'A conditional chain that picks an algorithm by type grows with every new variant and always edits the same class.',
-      metrics: { branches: '4', edits: '1 (Order)', knows: '3 rules', pattern: 'none' },
+      metrics: { branches: '3', edits: '1 (Order)', knows: '3 rules', pattern: 'none' },
       metricTones: { branches: 'warn', edits: 'warn' },
       scene: {
         nodes: [
           blk('checkout', A, 'Checkout', 'caller', 'green', 'ShoppingBag'),
-          order(B, { status: 'hot', badge: '4 branches', chips: [{ text: 'if / elif / elif', tone: 'warn' }] }),
+          order(B, { status: 'hot', badge: '3 branches', chips: [{ text: 'if / elif / elif', tone: 'warn' }] }),
           blk('promo', C, 'Marketing', 'Black Friday', 'gray', 'Star'),
         ],
         links: [link('checkout', 'order', { label: 'total_shipping()' }), link('promo', 'order', { label: 'new rule', labelTone: 'warn' })],
@@ -369,8 +369,12 @@ print(order.total_shipping())    # 22.5`,
     def subscribe(self, event, handler):
         self._subs.setdefault(event, []).append(handler)
 
+    def unsubscribe(self, event, handler):
+        if handler in self._subs.get(event, []):
+            self._subs[event].remove(handler)
+
     def publish(self, event, payload):
-        for handler in self._subs.get(event, []):
+        for handler in list(self._subs.get(event, [])):
             handler(payload)
 
 bus = EventBus()
@@ -384,7 +388,7 @@ bus.subscribe("order_placed", send_receipt)
 bus.subscribe("order_placed", track_metric)
 
 bus.publish("order_placed", {"user": "ana@example.com", "sku": "SKU-1", "qty": 2})`,
-        highlight: [5, 6, 8, 9, 10, 22],
+        highlight: [5, 6, 8, 9, 10, 12, 13, 14, 26],
       },
     },
     // 8
@@ -394,8 +398,8 @@ bus.publish("order_placed", {"user": "ana@example.com", "sku": "SKU-1", "qty": 2
       heading: 'The price of Observer: no return value, hidden order, shared failure',
       eli5: 'The bell tells everyone at once but nobody answers back. If the art room ignores it, the bell cannot tell. If one room is slow, the bell may wait for it.',
       body: [
-        'Events are fire and forget. The publisher gets no value back from handlers and has no guaranteed order between them. If you need an ordered answer from each consumer, call them directly.',
-        'In the bus above, one handler that raises stops the loop and the later handlers never run. Wrap each call in `try/except` and log. Guava cache removal listeners, DOM `addEventListener` and Django signals all work this way.',
+        'Events are fire and forget. The publisher gets no value back and no guaranteed order between handlers. If you need an answer from each consumer, call them directly.',
+        'In the bus above, one handler that raises stops the loop and the later handlers never run. Wrapping each call in `try/except` is an isolation policy, and libraries choose differently. A DOM listener that throws does not stop the others. Django `send()` propagates the exception while `send_robust()` catches it.',
       ],
       keyIdea: 'Observer decouples a publisher from many consumers. In return you give up return values, ordering and automatic failure isolation.',
       metrics: { branches: '0', edits: '1 (new handler)', knows: '1 (the bus)', pattern: 'Observer' },
@@ -426,6 +430,36 @@ bus.publish("order_placed", {"user": "ana@example.com", "sku": "SKU-1", "qty": 2
         ],
         answer: 1,
         explain: 'One event with many independent consumers is Observer. The publisher gets no return value, handler order is not guaranteed, and a raising handler can stop the others unless each call is wrapped.',
+      },
+    },
+    // 8b
+    {
+      title: 'Leaks and brokers',
+      tag: 'tradeoff',
+      heading: 'Lapsed listeners, and when you need a real broker',
+      eli5: 'A kid signs up for the bell, then goes home. The bell keeps his name and rings for nobody. Kids must cross their names off. A bell inside one room also vanishes if that room closes.',
+      body: [
+        'The bus holds a strong reference to every handler. A listener that subscribes and never calls `unsubscribe` stays alive and keeps firing: the **lapsed listener** leak. Unsubscribe on teardown, or store a `weakref.WeakMethod` so the bus does not keep it alive.',
+        'This bus lives in one process and loses events on a crash. A broker such as Kafka is the out-of-process cousin, with durable, replayable events.',
+      ],
+      keyIdea: 'An in-process bus keeps its handlers alive until you unsubscribe. When events must survive a crash or cross services, use a durable broker.',
+      metrics: { branches: '0', edits: '1 (new handler)', knows: '1 (the bus)', pattern: 'Observer' },
+      metricTones: { knows: 'good' },
+      scene: {
+        nodes: [
+          blk('listener', A, 'Closed view', 'torn down', 'gray', 'User', { status: 'dim', badge: 'leaked' }),
+          bus(B, { status: 'active' }),
+          blk('broker', C, 'Broker', 'durable log', 'amber', 'Database'),
+        ],
+        links: [link('listener', 'bus', { label: 'strong ref', labelTone: 'warn' }), link('bus', 'broker', { label: 'same idea, durable', style: 'dashed' })],
+        flows: [{ path: ['bus', 'listener'], tone: 'event', label: 'order_placed', duration: 1.3 }],
+        panel: {
+          title: 'Clean up',
+          icon: 'Code',
+          code: 'bus.subscribe("order_placed", view.on_order)\n# view closes\nbus.unsubscribe("order_placed", view.on_order)\n\nref = weakref.WeakMethod(view.on_order)',
+          footer: { text: 'Unsubscribe on teardown', tone: 'warn' },
+        },
+        caption: 'A forgotten subscription keeps firing',
       },
     },
     // 9
@@ -468,7 +502,7 @@ bus.publish("order_placed", {"user": "ana@example.com", "sku": "SKU-1", "qty": 2
       heading: 'State: one class per mode, and the object switches itself',
       eli5: 'Each mode gets its own instruction card: asleep, awake, charging. The robot holds one card at a time and does what it says. When the mode changes, it swaps cards. Each card is a **state**.',
       body: [
-        '**State** gives each lifecycle mode its own class behind an `OrderState` interface. `Pending`, `Paid` and `Shipped` each implement `pay()`, `ship()` and `cancel()` for their own mode.',
+        '**State** gives each lifecycle mode its own class behind an `OrderState` interface. `Pending`, `Paid`, `Shipped` and `Cancelled` each implement `pay()`, `ship()` and `cancel()` for their own mode.',
         '`Order` delegates every call to its current state. A state changes the mode by assigning `order.state = Paid()`. An illegal move, like shipping while pending, raises inside that state.',
       ],
       keyIdea: 'State puts each mode in one class and lets the transitions live next to the behavior they allow.',
@@ -511,24 +545,43 @@ class OrderState(ABC):
     def pay(self, order): ...
     @abstractmethod
     def ship(self, order): ...
+    @abstractmethod
+    def cancel(self, order): ...
 
 class Pending(OrderState):
     def pay(self, order):
         print("payment received"); order.state = Paid()
     def ship(self, order):
         raise RuntimeError("can't ship unpaid order")
+    def cancel(self, order):
+        order.state = Cancelled()
 
 class Paid(OrderState):
     def pay(self, order):  raise RuntimeError("already paid")
     def ship(self, order):
         print("shipping!"); order.state = Shipped()
+    def cancel(self, order):
+        order.state = Cancelled()
+
+class Shipped(OrderState):
+    def pay(self, order):    raise RuntimeError("already paid")
+    def ship(self, order):   raise RuntimeError("already shipped")
+    def cancel(self, order): raise RuntimeError("in transit, cannot cancel")
+
+class Cancelled(OrderState):
+    def pay(self, order):    raise RuntimeError("order cancelled")
+    def ship(self, order):   raise RuntimeError("order cancelled")
+    def cancel(self, order): pass
 
 class Order:
     def __init__(self):
         self.state: OrderState = Pending()
-    def pay(self):  self.state.pay(self)
-    def ship(self): self.state.ship(self)`,
-        highlight: [10, 11, 12, 13, 17, 18, 22, 23, 24],
+    def pay(self):    self.state.pay(self)
+    def ship(self):   self.state.ship(self)
+    def cancel(self): self.state.cancel(self)
+
+o = Order(); o.pay(); o.ship()`,
+        highlight: [13, 15, 22, 29, 34, 38, 39, 43],
       },
     },
     // 11

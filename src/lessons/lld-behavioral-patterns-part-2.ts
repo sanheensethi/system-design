@@ -316,10 +316,10 @@ resp = pipeline(good_req)
       eli5: 'At recess the kids only talk to the teacher. She decides who needs to hear what. A kid can move or leave and nobody else changes. The teacher is the **mediator**.',
       body: [
         'A `DialogMediator` receives `notify(sender, event)` from each widget. It holds the coordination logic and calls the other widgets. A widget keeps one reference, to its mediator.',
-        'Links drop from N squared to N, a hub and spokes. Changing the workflow is editing one file. Chat rooms, wizards and game lobbies fit this shape.',
+        'Each widget holds the mediator and the mediator holds each widget, so directed links drop from N times N minus 1 to 2N. Changing the workflow is editing one file. Chat rooms, wizards and game lobbies fit this shape.',
       ],
       keyIdea: 'Mediator centralizes coordination so objects depend on the hub instead of on each other.',
-      metrics: { edits: '1 (the mediator)', knows: '1 each', cost: '4 links', pattern: 'Mediator' },
+      metrics: { edits: '1 (the mediator)', knows: '1 each', cost: '8 directed links', pattern: 'Mediator' },
       metricTones: { edits: 'good', knows: 'good', cost: 'good' },
       scene: {
         nodes: [field({ status: 'active' }), label(), button(), calendar(), blk('mediator', M, 'DialogMediator', 'notify(sender, event)', 'amber', 'Share2', { status: 'active' })],
@@ -339,9 +339,9 @@ resp = pipeline(good_req)
           title: 'Links before and after',
           icon: 'Table',
           rows: [
-            { text: 'Before, 4 widgets', value: '12 links', tone: 'bad' },
-            { text: 'After, hub and spokes', value: '4 links', tone: 'good' },
-            { text: 'Widget knows', value: 'its mediator' },
+            { text: '4 widgets, before / after', value: '12 / 8 directed', tone: 'good' },
+            { text: '8 widgets, before / after', value: '56 / 16 directed', tone: 'good' },
+            { text: 'Growth', value: 'N squared to about 2N' },
           ],
           footer: { text: 'Workflow lives in one place', tone: 'good' },
         },
@@ -479,10 +479,10 @@ class DateField:
       heading: 'Memento: the object makes its own sealed snapshot',
       eli5: 'Take a photo of your tower before you try something. If it falls, you rebuild from the photo. A friend can keep the photos in a box but cannot change them. The photo is the **memento**.',
       body: [
-        'The `Editor` (originator) creates an `EditorMemento` that holds a deep copy of its state. A `History` (caretaker) stores mementos on a stack and never looks inside them.',
-        '`restore()` is the only place that reads a memento. Add a field and undo still works, because the snapshot copies `__dict__` whole. `frozen=True` stops the caretaker from tampering.',
+        'The `Editor` (originator) creates an `EditorMemento` holding a deep copy of its state. A `History` (caretaker) stacks mementos and never looks inside.',
+        '`restore()` reads the memento. A new field needs no change, since the snapshot copies `__dict__` whole. `frozen=True` only blocks reassigning the field. The dict stays mutable and Python has no access control, so opacity is a convention: an underscore name that `History` never reads.',
       ],
-      keyIdea: 'Memento saves and restores state without exposing it: only the originator can read its own snapshots.',
+      keyIdea: 'Memento saves and restores state without exposing it: by convention only the originator reads its own snapshots.',
       metrics: { edits: '0 (new field just works)', knows: '1 (History)', cost: 'full copy per save', pattern: 'Memento' },
       metricTones: { edits: 'good', knows: 'good' },
       scene: {
@@ -504,9 +504,9 @@ class DateField:
           rows: [
             { text: 'Editor (originator)', value: 'writes and reads', tone: 'good' },
             { text: 'History (caretaker)', value: 'stores only' },
-            { text: 'EditorMemento', value: 'frozen, opaque' },
+            { text: 'EditorMemento', value: 'frozen field, _state name' },
           ],
-          footer: { text: 'Encapsulation survives undo', tone: 'good' },
+          footer: { text: 'Opaque by convention, not enforced', tone: 'warn' },
         },
         caption: 'Snapshot out, restore back in',
       },
@@ -518,7 +518,7 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class EditorMemento:
-    state: dict
+    _state: dict   # underscore: History never reads it
 
 class Editor:
     def __init__(self):
@@ -528,10 +528,10 @@ class Editor:
     def type(self, ch):
         self._buffer.insert(self._cursor, ch); self._cursor += 1
     def snapshot(self) -> EditorMemento:
-        return EditorMemento(state=deepcopy(self.__dict__))
+        return EditorMemento(_state=deepcopy(self.__dict__))
     def restore(self, m: EditorMemento):
         self.__dict__.clear()
-        self.__dict__.update(deepcopy(m.state))
+        self.__dict__.update(deepcopy(m._state))
 
 class History:
     def __init__(self): self._stack = []
@@ -628,7 +628,7 @@ hist.save(ed); ed.type("h"); ed.type("i"); hist.undo(ed)   # back to empty`,
       eli5: 'Each kid only knows how to say "come in, visitor" and tell the visitor what kind of kid they are. The nurse and the dentist each bring their own checklist. The visitor is the **visitor**.',
       body: [
         'Each node has one method, `accept(visitor)`, that calls the matching `visit_x` on the visitor. An operation becomes one class, `Evaluator`, with `visit_num`, `visit_add` and `visit_mul`.',
-        'A new operation is a new visitor class and the node classes are not touched. This is the visitor of Python `ast.NodeVisitor`, which linters and formatters are built on.',
+        'A new operation is a new visitor class and the node classes are not touched. The `ast.NodeVisitor` class in Python is a variant that skips `accept` and picks `visit_<ClassName>` by reflection. `functools.singledispatch` and `match` are other Python options.',
       ],
       keyIdea: 'Visitor moves operations out of the classes into one class per operation, reached through accept.',
       metrics: { edits: '1 new visitor', knows: '1 accept()', cost: '+1 call per node', pattern: 'Visitor' },
@@ -776,7 +776,7 @@ print(counter.count)                 # 5`,
       heading: 'Case: looping over a table by loading it all first',
       eli5: 'You want to hand a sticker to every kid in the school. Asking every kid to stand in the hall at once will not fit. You only need to see one kid at a time.',
       body: [
-        '`all_users()` runs `SELECT * FROM users` and calls `fetchall()`, then builds a list of `User` objects. With 1 billion rows that is about 80 GB, and the process runs out of memory before `notify()` runs for the first user.',
+        '`all_users()` runs `SELECT * FROM users` and calls `fetchall()`, then builds a list of `User` objects. With 1 billion rows at an assumed 80 bytes each that is about 80 GB, and the process runs out of memory before `notify()` runs for the first user.',
         'The caller only needs the next user, one at a time. The code is making the caller pay for the whole collection up front.',
       ],
       keyIdea: 'If the consumer reads one element at a time, materializing the whole collection costs memory it never needed.',
@@ -794,7 +794,7 @@ print(counter.count)                 # 5`,
           title: 'Loading everything',
           icon: 'Code',
           code: 'def all_users():\n    rows = db.execute("SELECT * FROM users").fetchall()\n    return [User(**r) for r in rows]\n\nfor u in all_users():   # never reached\n    notify(u)',
-          footer: { text: 'Out of memory before the first user', tone: 'bad' },
+          footer: { text: 'Out of memory first (80 B per row assumed)', tone: 'bad' },
         },
         caption: 'The loop never starts',
       },
@@ -807,7 +807,7 @@ print(counter.count)                 # 5`,
       eli5: 'Kids line up at the water fountain and you meet one at a time. You never need the whole school in the room. When the line ends, you are done. The line is the **iterator**.',
       body: [
         'An **iterator** gives the next element on demand and signals the end (`StopIteration`). In Python a generator makes one for you: `yield` pauses the function and resumes on the next request.',
-        '`all_users()` fetches 1000 rows, yields them one by one, then fetches the next 1000. Memory stays near 80 KB instead of 80 GB. A `finally` closes the cursor even if the loop stops early.',
+        '`all_users()` fetches 1000 rows, yields them one by one, then fetches the next 1000. Memory stays near 80 KB (1000 rows at the assumed 80 bytes). This needs a server-side or streaming cursor, such as a psycopg2 named cursor or `stream_results`. A default client-side cursor loads every row on `execute`.',
       ],
       keyIdea: 'An iterator lets the caller walk a collection without seeing its internals or holding it all in memory.',
       metrics: { edits: '-', knows: '1 loop', cost: '80 KB at a time', pattern: 'Iterator' },
@@ -828,7 +828,7 @@ print(counter.count)                 # 5`,
             { text: 'Generator, batch of 1000', value: '80 KB', tone: 'good' },
             { text: 'First user available', value: 'after 1 batch', tone: 'good' },
           ],
-          footer: { text: 'Work starts before the data finishes loading', tone: 'good' },
+          footer: { text: 'Assumes 80 B per row and a streaming cursor', tone: 'good' },
         },
         caption: 'The generator pauses at each yield',
       },
@@ -852,19 +852,137 @@ for u in all_users():
         highlight: [5, 9, 10, 11],
       },
     },
+    // 16b
+    {
+      title: 'Hidden structure',
+      tag: 'concept',
+      heading: 'The iterator protocol hides a custom structure',
+      eli5: 'The school keeps its classes in a secret order, by room and by floor. The fountain monitor just says "next kid, please" and you never see the floor plan.',
+      body: [
+        'A class becomes iterable by defining `__iter__`. `Playlist` keeps songs in a tree of folders, but callers write `for song in playlist` and never touch the nodes. The loop still works if the storage changes.',
+        'A generator `__iter__` with `yield from` is the short form. The long form returns an object with `__next__` that raises `StopIteration` at the end.',
+      ],
+      keyIdea: 'Define `__iter__` and callers walk your structure without ever seeing how it is stored.',
+      metrics: { edits: '-', knows: '1 loop', cost: 'no copy made', pattern: 'Iterator' },
+      metricTones: { cost: 'good' },
+      scene: {
+        nodes: [
+          blk('loop', A, 'for song in pl', 'caller', 'green', 'Repeat', { status: 'active' }),
+          blk('playlist', B, 'Playlist', '__iter__', 'violet', 'List', { status: 'active' }),
+          blk('tree', C, 'Folder tree', 'hidden', 'gray', 'Layers', { status: 'dim' }),
+        ],
+        links: [link('loop', 'playlist', { label: 'iter()' }), link('playlist', 'tree', { label: 'walks', style: 'dashed' })],
+        flows: [
+          { path: ['loop', 'playlist'], tone: 'request', label: 'next()', duration: 1.2 },
+          { path: ['playlist', 'tree'], tone: 'request', label: 'yield from', duration: 1.2, delay: 1.3 },
+          { path: ['tree', 'playlist', 'loop'], tone: 'response', label: 'one song', duration: 1.6, delay: 2.6 },
+        ],
+        panel: {
+          title: 'The long form',
+          icon: 'Code',
+          code: 'class Countdown:\n    def __init__(self, n): self.n = n\n    def __iter__(self): return self\n    def __next__(self):\n        if self.n == 0: raise StopIteration\n        self.n -= 1\n        return self.n + 1',
+          footer: { text: 'Same loop, any storage behind it', tone: 'good' },
+        },
+        caption: 'The caller sees songs, never folders',
+      },
+      code: {
+        language: 'python',
+        title: 'Iterating a hidden tree',
+        source: `class Folder:
+    def __init__(self, songs, children=()):
+        self.songs, self.children = songs, list(children)
+
+class Playlist:
+    def __init__(self, root):
+        self._root = root              # hidden structure
+
+    def __iter__(self):
+        yield from self._walk(self._root)
+
+    def _walk(self, folder):
+        yield from folder.songs
+        for child in folder.children:
+            yield from self._walk(child)
+
+root = Folder(["a"], [Folder(["b", "c"])])
+for song in Playlist(root):
+    print(song)                        # a, b, c`,
+        highlight: [9, 10, 13, 15, 18],
+      },
+    },
     // 17
     {
       title: 'One-shot traps',
       tag: 'tradeoff',
-      heading: 'Generators are one-shot, and async streams need back-pressure',
-      eli5: 'A line at the fountain only goes by once. You cannot ask how many kids are in it, jump to the fifth kid, or watch it again. And if kids join faster than they drink, the line grows without end.',
+      heading: 'Generators are one-shot',
+      eli5: 'A line at the fountain only goes by once. You cannot ask how many kids are in it, jump to the fifth kid, or watch it again. When it ends, it is empty.',
       body: [
-        'A generator supports forward iteration once. `len()`, indexing and a second pass all fail, and a second pass is silently empty. Call the function again for a new one. A long-held cursor can also time out, so prefer keyset pagination for slow consumers.',
-        '`async for` streams events without blocking the loop, but nothing bounds the buffer. If a Kafka consumer is faster than `handle`, lag grows. Put a bounded `asyncio.Queue(maxsize=N)` between them. Skip iterators when data fits in memory and you need random access.',
+        'A generator supports forward iteration once. `len()` and indexing raise `TypeError`, while a second pass is silently empty: no error, just no rows. Call the function again for a new generator.',
+        'A long-held cursor can also time out, so prefer keyset pagination for slow consumers. Skip iterators when the data fits in memory and you need random access.',
       ],
-      keyIdea: 'Iterators trade random access and re-reading for constant memory. For async streams, add a bounded queue for back-pressure.',
+      keyIdea: 'Iterators trade random access and re-reading for constant memory.',
       metrics: { edits: '-', knows: '1 loop', cost: 'one pass only', pattern: 'Iterator' },
       metricTones: { cost: 'warn' },
+      scene: {
+        nodes: [
+          blk('gen', A, 'all_users()', 'generator', 'violet', 'Rss', { status: 'active' }),
+          blk('first', B, 'First loop', 'sees every row', 'green', 'Repeat', { status: 'ok' }),
+          blk('second', C, 'Second loop', 'sees nothing', 'gray', 'Repeat', { status: 'dim', chips: [{ text: 'no error', tone: 'warn' }] }),
+        ],
+        links: [link('gen', 'first', { label: 'next()' }), link('gen', 'second', { label: 'exhausted', labelTone: 'warn' })],
+        flows: [
+          { path: ['gen', 'first'], tone: 'response', label: 'rows', count: 2, duration: 1.4 },
+          { path: ['gen', 'second'], tone: 'error', label: 'StopIteration', duration: 1.3, delay: 1.6 },
+        ],
+        panel: {
+          title: 'Where iterators bite',
+          icon: 'Bug',
+          rows: [
+            { text: 'Consume twice', value: 'second pass empty', tone: 'warn' },
+            { text: 'len(), indexing', value: 'TypeError', tone: 'warn' },
+            { text: 'Exception mid-loop', value: 'use try/finally', tone: 'warn' },
+          ],
+        },
+        caption: 'The second loop finds nothing left',
+      },
+      code: {
+        language: 'python',
+        title: 'Exhausted after one pass',
+        source: `users = all_users()              # a generator
+first = [u.id for u in users]    # consumes every row
+second = [u.id for u in users]   # [] with no error
+
+len(users)                       # TypeError
+users[0]                         # TypeError
+
+users = all_users()              # call again for a fresh pass`,
+        highlight: [2, 3, 5, 6],
+      },
+      quiz: {
+        question: 'You call `users = all_users()` on a generator, then run `for u in users` twice in a row. What does the second loop see?',
+        options: [
+          'Every row again, because generators can be reused',
+          'Nothing, and no error is raised',
+          'A `StopIteration` error raised into your code',
+          'Only the rows after the last one the first loop handled',
+        ],
+        answer: 1,
+        explain: 'The first pass exhausts the generator, so the second loop yields nothing and raises nothing. Separately, `len(users)` raises `TypeError` because generators have no length. Call the function again for a fresh pass, or build a list if the data fits in memory.',
+      },
+    },
+    // 17b
+    {
+      title: 'Async back-pressure',
+      tag: 'tradeoff',
+      heading: 'A plain `async for` is already back-pressured',
+      eli5: 'The fountain monitor only calls the next kid when the last one is done, so the line never piles up in the hall. A waiting room with a limit only matters when the monitor and the drinkers work separately.',
+      body: [
+        'A plain `async for ev in stream` with `await handle(ev)` pulls one event at a time, so it is already back-pressured. If `handle` is slower than the producer, lag builds up in the broker, not in your process memory.',
+        'A queue only helps to decouple a fast reader from several slow workers. Unbounded, it grows in memory. `maxsize` restores the bound, because `put()` waits when full.',
+      ],
+      keyIdea: 'A sequential async loop is already back-pressured. Add a queue only to decouple reader and workers, and bound it.',
+      metrics: { edits: '-', knows: '1 loop', cost: 'bounded buffer', pattern: 'Iterator' },
+      metricTones: { cost: 'good' },
       scene: {
         nodes: [blk('source', A, 'Kafka topic', '10k events/s', 'gray', 'Rss'), blk('queue', B, 'asyncio.Queue', 'maxsize=100', 'green', 'Inbox', { status: 'active', chips: [{ text: 'put() waits when full', tone: 'good' }] }), blk('handle', C, 'handle(ev)', 'slower consumer', 'green', 'Cpu', { load: 70 })],
         links: [link('source', 'queue', { label: 'async for' }), link('queue', 'handle', { label: 'get()' })],
@@ -873,46 +991,36 @@ for u in all_users():
           { path: ['queue', 'handle'], tone: 'event', label: 'event', duration: 1.4, delay: 1.5 },
         ],
         panel: {
-          title: 'Where iterators bite',
-          icon: 'Bug',
+          title: 'Where the backlog goes',
+          icon: 'Gauge',
           rows: [
-            { text: 'Consume twice', value: 'second pass empty', tone: 'warn' },
-            { text: 'len(), indexing', value: 'not supported', tone: 'warn' },
-            { text: 'Exception mid-loop', value: 'use try/finally', tone: 'warn' },
-            { text: 'Async, no bound', value: 'lag grows', tone: 'bad' },
+            { text: 'Plain async for', value: 'back-pressured', tone: 'good' },
+            { text: 'Producer faster than handle', value: 'lag in the broker', tone: 'warn' },
+            { text: 'Queue without maxsize', value: 'memory grows', tone: 'bad' },
+            { text: 'Queue, maxsize=100', value: 'bounded', tone: 'good' },
           ],
         },
-        caption: 'A bounded queue limits how far the source runs ahead',
+        caption: 'A bounded queue limits how far the reader runs ahead',
       },
       code: {
         language: 'python',
-        title: 'Async stream with back-pressure',
+        title: 'Plain loop and a bounded queue',
         source: `import asyncio
 
-async def all_events():
-    async for msg in kafka_consumer:
-        yield parse_event(msg)
+async def plain(stream):
+    async for ev in stream:              # one at a time
+        await handle(ev)                 # the reader waits here
 
-async def main():
-    queue = asyncio.Queue(maxsize=100)    # back-pressure
+async def decoupled(stream, workers=4):
+    queue = asyncio.Queue(maxsize=100)   # restores the bound
     async def reader():
-        async for ev in all_events():
-            await queue.put(ev)           # waits when full
-    task = asyncio.create_task(reader())
-    while True:
-        await handle(await queue.get())`,
-        highlight: [8, 10, 11],
-      },
-      quiz: {
-        question: 'You call `users = all_users()` for a generator, print `len(users)`, then loop over it twice. What happens?',
-        options: [
-          'It works: generators can be reused and measured',
-          '`len()` fails because generators have no length, and the second loop sees nothing',
-          'The first loop sees nothing and the second sees all rows',
-          'Both loops see all rows but `len()` returns 0',
-        ],
-        answer: 1,
-        explain: 'A generator is one-shot and has no length. After the first pass it is exhausted, so the second loop yields nothing. Call the function again or materialize a list if the data fits in memory.',
+        async for ev in stream:
+            await queue.put(ev)          # waits when full
+    async def worker():
+        while True:
+            await handle(await queue.get())
+    await asyncio.gather(reader(), *[worker() for _ in range(workers)])`,
+        highlight: [4, 5, 8, 11],
       },
     },
     // 18

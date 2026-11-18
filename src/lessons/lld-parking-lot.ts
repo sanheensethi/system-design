@@ -323,8 +323,8 @@ class Truck(Vehicle):
       heading: 'v4: keep free spots in a map by size',
       eli5: 'The garage keeps three small baskets of keys: one for small slots, one for medium, one for large. A toy just grabs a key from the right basket.',
       body: [
-        'Index the free spots: `free[size]` is a set of spot ids. `park` looks at its own size first, then bigger ones, and pops an id. A set pop and a dict lookup are O(1).',
-        '`leave` puts the id back into the right set. The lot now has a `spots` map from id to `Spot`, so no loop is needed at all.',
+        'Index the free spots: `free[size]` is a set of spot ids. `park` looks at its own size first, then bigger ones, and takes an id by peeking with `next(iter(...))` and then calling `remove`. Both are O(1).',
+        '`leave` puts the id back. The index holds only empty spots, so it replaces the scan and the emptiness check in `fits`. Floors become a grouping and display concern.',
       ],
       keyIdea: 'Trade a little memory for speed: index free spots by size and a park becomes a few dictionary operations.',
       metrics: { classes: '7', find: 'O(1)', safe: 'no', pricing: 'none' },
@@ -337,14 +337,14 @@ class Truck(Vehicle):
         ],
         links: [link('lot', 'free', 'has-a'), link('lot', 'spots', 'has-a')],
         flows: [
-          { path: ['lot', 'free'], tone: 'request', label: 'pop(MEDIUM)', duration: 1.4 },
+          { path: ['lot', 'free'], tone: 'request', label: 'peek(MEDIUM)', duration: 1.4 },
           { path: ['free', 'lot'], tone: 'response', label: 'spot 2', duration: 1.4, delay: 1.5 },
           { path: ['lot', 'spots'], tone: 'request', label: 'spots[2]', duration: 1.4, delay: 3 },
         ],
         panel: {
           title: 'v4 park',
           icon: 'Code',
-          code: 'def park(self, v):\n  for size in Size:\n    if size.value < v.size.value:\n      continue\n    if self.free[size]:\n      sid = self.free[size].pop()\n      self.spots[sid].vehicle = v\n      return sid',
+          code: 'def park(self, v):\n  for size in Size:\n    if size.value >= v.size.value and self.free[size]:\n      sid = next(iter(self.free[size]))\n      self.free[size].remove(sid)\n      self.spots[sid].vehicle = v\n      return sid',
         },
         caption: 'Pick the right basket, take a key',
       },
@@ -367,7 +367,8 @@ class ParkingLot:
             if size.value < v.size.value:
                 continue
             if self.free[size]:
-                sid = self.free[size].pop()
+                sid = next(iter(self.free[size]))   # peek
+                self.free[size].remove(sid)         # take
                 self.spots[sid].vehicle = v
                 return sid
         return None
@@ -376,7 +377,7 @@ class ParkingLot:
         s = self.spots[sid]
         s.vehicle = None
         self.free[s.size].add(sid)`,
-        highlight: [5, 6, 13, 14, 16, 17, 18, 24],
+        highlight: [5, 6, 16, 17, 18, 26],
       },
       quiz: {
         question: 'A car arrives and the MEDIUM set is empty but the LARGE set has free spots. What should v4 do?',
@@ -391,7 +392,7 @@ class ParkingLot:
       heading: 'Pain: two cars, one spot',
       eli5: 'Two toys reach into the large basket at the same moment and both grab the same key. Now two toys sit in one slot and one gets squashed.',
       body: [
-        'Two gate threads call `park` together. Both read `free[LARGE]`, both see spot 5, and both write their vehicle into it. One car is silently overwritten.',
+        'Two gate threads call `park` together. Both run `next(iter(free[LARGE]))` and both see spot 5, because neither has called `remove` yet. Both write their vehicle into spot 5, so one car is silently overwritten. The second `remove(5)` then raises `KeyError`.',
         'The steps "check free" and "take it" are separate. Another thread can run between them. This is a **race condition**, and it only shows up under load, which is when it hurts.',
       ],
       keyIdea: 'Check-then-act on shared state is unsafe unless the whole sequence runs as one unit.',
@@ -412,10 +413,11 @@ class ParkingLot:
           title: 'Interleaving',
           icon: 'GitCompare',
           rows: [
-            { text: 'A: sees free {5}', value: 't=1' },
-            { text: 'B: sees free {5}', value: 't=2', tone: 'warn' },
+            { text: 'A: peeks sid 5', value: 't=1' },
+            { text: 'B: peeks sid 5', value: 't=2', tone: 'warn' },
             { text: 'A: spot 5 = carA', value: 't=3' },
             { text: 'B: spot 5 = carB', value: 't=4', tone: 'bad' },
+            { text: 'B: remove(5) after A', value: 'KeyError', tone: 'bad' },
           ],
           footer: { text: 'Car A vanished', tone: 'bad' },
         },
@@ -449,7 +451,7 @@ class ParkingLot:
         panel: {
           title: 'v5 park',
           icon: 'Code',
-          code: 'def park(self, v):\n  with self.lock:\n    for size in Size:\n      if size.value < v.size.value:\n        continue\n      if self.free[size]:\n        sid = self.free[size].pop()\n        return sid',
+          code: 'def park(self, v):\n  with self.lock:\n    for size in Size:\n      if size.value >= v.size.value and self.free[size]:\n        sid = next(iter(self.free[size]))\n        self.free[size].remove(sid)\n        return sid',
         },
         caption: 'One thread at a time through the block',
       },
@@ -470,7 +472,8 @@ class ParkingLot:
                 if size.value < v.size.value:
                     continue
                 if self.free[size]:
-                    sid = self.free[size].pop()
+                    sid = next(iter(self.free[size]))
+                    self.free[size].remove(sid)
                     self.spots[sid].vehicle = v
                     return sid
             return None
@@ -480,7 +483,7 @@ class ParkingLot:
             s = self.spots[sid]
             s.vehicle = None
             self.free[s.size].add(sid)`,
-        highlight: [8, 10, 20, 21],
+        highlight: [7, 10, 15, 16, 22],
       },
     },
     {
@@ -609,7 +612,7 @@ class WeekendSurge(PricingStrategy):
       heading: 'Ticket: the record that ties entry to exit',
       eli5: 'At the door each toy gets a paper ticket with the time it went in. When it leaves, the guard reads the ticket to work out the fee.',
       body: [
-        'Pricing needs the entry time and the vehicle. A `Ticket` stores the vehicle, the spot id and the entry time. `park` creates it and the lot keeps it by spot id.',
+        'Pricing needs the entry time and the vehicle. A `Ticket` stores the vehicle, the spot id and the entry time. `park` creates it inside the lock and the lot keeps it by spot id.',
         '`checkout(sid, exit_time)` removes the ticket, frees the spot and returns the price from the strategy. Creating a ticket is the only place that reads the clock for entry.',
       ],
       keyIdea: 'A small record object carries the facts that two later steps need, so neither has to look anything up.',
@@ -652,6 +655,14 @@ class ParkingLot:
         self.tickets = {}        # spot id -> Ticket
         # free, spots and lock as in v5
 
+    def park(self, v):
+        with self.lock:
+            sid = self._take_free(v)  # the v5 search, returns a spot id or None
+            if sid is None:
+                return None
+            self.tickets[sid] = Ticket(v, sid, datetime.now())
+            return sid
+
     def checkout(self, sid, out: datetime):
         with self.lock:
             t = self.tickets.pop(sid)
@@ -659,7 +670,7 @@ class ParkingLot:
             s.vehicle = None
             self.free[s.size].add(sid)
         return self.pricing.price(t.vehicle, t.entry, out)`,
-        highlight: [11, 12, 16, 17, 21],
+        highlight: [6, 7, 8, 13, 21, 26],
       },
     },
     {
@@ -708,7 +719,7 @@ class ParkingLot:
       eli5: 'What if the garage is full, or a toy hands back a ticket for a slot that is empty? A good garage answers clearly instead of crashing, and new kinds of slots should be easy to add.',
       body: [
         'Decide what `park` returns when the lot is full: `None`, or a `LotFullError`. Make `leave` and `checkout` reject an unknown spot id instead of corrupting the sets.',
-        'Extensions each map to one class. EV charging is a new `Spot` subtype. Many gates are more threads, which the lock already covers. Per-floor display counts read the free sets.',
+        'Extensions each map to one class. EV charging is a new `Spot` subtype. Many gates are more threads, which the lock already covers. Per-floor display counts need each `Spot` to carry its floor, then you filter the free ids by `spots[id].floor`.',
       ],
       keyIdea: 'Handle full, unknown and duplicate input on purpose, and check that each new feature lands in one class.',
       metrics: { classes: '12', find: 'O(1)', safe: 'yes', pricing: 'pluggable' },
